@@ -579,6 +579,24 @@ u8 and u16 in an expression is a type error — the programmer must
 explicitly choose sign_extend or zero_extend. Literals are the only
 exception: they auto-promote to the type required by context.
 
+### Division with remainder
+
+```
+divmod(a, b, q, r)              // DIV — q := a/b, r := a%b
+sdivmod(a, b, q, r)             // IDIV — signed
+```
+
+Emits a single DIV/IDIV instruction and writes both the quotient and
+remainder. The `/` and `%` operators still work individually when you
+only need one result, but each emits its own DIV. Use `divmod` when
+you need both to avoid dividing twice.
+
+```
+u16 q;
+u16 r;
+divmod(total, 10, q, r);        // one DIV instruction
+```
+
 ### BCD adjustment
 
 Manual packed/unpacked BCD normalization. These are not called
