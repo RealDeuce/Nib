@@ -19,8 +19,9 @@ source.nib → [nib compile] → .nob + .nif
 .asm → [nib asm] → binary
 ```
 
-- **nib compile** (not yet implemented): Per-file parser, type checker,
-  local register allocator. Outputs object files and interface files.
+- **nib compile** (`nib`): Per-file parser, type checker, local register
+  allocator. Outputs `.nir` (pseudo-assembly with virtual registers) and
+  `.nif` (interface for cross-module imports via `use`).
 - **nib bind** (not yet implemented): Whole-program register resolution
   across function boundaries via call graph analysis. Outputs V20 assembly.
 - **nib asm** (`nibasm`): Two-pass V20 assembler. Intel syntax with V20
@@ -40,8 +41,15 @@ source.nib → [nib compile] → .nob + .nif
 - **The binder (not linker)** does whole-program register allocation.
   Register choices propagate up the call stack.
 - **`preserves()` not `clobbers()`** on extern declarations — fail-safe
-  default (unlisted registers assumed clobbered).
+  default (unlisted registers assumed clobbered). `asm {}` blocks allow
+  either keyword (pick whichever is shorter), but not both.
 - **Binder outputs .asm** — human-readable, debuggable intermediate form.
+- **Strong typing** — no implicit integer promotion. Mixing u8 and u16
+  requires explicit `sign_extend()` or `zero_extend()`. Literals auto-promote.
+- **Block scoping** with shadowing. No forward calls within a file.
+- **Flat namespace** for `use` imports. No module prefixes.
+- **Single-pass compilation** — no forward calls, which means the compiler
+  doesn't need a second pass to resolve function signatures within a file.
 
 ## Building
 
@@ -56,12 +64,13 @@ Requires: bison 3.8+, flex 2.6+, clang (FreeBSD base).
 ## Testing
 
 ```sh
+# Compile Nib source to IR + interface
+./nib tests/basic.nib                    # produces tests/basic.nir + tests/basic.nif
+./nib tests/basic.nib --parse-only       # parse and validate only
+
 # Assemble and disassemble roundtrip
 ./nibasm tests/allops.asm -o tests/allops.bin -m tests/allops.map
 ./nibdis -m tests/allops.map tests/allops.bin
-
-# Parse Nib source
-./nib tests/basic.nib
 ```
 
 ## Files
@@ -74,7 +83,8 @@ Requires: bison 3.8+, flex 2.6+, clang (FreeBSD base).
 | `dis.cpp` | Disassembler (wraps `../dreamulator/src/dis86.cpp`) |
 | `nib.y` | Bison grammar (zero conflicts) |
 | `nib.l` | Flex lexer (two modes: normal + asm block) |
-| `ast.h` | Stub AST types for grammar validation |
+| `ast.h` / `ast.c` | AST node types and constructors |
+| `compile.h` / `compile.c` | Compiler backend: symbol table, type checker, .nir/.nif emitters |
 | `tests/` | Test files for parser and assembler |
 
 ## V20 extension mnemonics
