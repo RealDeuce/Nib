@@ -1,0 +1,1096 @@
+/*
+ * bind.c — Nib binder
+ *
+ * Reads .nir files, performs register allocation, and emits .asm.
+ *
+ * Pipeline:
+ *   1. Parse IR into internal representation
+ *   2. Build basic blocks and control flow graph
+ *   3. Liveness analysis (backward dataflow)
+ *   4. Build interference graph
+ *   5. Graph coloring with register classes, pre-coloring, aliases
+ *   6. Spill if needed (reserve BP, re-allocate)
+ *   7. Emit .asm with physical registers
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <ctype.h>
+#include <stdarg.h>
+
+/* ================================================================
+ * Physical register model
+ * ================================================================ */
+
+/* Physical register IDs — unified numbering */
+enum {
+    /* Word registers */
+    PREG_AX = 0, PREG_CX, PREG_DX, PREG_BX,
+    PREG_SP, PREG_BP, PREG_SI, PREG_DI,
+    /* Byte registers */
+    PREG_AL = 8, PREG_CL, PREG_DL, PREG_BL,
+    PREG_AH, PREG_CH, PREG_DH, PREG_BH,
+    /* Segment registers */
+    PREG_ES = 16, PREG_CS, PREG_SS, PREG_DS,
+    /* Special */
+    PREG_NONE = -1,
+    NUM_PREGS = 20
+};
+
+static const char *preg_name[] = {
+    "AX","CX","DX","BX","SP","BP","SI","DI",
+    "AL","CL","DL","BL","AH","CH","DH","BH",
+    "ES","CS","SS","DS"
+};
+
+/* Alias table: word register <-> byte halves */
+static int preg_alias_lo[] = { PREG_AL, PREG_CL, PREG_DL, PREG_BL }; /* AX->AL etc */
+static int preg_alias_hi[] = { PREG_AH, PREG_CH, PREG_DH, PREG_BH }; /* AX->AH etc */
+static int preg_alias_parent[] = {
+    [PREG_AL]=PREG_AX, [PREG_CL]=PREG_CX, [PREG_DL]=PREG_DX, [PREG_BL]=PREG_BX,
+    [PREG_AH]=PREG_AX, [PREG_CH]=PREG_CX, [PREG_DH]=PREG_DX, [PREG_BH]=PREG_BX,
+};
+
+/* Check if two physical registers alias */
+static bool pregs_alias(int a, int b) {
+    if (a == b) return true;
+    /* Word vs its byte halves */
+    if (a < 4 && (b == preg_alias_lo[a] || b == preg_alias_hi[a])) return true;
+    if (b < 4 && (a == preg_alias_lo[b] || a == preg_alias_hi[b])) return true;
+    return false;
+}
+
+/* Parse a register name to PREG_* */
+static int parse_preg(const char *s) {
+    for (int i = 0; i < NUM_PREGS; i++)
+        if (strcasecmp(s, preg_name[i]) == 0)
+            return i;
+    return PREG_NONE;
+}
+
+static bool is_word_reg(int p) { return p >= PREG_AX && p <= PREG_DI; }
+static bool is_byte_reg(int p) { return p >= PREG_AL && p <= PREG_BH; }
+static bool is_seg_reg(int p)  { return p >= PREG_ES && p <= PREG_DS; }
+
+/* ================================================================
+ * IR representation
+ * ================================================================ */
+
+#define MAX_VREGS    256
+#define MAX_INSNS    4096
+#define MAX_BLOCKS   256
+#define MAX_FNS      128
+#define MAX_LABELS   512
+
+/* IR instruction opcodes */
+typedef enum {
+    IR_MOV,         /* mov %d, %s  or  mov %d, imm */
+    IR_ALU,         /* add/sub/etc %d, %l, %r */
+    IR_UNARY,       /* neg/not/etc %d, %s */
+    IR_CMP,         /* cmp.xx %d, %l, %r */
+    IR_JZ,          /* jz %cond, label */
+    IR_JMP,         /* jmp label */
+    IR_CALL,        /* call %d, name, args... */
+    IR_TAILCALL,    /* tailcall name, args... */
+    IR_RET,         /* ret */
+    IR_RETVAL,      /* retval %s */
+    IR_LOAD,        /* load %d, %base[%idx] */
+    IR_STORE,       /* store %base[%idx], %val */
+    IR_LOADMEM,     /* loadmem %d, [addr] */
+    IR_STOREMEM,    /* storemem [addr], %val */
+    IR_FIELD,       /* field %d, %obj, name */
+    IR_STOREFIELD,  /* storefield %obj, name, %val */
+    IR_BOUND,       /* bound %idx, %arr */
+    IR_SETFLAG,     /* setflag FLAG, %val */
+    IR_GETFLAG,     /* getflag %d, FLAG */
+    IR_TOGGLEFLAG,  /* toggleflag FLAG */
+    IR_LOOP,        /* loop label */
+    IR_BREAK,       /* break */
+    IR_CONTINUE,    /* continue */
+    IR_ASM,         /* asm block (opaque) */
+    IR_PREFER,      /* .prefer %v, REG (directive, not real insn) */
+    IR_LABEL,       /* label: */
+    IR_NOP,         /* placeholder */
+} ir_op_t;
+
+typedef struct {
+    ir_op_t op;
+    int     dst;            /* vreg written, or -1 */
+    int     src1, src2;     /* vregs read, or -1 */
+    int     extra_args[8];  /* for calls with >2 args */
+    int     nargs;          /* total args for calls */
+    int     imm;            /* immediate value */
+    bool    has_imm;
+    char    name[64];       /* label target, function name, alu op name */
+    char    asm_body[512];  /* for IR_ASM */
+    char    asm_ann[128];   /* clobbers/preserves text */
+    int     label_id;       /* resolved label index for jumps */
+    int     line;           /* source line */
+} ir_insn_t;
+
+/* Virtual register info */
+typedef struct {
+    int     prefer;         /* preferred physical reg (PREG_*) or PREG_NONE */
+    bool    is_byte;        /* true if this vreg is 8-bit */
+    bool    is_seg;         /* true if segment register */
+    int     assigned;       /* physical reg after coloring, or PREG_NONE */
+    int     spill_slot;     /* stack offset if spilled, or -1 */
+    /* Liveness */
+    int     def_pos;        /* first def position */
+    int     last_use;       /* last use position */
+    bool    live;           /* currently live in analysis */
+} vreg_info_t;
+
+/* Basic block */
+typedef struct {
+    int     start, end;     /* insn index range [start, end) */
+    int     succs[4];       /* successor block indices */
+    int     nsuccs;
+    int     preds[16];      /* predecessor block indices */
+    int     npreds;
+    uint64_t live_in;       /* bitset of live vregs at block entry */
+    uint64_t live_out;      /* bitset of live vregs at block exit */
+} bblock_t;
+
+/* Function */
+typedef struct {
+    char        name[64];
+    bool        is_far;
+    bool        is_interrupt;
+    int         int_vector;
+    bool        is_reentrant;
+    bool        has_chain;
+    char        chain_name[64];
+
+    ir_insn_t   insns[MAX_INSNS];
+    int         ninsns;
+
+    vreg_info_t vregs[MAX_VREGS];
+    int         nvregs;
+
+    int         nparams;
+    char        param_names[16][64];
+    int         param_vregs[16];
+
+    bool        has_return;
+    char        return_type[32];
+
+    bblock_t    blocks[MAX_BLOCKS];
+    int         nblocks;
+
+    /* Labels: name -> insn index */
+    struct { char name[64]; int insn_idx; } labels[MAX_LABELS];
+    int         nlabels;
+
+    /* Allocation state */
+    bool        needs_frame;    /* BP reserved for frame pointer */
+    int         nspill_slots;
+    int         frame_size;     /* total bytes for spills */
+} func_t;
+
+/* Global binder state */
+static func_t functions[MAX_FNS];
+static int nfunctions = 0;
+static FILE *out_asm = NULL;
+
+/* ================================================================
+ * IR parser
+ * ================================================================ */
+
+static char *skip_ws(char *p) {
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+static char *read_word(char *p, char *buf, int bufsz) {
+    p = skip_ws(p);
+    int i = 0;
+    while (*p && !isspace(*p) && *p != ',' && *p != ')' && *p != ']' && i < bufsz-1) {
+        buf[i++] = *p++;
+    }
+    buf[i] = '\0';
+    return p;
+}
+
+static int parse_vreg(char *p, char **endp) {
+    p = skip_ws(p);
+    if (*p != '%') { *endp = p; return -1; }
+    p++;
+    int v = 0;
+    while (isdigit(*p)) { v = v * 10 + (*p - '0'); p++; }
+    *endp = p;
+    return v;
+}
+
+static void skip_comma(char **p) {
+    *p = skip_ws(*p);
+    if (**p == ',') (*p)++;
+}
+
+static void parse_function(FILE *fp, func_t *fn, char *first_line) {
+    /* Parse .fn header: .fn name[, modifiers] */
+    char *p = first_line + 3; /* skip ".fn" */
+    p = skip_ws(p);
+    read_word(p, fn->name, sizeof(fn->name));
+    p += strlen(fn->name);
+
+    /* Parse optional modifiers */
+    while (*p) {
+        p = skip_ws(p);
+        if (*p == ',') p++;
+        p = skip_ws(p);
+        char word[64];
+        read_word(p, word, sizeof(word));
+        if (!word[0]) break;
+        p += strlen(word);
+
+        if (strcmp(word, "far") == 0) fn->is_far = true;
+        else if (strcmp(word, "reentrant") == 0) fn->is_reentrant = true;
+        else if (strncmp(word, "interrupt(", 10) == 0) {
+            fn->is_interrupt = true;
+            fn->int_vector = (int)strtol(word + 10, NULL, 0);
+        }
+        else if (strncmp(word, "chain(", 6) == 0) {
+            fn->has_chain = true;
+            char *e = strchr(word + 6, ')');
+            int len = e ? (int)(e - word - 6) : (int)strlen(word + 6);
+            memcpy(fn->chain_name, word + 6, len);
+            fn->chain_name[len] = '\0';
+        }
+    }
+
+    /* Read body lines until .endfn */
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        /* Strip newline */
+        int len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            line[--len] = '\0';
+
+        p = skip_ws(line);
+        if (!*p || *p == ';') continue; /* blank or comment */
+
+        /* Directives */
+        if (strncmp(p, ".endfn", 6) == 0) break;
+
+        if (strncmp(p, ".param", 6) == 0) {
+            p += 6;
+            int v = parse_vreg(p, &p);
+            skip_comma(&p);
+            char type[32];
+            read_word(p, type, sizeof(type));
+            p += strlen(type);
+            skip_comma(&p);
+            /* Parse quoted name */
+            p = skip_ws(p);
+            if (*p == '"') {
+                p++;
+                char *e = strchr(p, '"');
+                int nlen = e ? (int)(e - p) : 0;
+                if (fn->nparams < 16) {
+                    memcpy(fn->param_names[fn->nparams], p, nlen);
+                    fn->param_names[fn->nparams][nlen] = '\0';
+                    fn->param_vregs[fn->nparams] = v;
+                    fn->nparams++;
+                }
+            }
+            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            /* Set type info */
+            if (v < MAX_VREGS) {
+                fn->vregs[v].is_byte = (strcmp(type, "u8") == 0);
+                fn->vregs[v].is_seg = (strcmp(type, "seg") == 0);
+            }
+            continue;
+        }
+
+        if (strncmp(p, ".returns", 8) == 0) {
+            p += 8;
+            p = skip_ws(p);
+            read_word(p, fn->return_type, sizeof(fn->return_type));
+            fn->has_return = true;
+            continue;
+        }
+
+        if (strncmp(p, ".prefer", 7) == 0) {
+            p += 7;
+            int v = parse_vreg(p, &p);
+            skip_comma(&p);
+            char reg[16];
+            read_word(p, reg, sizeof(reg));
+            int preg = parse_preg(reg);
+            if (v >= 0 && v < MAX_VREGS) {
+                fn->vregs[v].prefer = preg;
+            }
+            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            /* Also add as IR_PREFER so we track it */
+            ir_insn_t *ins = &fn->insns[fn->ninsns++];
+            memset(ins, 0, sizeof(*ins));
+            ins->op = IR_PREFER;
+            ins->dst = v;
+            ins->src1 = ins->src2 = -1;
+            ins->imm = preg;
+            continue;
+        }
+
+        /* Labels */
+        if (*p == '.') {
+            /* Could be .L0: or similar */
+            char *colon = strchr(p, ':');
+            if (colon && colon[1] == '\0') {
+                /* It's a label */
+                *colon = '\0';
+                ir_insn_t *ins = &fn->insns[fn->ninsns];
+                memset(ins, 0, sizeof(*ins));
+                ins->op = IR_LABEL;
+                ins->dst = ins->src1 = ins->src2 = -1;
+                strncpy(ins->name, p, 63);
+                /* Record label position */
+                if (fn->nlabels < MAX_LABELS) {
+                    strncpy(fn->labels[fn->nlabels].name, p, 63);
+                    fn->labels[fn->nlabels].insn_idx = fn->ninsns;
+                    fn->nlabels++;
+                }
+                fn->ninsns++;
+                continue;
+            }
+        }
+
+        /* User labels (no dot prefix) */
+        {
+            char *colon = strchr(p, ':');
+            if (colon && colon[1] == '\0' && isalpha(*p)) {
+                *colon = '\0';
+                ir_insn_t *ins = &fn->insns[fn->ninsns];
+                memset(ins, 0, sizeof(*ins));
+                ins->op = IR_LABEL;
+                ins->dst = ins->src1 = ins->src2 = -1;
+                strncpy(ins->name, p, 63);
+                if (fn->nlabels < MAX_LABELS) {
+                    strncpy(fn->labels[fn->nlabels].name, p, 63);
+                    fn->labels[fn->nlabels].insn_idx = fn->ninsns;
+                    fn->nlabels++;
+                }
+                fn->ninsns++;
+                continue;
+            }
+        }
+
+        /* Instructions */
+        ir_insn_t *ins = &fn->insns[fn->ninsns];
+        memset(ins, 0, sizeof(*ins));
+        ins->dst = ins->src1 = ins->src2 = -1;
+        for (int i = 0; i < 8; i++) ins->extra_args[i] = -1;
+
+        char opname[64];
+        read_word(p, opname, sizeof(opname));
+        p += strlen(opname);
+
+        if (strcmp(opname, "mov") == 0) {
+            ins->op = IR_MOV;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            /* Could be vreg or immediate */
+            p = skip_ws(p);
+            if (*p == '%') {
+                ins->src1 = parse_vreg(p, &p);
+            } else {
+                ins->has_imm = true;
+                ins->imm = (int)strtol(p, &p, 0);
+            }
+        }
+        else if (strcmp(opname, "ret") == 0) {
+            ins->op = IR_RET;
+        }
+        else if (strcmp(opname, "retval") == 0) {
+            ins->op = IR_RETVAL;
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "jmp") == 0) {
+            ins->op = IR_JMP;
+            read_word(p, ins->name, sizeof(ins->name));
+        }
+        else if (strcmp(opname, "jz") == 0) {
+            ins->op = IR_JZ;
+            ins->src1 = parse_vreg(p, &p);
+            skip_comma(&p);
+            read_word(p, ins->name, sizeof(ins->name));
+        }
+        else if (strcmp(opname, "call") == 0) {
+            ins->op = IR_CALL;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            read_word(p, ins->name, sizeof(ins->name));
+            p += strlen(ins->name);
+            /* Parse args */
+            ins->nargs = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int a = parse_vreg(p, &p);
+                if (ins->nargs == 0) ins->src1 = a;
+                else if (ins->nargs == 1) ins->src2 = a;
+                else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
+                ins->nargs++;
+            }
+        }
+        else if (strcmp(opname, "tailcall") == 0) {
+            ins->op = IR_TAILCALL;
+            read_word(p, ins->name, sizeof(ins->name));
+            p += strlen(ins->name);
+            ins->nargs = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int a = parse_vreg(p, &p);
+                if (ins->nargs == 0) ins->src1 = a;
+                else if (ins->nargs == 1) ins->src2 = a;
+                else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
+                ins->nargs++;
+            }
+        }
+        else if (strcmp(opname, "load") == 0) {
+            ins->op = IR_LOAD;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p); /* array */
+            p = skip_ws(p);
+            if (*p == '[') { p++; ins->src2 = parse_vreg(p, &p); } /* index */
+        }
+        else if (strcmp(opname, "store") == 0) {
+            ins->op = IR_STORE;
+            ins->src1 = parse_vreg(p, &p); /* array */
+            p = skip_ws(p);
+            if (*p == '[') { p++; ins->src2 = parse_vreg(p, &p); } /* index */
+            skip_comma(&p);
+            /* skip ], */
+            p = skip_ws(p);
+            if (*p == ']') p++;
+            skip_comma(&p);
+            ins->dst = parse_vreg(p, &p); /* value — stored as "dst" but really src */
+        }
+        else if (strcmp(opname, "loadmem") == 0) {
+            ins->op = IR_LOADMEM;
+            ins->dst = parse_vreg(p, &p);
+            /* Rest is address text — store as name */
+            skip_comma(&p);
+            p = skip_ws(p);
+            strncpy(ins->name, p, 63);
+        }
+        else if (strcmp(opname, "storemem") == 0) {
+            ins->op = IR_STOREMEM;
+            /* Address text then vreg */
+            p = skip_ws(p);
+            /* Read until ], */
+            char *bracket = strrchr(p, ']');
+            if (bracket) {
+                int alen = (int)(bracket - p + 1);
+                memcpy(ins->name, p, alen);
+                ins->name[alen] = '\0';
+                p = bracket + 1;
+                skip_comma(&p);
+                ins->src1 = parse_vreg(p, &p);
+            }
+        }
+        else if (strcmp(opname, "field") == 0) {
+            ins->op = IR_FIELD;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+            skip_comma(&p);
+            read_word(p, ins->name, sizeof(ins->name));
+        }
+        else if (strcmp(opname, "storefield") == 0) {
+            ins->op = IR_STOREFIELD;
+            ins->src1 = parse_vreg(p, &p); /* obj */
+            skip_comma(&p);
+            read_word(p, ins->name, sizeof(ins->name));
+            p += strlen(ins->name);
+            skip_comma(&p);
+            ins->src2 = parse_vreg(p, &p); /* val */
+        }
+        else if (strcmp(opname, "bound") == 0) {
+            ins->op = IR_BOUND;
+            ins->src1 = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src2 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "setflag") == 0) {
+            ins->op = IR_SETFLAG;
+            read_word(p, ins->name, sizeof(ins->name));
+            p += strlen(ins->name);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "getflag") == 0) {
+            ins->op = IR_GETFLAG;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            read_word(p, ins->name, sizeof(ins->name));
+        }
+        else if (strcmp(opname, "toggleflag") == 0) {
+            ins->op = IR_TOGGLEFLAG;
+            read_word(p, ins->name, sizeof(ins->name));
+        }
+        else if (strcmp(opname, "loop") == 0) {
+            ins->op = IR_LOOP;
+            read_word(p, ins->name, sizeof(ins->name));
+        }
+        else if (strcmp(opname, "break") == 0) {
+            ins->op = IR_BREAK;
+        }
+        else if (strcmp(opname, "continue") == 0) {
+            ins->op = IR_CONTINUE;
+        }
+        else if (strcmp(opname, "asm") == 0) {
+            ins->op = IR_ASM;
+            /* The rest of the line contains annotation and body */
+            p = skip_ws(p);
+            /* Find the { ... } */
+            char *brace = strchr(p, '{');
+            if (brace) {
+                /* Annotation is everything before { */
+                int alen = (int)(brace - p);
+                memcpy(ins->asm_ann, p, alen);
+                ins->asm_ann[alen] = '\0';
+                /* Body is between { and } */
+                char *end = strrchr(brace, '}');
+                if (end) {
+                    int blen = (int)(end - brace - 1);
+                    memcpy(ins->asm_body, brace + 1, blen);
+                    ins->asm_body[blen] = '\0';
+                }
+            }
+        }
+        else {
+            /* ALU / CMP / unary — three-operand: op %d, %l, %r
+               or two-operand: op %d, %s */
+            strncpy(ins->name, opname, 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            p = skip_ws(p);
+            if (*p == '%') {
+                ins->src1 = parse_vreg(p, &p);
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p == '%') {
+                    ins->src2 = parse_vreg(p, &p);
+                    ins->op = IR_ALU;
+                } else {
+                    ins->op = IR_UNARY;
+                }
+            } else {
+                ins->op = IR_MOV;
+                ins->has_imm = true;
+                ins->imm = (int)strtol(p, &p, 0);
+            }
+        }
+
+        /* Track max vreg */
+        if (ins->dst >= fn->nvregs) fn->nvregs = ins->dst + 1;
+        if (ins->src1 >= fn->nvregs) fn->nvregs = ins->src1 + 1;
+        if (ins->src2 >= fn->nvregs) fn->nvregs = ins->src2 + 1;
+        for (int i = 0; i < 8; i++)
+            if (ins->extra_args[i] >= fn->nvregs)
+                fn->nvregs = ins->extra_args[i] + 1;
+
+        fn->ninsns++;
+        if (fn->ninsns >= MAX_INSNS) break;
+    }
+}
+
+static void parse_nir(const char *path) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) { perror(path); exit(1); }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        int len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            line[--len] = '\0';
+
+        char *p = skip_ws(line);
+        if (!*p || *p == ';') continue;
+
+        if (strncmp(p, ".fn ", 4) == 0) {
+            if (nfunctions >= MAX_FNS) break;
+            func_t *fn = &functions[nfunctions++];
+            memset(fn, 0, sizeof(*fn));
+            for (int i = 0; i < MAX_VREGS; i++) {
+                fn->vregs[i].prefer = PREG_NONE;
+                fn->vregs[i].assigned = PREG_NONE;
+                fn->vregs[i].spill_slot = -1;
+            }
+            parse_function(fp, fn, p);
+        }
+        /* Skip .global and other top-level directives for now */
+    }
+
+    fclose(fp);
+}
+
+/* ================================================================
+ * Liveness analysis
+ * ================================================================ */
+
+/* Simple linear liveness — no CFG, just scan backward */
+static void compute_liveness(func_t *fn) {
+    /* Initialize */
+    for (int i = 0; i < fn->nvregs; i++) {
+        fn->vregs[i].def_pos = -1;
+        fn->vregs[i].last_use = -1;
+    }
+
+    /* Forward pass: find first def */
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->dst >= 0 && fn->vregs[ins->dst].def_pos < 0)
+            fn->vregs[ins->dst].def_pos = i;
+    }
+
+    /* Backward pass: find last use */
+    for (int i = fn->ninsns - 1; i >= 0; i--) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->src1 >= 0 && fn->vregs[ins->src1].last_use < 0)
+            fn->vregs[ins->src1].last_use = i;
+        if (ins->src2 >= 0 && fn->vregs[ins->src2].last_use < 0)
+            fn->vregs[ins->src2].last_use = i;
+        /* Call args */
+        for (int j = 0; j < 8; j++)
+            if (ins->extra_args[j] >= 0 && fn->vregs[ins->extra_args[j]].last_use < 0)
+                fn->vregs[ins->extra_args[j]].last_use = i;
+        /* dst is also a "use" for stores */
+        if ((ins->op == IR_STORE || ins->op == IR_STOREMEM || ins->op == IR_STOREFIELD) &&
+            ins->dst >= 0 && fn->vregs[ins->dst].last_use < 0)
+            fn->vregs[ins->dst].last_use = i;
+    }
+
+    /* Parameters are defined at position -1 (before first insn) */
+    for (int i = 0; i < fn->nparams; i++) {
+        int v = fn->param_vregs[i];
+        if (v >= 0) fn->vregs[v].def_pos = -1;
+    }
+}
+
+/* Check if two vregs have overlapping live ranges */
+static bool vregs_interfere(func_t *fn, int a, int b) {
+    int a_start = fn->vregs[a].def_pos;
+    int a_end   = fn->vregs[a].last_use;
+    int b_start = fn->vregs[b].def_pos;
+    int b_end   = fn->vregs[b].last_use;
+
+    if (a_start < 0 || a_end < 0 || b_start < 0 || b_end < 0)
+        return false;
+
+    /* Ranges overlap if one starts before the other ends */
+    return !(a_end < b_start || b_end < a_start);
+}
+
+/* ================================================================
+ * Register allocation — graph coloring
+ * ================================================================ */
+
+static void allocate_registers(func_t *fn, bool bp_available) {
+    /* Build list of allocatable word registers */
+    int word_pool[8];
+    int nword = 0;
+    word_pool[nword++] = PREG_AX;
+    word_pool[nword++] = PREG_BX;
+    word_pool[nword++] = PREG_CX;
+    word_pool[nword++] = PREG_DX;
+    word_pool[nword++] = PREG_SI;
+    word_pool[nword++] = PREG_DI;
+    if (bp_available) word_pool[nword++] = PREG_BP;
+
+    int byte_pool[] = { PREG_AL, PREG_AH, PREG_BL, PREG_BH,
+                        PREG_CL, PREG_CH, PREG_DL, PREG_DH };
+    int nbyte = 8;
+
+    /* First pass: assign pre-colored (preferred) vregs */
+    for (int i = 0; i < fn->nvregs; i++) {
+        if (fn->vregs[i].prefer != PREG_NONE) {
+            fn->vregs[i].assigned = fn->vregs[i].prefer;
+        }
+    }
+
+    /* Second pass: assign remaining vregs */
+    for (int i = 0; i < fn->nvregs; i++) {
+        if (fn->vregs[i].assigned != PREG_NONE) continue;
+        if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0) continue;
+
+        int *pool;
+        int poolsz;
+        if (fn->vregs[i].is_seg) {
+            /* Segment regs handled separately */
+            continue;
+        } else if (fn->vregs[i].is_byte) {
+            pool = byte_pool;
+            poolsz = nbyte;
+        } else {
+            pool = word_pool;
+            poolsz = nword;
+        }
+
+        /* Try each register in the pool */
+        bool assigned = false;
+        for (int r = 0; r < poolsz; r++) {
+            int preg = pool[r];
+            bool conflict = false;
+
+            /* Check against all already-assigned vregs */
+            for (int j = 0; j < fn->nvregs; j++) {
+                if (j == i) continue;
+                if (fn->vregs[j].assigned == PREG_NONE) continue;
+                if (!vregs_interfere(fn, i, j)) continue;
+
+                /* Direct conflict */
+                if (fn->vregs[j].assigned == preg) {
+                    conflict = true;
+                    break;
+                }
+                /* Alias conflict */
+                if (pregs_alias(fn->vregs[j].assigned, preg)) {
+                    conflict = true;
+                    break;
+                }
+            }
+
+            if (!conflict) {
+                fn->vregs[i].assigned = preg;
+                assigned = true;
+                break;
+            }
+        }
+
+        if (!assigned) {
+            /* Spill this vreg */
+            fn->vregs[i].spill_slot = fn->nspill_slots++;
+        }
+    }
+}
+
+/* ================================================================
+ * Assembly emission
+ * ================================================================ */
+
+static const char *vreg_asm(func_t *fn, int v) {
+    static char buf[4][32];
+    static int idx = 0;
+    char *b = buf[idx++ & 3];
+
+    if (v < 0) { strcpy(b, "???"); return b; }
+
+    if (fn->vregs[v].assigned != PREG_NONE) {
+        return preg_name[fn->vregs[v].assigned];
+    }
+    if (fn->vregs[v].spill_slot >= 0) {
+        int off = -(fn->vregs[v].spill_slot + 1) * 2;
+        snprintf(b, 32, "[BP%+d]", off);
+        return b;
+    }
+    snprintf(b, 32, "%%_%d", v); /* shouldn't happen */
+    return b;
+}
+
+static void emit_function(func_t *fn) {
+    fprintf(out_asm, "\n; === %s ===\n", fn->name);
+
+    /* Prologue */
+    if (fn->is_interrupt) {
+        /* Save all clobbered registers */
+        fprintf(out_asm, "; interrupt handler vector 0x%02X\n", fn->int_vector);
+        /* For now, save everything used */
+        fprintf(out_asm, "    pusha\n");
+        if (fn->is_reentrant)
+            fprintf(out_asm, "    sti\n");
+    }
+
+    fprintf(out_asm, "%s:\n", fn->name);
+
+    if (fn->needs_frame) {
+        fprintf(out_asm, "    push bp\n");
+        fprintf(out_asm, "    mov bp, sp\n");
+        if (fn->frame_size > 0)
+            fprintf(out_asm, "    sub sp, %d\n", fn->frame_size);
+    }
+
+    /* Body */
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+
+        switch (ins->op) {
+        case IR_PREFER:
+        case IR_NOP:
+            break;
+
+        case IR_LABEL:
+            fprintf(out_asm, "%s:\n", ins->name);
+            break;
+
+        case IR_MOV:
+            if (ins->has_imm) {
+                fprintf(out_asm, "    mov %s, %d\n",
+                        vreg_asm(fn, ins->dst), ins->imm);
+            } else {
+                const char *d = vreg_asm(fn, ins->dst);
+                const char *s = vreg_asm(fn, ins->src1);
+                if (strcmp(d, s) != 0) /* skip self-moves */
+                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+            }
+            break;
+
+        case IR_ALU: {
+            const char *op = ins->name;
+            /* Map IR op names to asm mnemonics */
+            const char *mnem = op;
+            if (strcmp(op, "add") == 0) mnem = "add";
+            else if (strcmp(op, "sub") == 0) mnem = "sub";
+            else if (strcmp(op, "mul") == 0) mnem = "mul";
+            else if (strcmp(op, "and") == 0) mnem = "and";
+            else if (strcmp(op, "or") == 0) mnem = "or";
+            else if (strcmp(op, "xor") == 0) mnem = "xor";
+            else if (strcmp(op, "shl") == 0) mnem = "shl";
+            else if (strcmp(op, "shr") == 0) mnem = "shr";
+            else if (strcmp(op, "sar") == 0) mnem = "sar";
+            else if (strcmp(op, "rol") == 0) mnem = "rol";
+            else if (strcmp(op, "ror") == 0) mnem = "ror";
+            else if (strcmp(op, "rcl") == 0) mnem = "rcl";
+            else if (strcmp(op, "rcr") == 0) mnem = "rcr";
+
+            /* Three-address -> two-address:
+               op %d, %l, %r  becomes  mov %d, %l; op %d, %r */
+            const char *d = vreg_asm(fn, ins->dst);
+            const char *l = vreg_asm(fn, ins->src1);
+            const char *r = vreg_asm(fn, ins->src2);
+            if (strcmp(d, l) != 0)
+                fprintf(out_asm, "    mov %s, %s\n", d, l);
+            fprintf(out_asm, "    %s %s, %s\n", mnem, d, r);
+            break;
+        }
+
+        case IR_UNARY: {
+            const char *d = vreg_asm(fn, ins->dst);
+            const char *s = vreg_asm(fn, ins->src1);
+            if (strcmp(d, s) != 0)
+                fprintf(out_asm, "    mov %s, %s\n", d, s);
+            fprintf(out_asm, "    %s %s\n", ins->name, d);
+            break;
+        }
+
+        case IR_CMP: {
+            /* cmp.xx %d, %l, %r — sets flags, %d is the condition */
+            const char *l = vreg_asm(fn, ins->src1);
+            const char *r = vreg_asm(fn, ins->src2);
+            fprintf(out_asm, "    cmp %s, %s\n", l, r);
+            break;
+        }
+
+        case IR_JZ:
+            /* jz %cond, label — jump if condition is zero (flag not set) */
+            /* The condition was set by a preceding CMP, so we need the
+               right conditional jump. For now, emit generic JZ. */
+            fprintf(out_asm, "    jz %s\n", ins->name);
+            break;
+
+        case IR_JMP:
+            fprintf(out_asm, "    jmp %s\n", ins->name);
+            break;
+
+        case IR_CALL:
+            fprintf(out_asm, "    ; call %s\n", ins->name);
+            fprintf(out_asm, "    call %s\n", ins->name);
+            break;
+
+        case IR_TAILCALL:
+            fprintf(out_asm, "    ; tailcall %s\n", ins->name);
+            /* Tear down frame */
+            if (fn->needs_frame) {
+                fprintf(out_asm, "    mov sp, bp\n");
+                fprintf(out_asm, "    pop bp\n");
+            }
+            fprintf(out_asm, "    jmp %s\n", ins->name);
+            break;
+
+        case IR_RETVAL:
+            /* Move return value to wherever the binder decided */
+            fprintf(out_asm, "    ; retval in %s\n", vreg_asm(fn, ins->src1));
+            break;
+
+        case IR_RET:
+            if (fn->needs_frame) {
+                fprintf(out_asm, "    mov sp, bp\n");
+                fprintf(out_asm, "    pop bp\n");
+            }
+            if (fn->is_interrupt) {
+                fprintf(out_asm, "    popa\n");
+                fprintf(out_asm, "    iret\n");
+            } else {
+                fprintf(out_asm, "    ret\n");
+            }
+            break;
+
+        case IR_LOAD:
+            fprintf(out_asm, "    ; load %s from %s[%s]\n",
+                    vreg_asm(fn, ins->dst),
+                    vreg_asm(fn, ins->src1),
+                    vreg_asm(fn, ins->src2));
+            fprintf(out_asm, "    mov %s, [%s]\n",
+                    vreg_asm(fn, ins->dst),
+                    vreg_asm(fn, ins->src1));
+            break;
+
+        case IR_STORE:
+            fprintf(out_asm, "    mov [%s], %s\n",
+                    vreg_asm(fn, ins->src1),
+                    vreg_asm(fn, ins->dst));
+            break;
+
+        case IR_LOADMEM:
+            fprintf(out_asm, "    mov %s, %s\n",
+                    vreg_asm(fn, ins->dst), ins->name);
+            break;
+
+        case IR_STOREMEM:
+            fprintf(out_asm, "    mov %s, %s\n",
+                    ins->name, vreg_asm(fn, ins->src1));
+            break;
+
+        case IR_FIELD:
+            fprintf(out_asm, "    ; field %s.%s -> %s\n",
+                    vreg_asm(fn, ins->src1), ins->name,
+                    vreg_asm(fn, ins->dst));
+            break;
+
+        case IR_SETFLAG:
+            if (strcmp(ins->name, "CF") == 0) {
+                fprintf(out_asm, "    stc\n"); /* TODO: check value */
+            } else if (strcmp(ins->name, "DF") == 0) {
+                fprintf(out_asm, "    std\n");
+            } else if (strcmp(ins->name, "IF") == 0) {
+                fprintf(out_asm, "    sti\n");
+            }
+            break;
+
+        case IR_GETFLAG:
+            fprintf(out_asm, "    ; getflag %s -> %s\n",
+                    ins->name, vreg_asm(fn, ins->dst));
+            break;
+
+        case IR_TOGGLEFLAG:
+            if (strcmp(ins->name, "CF") == 0)
+                fprintf(out_asm, "    cmc\n");
+            break;
+
+        case IR_LOOP:
+            fprintf(out_asm, "    loop %s\n", ins->name);
+            break;
+
+        case IR_ASM:
+            fprintf(out_asm, "    ; asm %s\n", ins->asm_ann);
+            fprintf(out_asm, "%s\n", ins->asm_body);
+            break;
+
+        case IR_BOUND:
+            fprintf(out_asm, "    ; bound check\n");
+            break;
+
+        case IR_BREAK:
+        case IR_CONTINUE:
+            fprintf(out_asm, "    ; %s (TODO)\n",
+                    ins->op == IR_BREAK ? "break" : "continue");
+            break;
+
+        default:
+            fprintf(out_asm, "    ; unhandled IR op %d\n", ins->op);
+            break;
+        }
+    }
+
+    /* Final ret if not already emitted */
+    if (fn->ninsns == 0 || fn->insns[fn->ninsns-1].op != IR_RET) {
+        if (fn->needs_frame) {
+            fprintf(out_asm, "    mov sp, bp\n");
+            fprintf(out_asm, "    pop bp\n");
+        }
+        if (fn->is_interrupt) {
+            fprintf(out_asm, "    popa\n");
+            fprintf(out_asm, "    iret\n");
+        } else {
+            fprintf(out_asm, "    ret\n");
+        }
+    }
+}
+
+/* ================================================================
+ * Main
+ * ================================================================ */
+
+int main(int argc, char **argv) {
+    const char *outpath = "out.asm";
+    int ninputs = 0;
+    const char *inputs[64];
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            outpath = argv[++i];
+        } else {
+            inputs[ninputs++] = argv[i];
+        }
+    }
+
+    if (ninputs == 0) {
+        fprintf(stderr, "usage: nibbind [-o out.asm] file.nir ...\n");
+        return 1;
+    }
+
+    /* Parse all .nir files */
+    for (int i = 0; i < ninputs; i++)
+        parse_nir(inputs[i]);
+
+    fprintf(stderr, "Loaded %d functions\n", nfunctions);
+
+    /* For each function: liveness, allocation, emit */
+    out_asm = fopen(outpath, "w");
+    if (!out_asm) { perror(outpath); return 1; }
+
+    fprintf(out_asm, "; Nib assembly — generated by nib bind\n");
+
+    for (int i = 0; i < nfunctions; i++) {
+        func_t *fn = &functions[i];
+
+        /* Phase 1: liveness */
+        compute_liveness(fn);
+
+        /* Phase 2: try allocation with BP available */
+        allocate_registers(fn, true);
+
+        /* Phase 3: check if we need spills */
+        if (fn->nspill_slots > 0) {
+            /* Need BP for frame pointer — re-allocate */
+            fn->needs_frame = true;
+            fn->frame_size = fn->nspill_slots * 2;
+            /* Reset assignments */
+            for (int v = 0; v < fn->nvregs; v++) {
+                fn->vregs[v].assigned = PREG_NONE;
+                fn->vregs[v].spill_slot = -1;
+            }
+            fn->nspill_slots = 0;
+            allocate_registers(fn, false);
+            fn->frame_size = fn->nspill_slots * 2;
+        }
+
+        fprintf(stderr, "  %s: %d vregs, %d spills\n",
+                fn->name, fn->nvregs, fn->nspill_slots);
+
+        /* Phase 4: emit */
+        emit_function(fn);
+    }
+
+    fclose(out_asm);
+    fprintf(stderr, "Wrote %s\n", outpath);
+    return 0;
+}
