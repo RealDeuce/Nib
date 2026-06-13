@@ -224,6 +224,12 @@ stmt_t *mk_stmt_goto(const char *label, int line) {
     return s;
 }
 
+stmt_t *mk_stmt_tailcall(expr_t *call_expr, int line) {
+    stmt_t *s = mk_stmt(STMT_TAILCALL, line);
+    s->u.tailcall_expr = call_expr;
+    return s;
+}
+
 stmt_t *mk_stmt_label(const char *name, int line) {
     stmt_t *s = mk_stmt(STMT_LABEL, line);
     s->u.label_name = xstrdup(name);

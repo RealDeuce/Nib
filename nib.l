@@ -72,6 +72,7 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 "bits"                  { return KW_BITS; }
 "trap"                  { return KW_TRAP; }
 "goto"                  { return KW_GOTO; }
+"tailcall"              { return KW_TAILCALL; }
 
  /* ---- Type keywords ---- */
 "u8"                    { return TY_U8; }

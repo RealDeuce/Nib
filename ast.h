@@ -154,6 +154,7 @@ typedef enum {
     STMT_BREAK,
     STMT_CONTINUE,
     STMT_GOTO,
+    STMT_TAILCALL,
     STMT_LABEL,
     STMT_ASM
 } stmt_kind_t;
@@ -192,6 +193,9 @@ struct stmt_node {
 
         /* GOTO */
         char *goto_label;
+
+        /* TAILCALL */
+        expr_t *tailcall_expr;
 
         /* LABEL */
         char *label_name;
@@ -358,6 +362,7 @@ stmt_t     *mk_stmt_return(expr_t *e, int line);
 stmt_t     *mk_stmt_break(int line);
 stmt_t     *mk_stmt_continue(int line);
 stmt_t     *mk_stmt_goto(const char *label, int line);
+stmt_t     *mk_stmt_tailcall(expr_t *call_expr, int line);
 stmt_t     *mk_stmt_label(const char *name, int line);
 stmt_t     *mk_stmt_asm(const char *body, reg_list_t *annotation,
                          bool is_clobbers, bool has_annotation, int line);

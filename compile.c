@@ -885,6 +885,29 @@ static void emit_stmt(stmt_t *s) {
         fprintf(C.nir, "    jmp %s\n", s->u.goto_label);
         break;
     }
+    case STMT_TAILCALL: {
+        /* tailcall expr — must be a function call */
+        expr_t *e = s->u.tailcall_expr;
+        if (e->kind != EXPR_CALL) {
+            cerr(s->line, "tailcall requires a function call");
+            break;
+        }
+        int argc = 0;
+        int arg_vregs[16];
+        for (expr_t *a = e->u.call.args; a; a = a->next) {
+            if (argc < 16)
+                arg_vregs[argc] = emit_expr(a);
+            argc++;
+        }
+        const char *fn_name = "?";
+        if (e->u.call.func->kind == EXPR_IDENT)
+            fn_name = e->u.call.func->u.ident;
+        fprintf(C.nir, "    tailcall %s", fn_name);
+        for (int i = 0; i < argc && i < 16; i++)
+            fprintf(C.nir, ", %%%d", arg_vregs[i]);
+        fprintf(C.nir, "\n");
+        break;
+    }
     case STMT_LABEL: {
         fprintf(C.nir, "%s:\n", s->u.label_name);
         break;
