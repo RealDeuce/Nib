@@ -741,6 +741,58 @@ All registers are assumed clobbered.
 
 ## Control Flow
 
+### Flag checks on operations
+
+An assignment can be followed by a flag-check block that runs handlers
+based on flags set by the operation. This avoids separate flag-checking
+lines after arithmetic.
+
+```
+total := total + amount {
+    CF: { handle_unsigned_overflow(); }
+    OF: { handle_signed_overflow(); }
+    AF: { bcd_fixup(); }
+}
+```
+
+The operation executes first. Then each listed flag is checked in order.
+If the flag is set, its handler block runs. Unlisted flags are ignored.
+
+Only flags set by the preceding operation are meaningful. The compiler
+emits conditional branches after the instruction:
+
+```asm
+    ADD total, amount
+    JNC .no_cf
+    ; handle_unsigned_overflow body
+.no_cf:
+    JNO .no_of
+    ; handle_signed_overflow body
+.no_of:
+```
+
+Single-flag shorthand:
+
+```
+count := count - 1 {
+    CF: { underflow(); }
+}
+```
+
+#### trap
+
+Instead of an inline handler, `trap` fires an interrupt:
+
+```
+total := total + amount {
+    OF: trap;           // emits INTO (INT 4)
+}
+```
+
+For OF, `trap` emits the INTO instruction (INT 4, one byte). For CF
+and AF, `trap` emits an explicit conditional INT — the programmer must
+have an interrupt handler installed for the corresponding vector.
+
 ### if / else
 
 ```
