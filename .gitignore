@@ -8,9 +8,14 @@ lex.yy.c
 nib.output
 bison_report.txt
 
-# Test outputs
+# Build artifacts
+*.o
+
+# Test/compiler outputs
 tests/*.bin
 tests/*.map
+tests/*.nir
+tests/*.nif
 
 # Editor
 *.swp

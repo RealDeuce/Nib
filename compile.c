@@ -263,11 +263,116 @@ static const char *op_str(op_kind_t op) {
 }
 
 /* ================================================================
+ * Type checking helpers
+ * ================================================================ */
+
+static bool types_equal(type_t *a, type_t *b) {
+    if (!a || !b) return a == b;
+    if (a->kind != b->kind) return false;
+    if (a->kind == TYPE_ARRAY_U8 || a->kind == TYPE_ARRAY_U16 || a->kind == TYPE_BCD)
+        return a->array_size == b->array_size;
+    if (a->kind == TYPE_STRUCT)
+        return a->struct_name && b->struct_name &&
+               strcmp(a->struct_name, b->struct_name) == 0;
+    return true;
+}
+
+static bool type_is_scalar(type_t *t) {
+    if (!t) return false;
+    return t->kind == TYPE_U8 || t->kind == TYPE_U16 ||
+           t->kind == TYPE_U32 || t->kind == TYPE_SEG;
+}
+
+static bool type_is_aggregate(type_t *t) {
+    if (!t) return false;
+    return t->kind == TYPE_ARRAY_U8 || t->kind == TYPE_ARRAY_U16 ||
+           t->kind == TYPE_BCD || t->kind == TYPE_STRUCT;
+}
+
+static bool type_is_integer(type_t *t) {
+    if (!t) return false;
+    return t->kind == TYPE_U8 || t->kind == TYPE_U16 || t->kind == TYPE_U32;
+}
+
+static bool type_is_bcd(type_t *t) {
+    return t && t->kind == TYPE_BCD;
+}
+
+static type_t *type_of_element(type_t *t) {
+    if (!t) return NULL;
+    if (t->kind == TYPE_ARRAY_U8) return mk_type(TYPE_U8);
+    if (t->kind == TYPE_ARRAY_U16) return mk_type(TYPE_U16);
+    return NULL;
+}
+
+/* Check two types are compatible for a binary arithmetic operation.
+ * NULL type = literal, promotes to whatever the other side is. */
+static type_t *check_arith(type_t *l, type_t *r, op_kind_t op, int line) {
+    /* Literal promotion: NULL matches anything */
+    if (!l && !r) return mk_type(TYPE_U16); /* two literals — default u16 */
+    if (!l) return r;  /* left is literal, adopt right's type */
+    if (!r) return l;  /* right is literal, adopt left's type */
+
+    /* BCD + BCD */
+    if (type_is_bcd(l) && type_is_bcd(r)) {
+        if (!types_equal(l, r))
+            cerr(line, "BCD operands must have same size: %s vs %s",
+                 type_str(l), type_str(r));
+        if (op != NIB_ADD && op != NIB_SUB)
+            cerr(line, "BCD only supports + and -");
+        return l;
+    }
+
+    /* Can't do arithmetic on aggregates */
+    if (type_is_aggregate(l) || type_is_aggregate(r)) {
+        cerr(line, "cannot perform arithmetic on aggregate types: %s and %s",
+             type_str(l), type_str(r));
+        return mk_type(TYPE_U16);
+    }
+
+    /* Scalar arithmetic — must match sizes */
+    if (type_is_integer(l) && type_is_integer(r)) {
+        if (l->kind != r->kind)
+            cerr(line, "operand size mismatch: %s vs %s",
+                 type_str(l), type_str(r));
+        /* Multiply produces wider result */
+        if (op == NIB_MUL || op == NIB_SMUL) {
+            if (l->kind == TYPE_U16) return mk_type(TYPE_U32);
+        }
+        return l;
+    }
+
+    return l;
+}
+
+/* Check a comparison — operands must match, result is bool */
+static type_t *check_compare(type_t *l, type_t *r, int line) {
+    /* Literal promotion */
+    if (!l || !r) return mk_type(TYPE_BOOL);
+    if (type_is_bcd(l) && type_is_bcd(r)) {
+        if (!types_equal(l, r))
+            cerr(line, "BCD comparison operands must match: %s vs %s",
+                 type_str(l), type_str(r));
+        return mk_type(TYPE_BOOL);
+    }
+    if (type_is_integer(l) && type_is_integer(r)) {
+        if (l->kind != r->kind)
+            cerr(line, "comparison operand size mismatch: %s vs %s",
+                 type_str(l), type_str(r));
+        return mk_type(TYPE_BOOL);
+    }
+    if (type_is_aggregate(l) || type_is_aggregate(r))
+        cerr(line, "cannot compare aggregate types");
+    return mk_type(TYPE_BOOL);
+}
+
+/* ================================================================
  * NIR emission — expression compilation
  * ================================================================ */
 
-/* Emit an expression, return the vreg holding the result */
-static int emit_expr(expr_t *e);
+typedef struct { int vreg; type_t *type; } typed_vreg_t;
+
+static typed_vreg_t emit_expr_typed(expr_t *e);
 
 /* Emit a vreg reference: %N or pinned register name */
 static void emit_vreg(int vreg) {
@@ -278,108 +383,235 @@ static int alloc_vreg(void) {
     return C.next_vreg++;
 }
 
+/* Convenience wrapper that discards the type */
 static int emit_expr(expr_t *e) {
-    if (!e) return -1;
+    return emit_expr_typed(e).vreg;
+}
+
+static typed_vreg_t TV(int vreg, type_t *type) {
+    typed_vreg_t tv = { vreg, type };
+    return tv;
+}
+
+static typed_vreg_t emit_expr_typed(expr_t *e) {
+    if (!e) return TV(-1, NULL);
 
     switch (e->kind) {
     case EXPR_LIT_INT: {
         int r = alloc_vreg();
+        /* Integer literals are untyped — they promote to whatever context needs.
+           We use NULL type to signal "literal, promote me". */
         fprintf(C.nir, "    mov %%%d, %d\n", r, e->u.lit_int);
-        return r;
+        return TV(r, NULL);
     }
     case EXPR_LIT_STR: {
         int r = alloc_vreg();
+        /* String literals are also context-dependent — NULL type signals promote.
+           Single chars can be u8, multi-char can be u8[N]. */
         fprintf(C.nir, "    mov %%%d, \"%s\"\n", r, e->u.lit_str);
-        return r;
+        return TV(r, NULL);
     }
     case EXPR_IDENT: {
         symbol_t *sym = sym_lookup(e->u.ident);
         if (!sym) {
-            /* Could be a function name for a call */
             cerr(e->line, "undefined variable '%s'", e->u.ident);
-            return alloc_vreg();
+            return TV(alloc_vreg(), mk_type(TYPE_U16));
         }
-        return sym->vreg;
+        return TV(sym->vreg, sym->type);
     }
     case EXPR_REG: {
-        /* Look up the pinned register variable */
         const char *name = reg_name_str(e->u.reg.id, e->u.reg.rclass);
         symbol_t *sym = sym_lookup(name);
-        if (sym) return sym->vreg;
-        /* Not declared yet — treat as a reference to the raw register.
-           The binder will handle this. */
+        if (sym) return TV(sym->vreg, sym->type);
+        cerr(e->line, "undeclared register variable '%s'", name);
         int r = alloc_vreg();
-        fprintf(C.nir, "    ; ref %s -> %%%d\n", name, r);
-        return r;
+        type_t *t = (e->u.reg.rclass == REGCLASS_BYTE) ?
+                    mk_type(TYPE_U8) : mk_type(TYPE_U16);
+        return TV(r, t);
     }
     case EXPR_SREG: {
         const char *name = sreg_name(e->u.reg.id);
         symbol_t *sym = sym_lookup(name);
-        if (sym) return sym->vreg;
-        int r = alloc_vreg();
-        fprintf(C.nir, "    ; ref %s -> %%%d\n", name, r);
-        return r;
+        if (sym) return TV(sym->vreg, sym->type);
+        cerr(e->line, "undeclared segment register '%s'", name);
+        return TV(alloc_vreg(), mk_type(TYPE_SEG));
     }
     case EXPR_FLAG: {
         int r = alloc_vreg();
         fprintf(C.nir, "    getflag %%%d, %s\n", r, flag_name(e->u.flag_id));
-        return r;
+        return TV(r, mk_type(TYPE_BOOL));
     }
     case EXPR_BINOP: {
-        int l = emit_expr(e->u.binop.left);
-        int r = emit_expr(e->u.binop.right);
+        op_kind_t op = e->u.binop.op;
+        typed_vreg_t l = emit_expr_typed(e->u.binop.left);
+        typed_vreg_t r = emit_expr_typed(e->u.binop.right);
         int dst = alloc_vreg();
-        fprintf(C.nir, "    %s %%%d, %%%d, %%%d\n", op_str(e->u.binop.op), dst, l, r);
-        return dst;
+        type_t *result_type;
+
+        /* Type check based on operator category */
+        bool is_cmp = (op >= NIB_EQ && op <= NIB_SGTE);
+        bool is_shift = (op == NIB_SHL || op == NIB_SHR || op == NIB_SRSHR ||
+                         op == NIB_ROL || op == NIB_ROR || op == NIB_RCL || op == NIB_RCR);
+
+        if (is_cmp) {
+            result_type = check_compare(l.type, r.type, e->line);
+        } else if (op == NIB_XCHG) {
+            if (!types_equal(l.type, r.type))
+                cerr(e->line, "exchange operands must be same type: %s vs %s",
+                     type_str(l.type), type_str(r.type));
+            result_type = l.type;
+        } else if (is_shift) {
+            if (!type_is_integer(l.type))
+                cerr(e->line, "shift/rotate operand must be integer, got %s",
+                     type_str(l.type));
+            /* Shift count is always u8 (CL), no size match needed */
+            result_type = l.type;
+        } else {
+            result_type = check_arith(l.type, r.type, op, e->line);
+        }
+
+        fprintf(C.nir, "    %s %%%d, %%%d, %%%d\n", op_str(op), dst, l.vreg, r.vreg);
+        return TV(dst, result_type);
     }
     case EXPR_UNOP: {
-        int operand = emit_expr(e->u.unop.operand);
+        typed_vreg_t operand = emit_expr_typed(e->u.unop.operand);
         int dst = alloc_vreg();
-        fprintf(C.nir, "    %s %%%d, %%%d\n", op_str(e->u.unop.op), dst, operand);
-        return dst;
+        type_t *result_type = operand.type;
+
+        switch (e->u.unop.op) {
+        case NIB_NEG:
+            if (operand.type && !type_is_integer(operand.type))
+                cerr(e->line, "neg requires integer operand, got %s",
+                     type_str(operand.type));
+            break;
+        case NIB_NOT:
+            /* NOT works on integers (bitwise) and bools (complement) */
+            if (operand.type && !type_is_integer(operand.type) &&
+                operand.type->kind != TYPE_BOOL)
+                cerr(e->line, "not requires integer or bool operand, got %s",
+                     type_str(operand.type));
+            break;
+        case NIB_ADDR:
+            result_type = mk_type(TYPE_U16); /* address is always u16 */
+            break;
+        case NIB_LNOT:
+            if (operand.type && operand.type->kind != TYPE_BOOL)
+                cerr(e->line, "logical NOT requires bool operand, got %s",
+                     type_str(operand.type));
+            result_type = mk_type(TYPE_BOOL);
+            break;
+        default:
+            break;
+        }
+
+        fprintf(C.nir, "    %s %%%d, %%%d\n", op_str(e->u.unop.op), dst, operand.vreg);
+        return TV(dst, result_type);
     }
     case EXPR_CALL: {
         /* Emit arguments */
         int argc = 0;
         int arg_vregs[16];
+        type_t *arg_types[16];
         for (expr_t *a = e->u.call.args; a; a = a->next) {
-            if (argc < 16)
-                arg_vregs[argc] = emit_expr(a);
+            if (argc < 16) {
+                typed_vreg_t av = emit_expr_typed(a);
+                arg_vregs[argc] = av.vreg;
+                arg_types[argc] = av.type;
+            }
             argc++;
         }
-        /* Get function name */
+        /* Get function name and check against known signatures */
         const char *fn_name = "?";
-        if (e->u.call.func->kind == EXPR_IDENT)
+        type_t *ret_type = mk_type(TYPE_VOID);
+        if (e->u.call.func->kind == EXPR_IDENT) {
             fn_name = e->u.call.func->u.ident;
+            int fi = find_function(fn_name);
+            if (fi >= 0) {
+                if (C.functions[fi].nparams != argc)
+                    cerr(e->line, "'%s' expects %d arguments, got %d",
+                         fn_name, C.functions[fi].nparams, argc);
+                ret_type = C.functions[fi].return_type;
+            }
+            /* builtins — don't error on unknown functions, could be builtins */
+        }
         int dst = alloc_vreg();
         fprintf(C.nir, "    call %%%d, %s", dst, fn_name);
         for (int i = 0; i < argc && i < 16; i++)
             fprintf(C.nir, ", %%%d", arg_vregs[i]);
         fprintf(C.nir, "\n");
-        return dst;
+        return TV(dst, ret_type);
     }
     case EXPR_INDEX: {
-        int arr = emit_expr(e->u.index.array);
-        int idx = emit_expr(e->u.index.index);
+        typed_vreg_t arr = emit_expr_typed(e->u.index.array);
+        typed_vreg_t idx = emit_expr_typed(e->u.index.index);
+
+        if (arr.type && !type_is_aggregate(arr.type))
+            cerr(e->line, "indexing requires array type, got %s", type_str(arr.type));
+        if (idx.type && !type_is_integer(idx.type))
+            cerr(e->line, "array index must be integer, got %s", type_str(idx.type));
+
+        type_t *elem = type_of_element(arr.type);
+        if (!elem) elem = mk_type(TYPE_U8);
+
         int dst = alloc_vreg();
-        fprintf(C.nir, "    load %%%d, %%%d[%%%d]\n", dst, arr, idx);
-        return dst;
+        fprintf(C.nir, "    load %%%d, %%%d[%%%d]\n", dst, arr.vreg, idx.vreg);
+        return TV(dst, elem);
     }
     case EXPR_CHECKED_INDEX: {
-        int arr = emit_expr(e->u.index.array);
-        int idx = emit_expr(e->u.index.index);
+        typed_vreg_t arr = emit_expr_typed(e->u.index.array);
+        typed_vreg_t idx = emit_expr_typed(e->u.index.index);
+
+        if (arr.type && !type_is_aggregate(arr.type))
+            cerr(e->line, "indexing requires array type, got %s", type_str(arr.type));
+        if (idx.type && !type_is_integer(idx.type))
+            cerr(e->line, "array index must be integer, got %s", type_str(idx.type));
+
+        type_t *elem = type_of_element(arr.type);
+        if (!elem) elem = mk_type(TYPE_U8);
+
         int dst = alloc_vreg();
-        fprintf(C.nir, "    bound %%%d, %%%d\n", idx, arr);
-        fprintf(C.nir, "    load %%%d, %%%d[%%%d]\n", dst, arr, idx);
-        return dst;
+        fprintf(C.nir, "    bound %%%d, %%%d\n", idx.vreg, arr.vreg);
+        fprintf(C.nir, "    load %%%d, %%%d[%%%d]\n", dst, arr.vreg, idx.vreg);
+        return TV(dst, elem);
     }
     case EXPR_FIELD: {
-        int obj = emit_expr(e->u.field.object);
+        typed_vreg_t obj = emit_expr_typed(e->u.field.object);
+
+        /* Verify the struct type has this field */
+        type_t *field_type = NULL;
+        if (obj.type && obj.type->kind == TYPE_STRUCT && obj.type->struct_name) {
+            int si = find_struct(obj.type->struct_name);
+            if (si >= 0) {
+                bool found = false;
+                for (field_t *f = C.structs[si].fields; f; f = f->next) {
+                    if (f->name && strcmp(f->name, e->u.field.field_name) == 0) {
+                        found = true;
+                        if (f->is_bits) {
+                            field_type = (f->bits <= 8) ?
+                                         mk_type(TYPE_U8) : mk_type(TYPE_U16);
+                        } else {
+                            field_type = f->type;
+                        }
+                        break;
+                    }
+                }
+                if (!found)
+                    cerr(e->line, "struct '%s' has no field '%s'",
+                         obj.type->struct_name, e->u.field.field_name);
+            } else {
+                cerr(e->line, "unknown struct type '%s'", obj.type->struct_name);
+            }
+        } else if (obj.type) {
+            cerr(e->line, "field access on non-struct type '%s'", type_str(obj.type));
+        }
+        if (!field_type) field_type = mk_type(TYPE_U16);
+
         int dst = alloc_vreg();
-        fprintf(C.nir, "    field %%%d, %%%d, %s\n", dst, obj, e->u.field.field_name);
-        return dst;
+        fprintf(C.nir, "    field %%%d, %%%d, %s\n", dst, obj.vreg, e->u.field.field_name);
+        return TV(dst, field_type);
     }
     case EXPR_MEM: {
+        /* Memory access type depends on context — default to u8 */
         int dst = alloc_vreg();
         fprintf(C.nir, "    loadmem %%%d, [", dst);
         if (e->u.mem.abs_seg) {
@@ -402,12 +634,13 @@ static int emit_expr(expr_t *e) {
             fprintf(C.nir, "0x%04X", e->u.mem.disp);
         }
         fprintf(C.nir, "]\n");
-        return dst;
+        /* Type inferred from declaration context — caller must check */
+        return TV(dst, mk_type(TYPE_U8));
     }
     case EXPR_PAREN:
-        return -1; /* shouldn't reach here — parens are unwrapped */
+        return TV(-1, NULL);
     }
-    return -1;
+    return TV(-1, NULL);
 }
 
 /* ================================================================
@@ -441,13 +674,27 @@ static void emit_stmt(stmt_t *s) {
                     reg_name_str(sym->pinned_reg, sym->pin_class));
         }
         if (s->u.vardecl.init) {
-            int val = emit_expr(s->u.vardecl.init);
-            fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val);
+            typed_vreg_t val = emit_expr_typed(s->u.vardecl.init);
+            /* Type check initializer against declaration type.
+             * NULL val.type means literal — always compatible. */
+            if (val.type && s->u.vardecl.type) {
+                bool ok = types_equal(s->u.vardecl.type, val.type);
+                if (!ok && type_is_integer(s->u.vardecl.type) &&
+                    type_is_integer(val.type) &&
+                    type_size(val.type) <= type_size(s->u.vardecl.type))
+                    ok = true;
+                if (!ok && val.type->kind == TYPE_VOID)
+                    ok = true;
+                if (!ok)
+                    cerr(s->line, "initializer type mismatch: declared %s, got %s",
+                         type_str(s->u.vardecl.type), type_str(val.type));
+            }
+            fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
         }
         break;
     }
     case STMT_ASSIGN: {
-        int val = emit_expr(s->u.assign.value);
+        typed_vreg_t val = emit_expr_typed(s->u.assign.value);
         /* Target could be a variable, register, memory, or field */
         expr_t *t = s->u.assign.target;
         if (t->kind == EXPR_IDENT) {
@@ -455,19 +702,41 @@ static void emit_stmt(stmt_t *s) {
             if (!sym) {
                 cerr(s->line, "undefined variable '%s'", t->u.ident);
             } else {
-                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val);
+                /* Type check — NULL val.type means literal, always ok */
+                if (val.type && sym->type && !types_equal(sym->type, val.type)) {
+                    bool ok = false;
+                    if (type_is_integer(sym->type) && type_is_integer(val.type) &&
+                        type_size(val.type) <= type_size(sym->type))
+                        ok = true;
+                    if (val.type->kind == TYPE_VOID) ok = true;
+                    if (!ok)
+                        cerr(s->line, "assignment type mismatch: '%s' is %s, got %s",
+                             t->u.ident, type_str(sym->type), type_str(val.type));
+                }
+                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
             }
         } else if (t->kind == EXPR_REG || t->kind == EXPR_SREG) {
             const char *name = reg_name_str(t->u.reg.id, t->u.reg.rclass);
             symbol_t *sym = sym_lookup(name);
             if (sym) {
-                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val);
+                if (val.type && sym->type && !types_equal(sym->type, val.type)) {
+                    bool ok = false;
+                    if (type_is_integer(sym->type) && type_is_integer(val.type) &&
+                        type_size(val.type) <= type_size(sym->type))
+                        ok = true;
+                    if (val.type->kind == TYPE_VOID) ok = true;
+                    if (!ok)
+                        cerr(s->line, "assignment type mismatch: '%s' is %s, got %s",
+                             name, type_str(sym->type), type_str(val.type));
+                }
+                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
             } else {
                 cerr(s->line, "undeclared register variable '%s'", name);
             }
         } else if (t->kind == EXPR_FLAG) {
+            /* Flags accept any value — 0 or 1 */
             fprintf(C.nir, "    setflag %s, %%%d\n",
-                    flag_name(t->u.flag_id), val);
+                    flag_name(t->u.flag_id), val.vreg);
         } else if (t->kind == EXPR_MEM) {
             fprintf(C.nir, "    storemem [");
             if (t->u.mem.abs_seg)
@@ -488,22 +757,23 @@ static void emit_stmt(stmt_t *s) {
                 if (np) fprintf(C.nir, "+");
                 fprintf(C.nir, "0x%04X", t->u.mem.disp);
             }
-            fprintf(C.nir, "], %%%d\n", val);
+            fprintf(C.nir, "], %%%d\n", val.vreg);
         } else if (t->kind == EXPR_INDEX) {
             int arr = emit_expr(t->u.index.array);
             int idx = emit_expr(t->u.index.index);
-            fprintf(C.nir, "    store %%%d[%%%d], %%%d\n", arr, idx, val);
+            fprintf(C.nir, "    store %%%d[%%%d], %%%d\n", arr, idx, val.vreg);
         } else if (t->kind == EXPR_FIELD) {
             int obj = emit_expr(t->u.field.object);
             fprintf(C.nir, "    storefield %%%d, %s, %%%d\n",
-                    obj, t->u.field.field_name, val);
+                    obj, t->u.field.field_name, val.vreg);
         } else {
             cerr(s->line, "invalid assignment target");
         }
         break;
     }
     case STMT_TOGGLE_ASSIGN: {
-        int val = emit_expr(s->u.assign.value);
+        typed_vreg_t val_tv = emit_expr_typed(s->u.assign.value);
+        int val = val_tv.vreg;
         expr_t *t = s->u.assign.target;
         if (t->kind == EXPR_FLAG) {
             fprintf(C.nir, "    toggleflag %s\n", flag_name(t->u.flag_id));
@@ -521,7 +791,10 @@ static void emit_stmt(stmt_t *s) {
         break;
     }
     case STMT_IF: {
-        int cond = emit_expr(s->u.if_stmt.cond);
+        typed_vreg_t cond_tv = emit_expr_typed(s->u.if_stmt.cond);
+        int cond = cond_tv.vreg;
+        if (cond_tv.type && cond_tv.type->kind != TYPE_BOOL)
+            cerr(s->line, "if condition must be bool, got %s", type_str(cond_tv.type));
         int lbl_else = C.next_label++;
         int lbl_end = C.next_label++;
         fprintf(C.nir, "    jz %%%d, .L%d\n", cond, lbl_else);
@@ -544,7 +817,10 @@ static void emit_stmt(stmt_t *s) {
         int lbl_top = C.next_label++;
         int lbl_end = C.next_label++;
         fprintf(C.nir, ".L%d:\n", lbl_top);
-        int cond = emit_expr(s->u.while_stmt.cond);
+        typed_vreg_t cond_tv = emit_expr_typed(s->u.while_stmt.cond);
+        int cond = cond_tv.vreg;
+        if (cond_tv.type && cond_tv.type->kind != TYPE_BOOL)
+            cerr(s->line, "while condition must be bool, got %s", type_str(cond_tv.type));
         fprintf(C.nir, "    jz %%%d, .L%d\n", cond, lbl_end);
         C.loop_depth++;
         push_scope();
@@ -573,8 +849,22 @@ static void emit_stmt(stmt_t *s) {
     }
     case STMT_RETURN: {
         if (s->u.ret_expr) {
-            int val = emit_expr(s->u.ret_expr);
-            fprintf(C.nir, "    retval %%%d\n", val);
+            typed_vreg_t val = emit_expr_typed(s->u.ret_expr);
+            if (C.cur_fn_ret) {
+                if (val.type && !types_equal(C.cur_fn_ret, val.type)) {
+                    if (!(type_is_integer(C.cur_fn_ret) && type_is_integer(val.type) &&
+                          type_size(val.type) <= type_size(C.cur_fn_ret)) &&
+                        val.type->kind != TYPE_VOID)
+                        cerr(s->line, "return type mismatch: function returns %s, got %s",
+                             type_str(C.cur_fn_ret), type_str(val.type));
+                }
+            } else {
+                cerr(s->line, "return with value in void function");
+            }
+            fprintf(C.nir, "    retval %%%d\n", val.vreg);
+        } else if (C.cur_fn_ret) {
+            cerr(s->line, "return without value in function returning %s",
+                 type_str(C.cur_fn_ret));
         }
         fprintf(C.nir, "    ret\n");
         break;

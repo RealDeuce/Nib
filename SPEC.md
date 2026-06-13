@@ -558,22 +558,26 @@ port_out(0x90, 0x01);               // OUT 0x90, AL
 
 ```
 sign_extend(val) -> u16 / u32      // CBW or CWD
+zero_extend(val) -> u16 / u32      // MOV AH, 0  or  XOR DX, DX
 ```
 
-Sign-extends a value to the next wider type:
-- `u8` → `u16` (CBW: sign-extend AL into AX)
-- `u16` → `u32` (CWD: sign-extend AX into DX:AX)
+Sign-extends or zero-extends a value to the next wider type:
+- `u8` → `u16`: sign_extend uses CBW, zero_extend clears AH
+- `u16` → `u32`: sign_extend uses CWD, zero_extend clears DX
 
-This is an explicit builtin rather than a cast because it clobbers
+These are explicit builtins rather than casts because they clobber
 the upper register/half (AH or DX).
 
 ```
 u8 offset = 0xFE;                  // -2 in signed
 u16 wide = sign_extend(offset);    // AX = 0xFFFE
+u16 wide = zero_extend(offset);    // AX = 0x00FE
 ```
 
-Zero-extension (unsigned widening) needs no special instruction —
-the upper bits are already zero in a byte register's parent word.
+The compiler does not auto-promote between integer sizes. Mixing
+u8 and u16 in an expression is a type error — the programmer must
+explicitly choose sign_extend or zero_extend. Literals are the only
+exception: they auto-promote to the type required by context.
 
 ### BCD adjustment
 
