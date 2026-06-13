@@ -218,6 +218,18 @@ stmt_t *mk_stmt_continue(int line) {
     return mk_stmt(STMT_CONTINUE, line);
 }
 
+stmt_t *mk_stmt_goto(const char *label, int line) {
+    stmt_t *s = mk_stmt(STMT_GOTO, line);
+    s->u.goto_label = xstrdup(label);
+    return s;
+}
+
+stmt_t *mk_stmt_label(const char *name, int line) {
+    stmt_t *s = mk_stmt(STMT_LABEL, line);
+    s->u.label_name = xstrdup(name);
+    return s;
+}
+
 stmt_t *mk_stmt_asm(const char *body, reg_list_t *annotation,
                      bool is_clobbers, bool has_annotation, int line) {
     stmt_t *s = mk_stmt(STMT_ASM, line);

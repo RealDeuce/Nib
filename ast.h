@@ -153,6 +153,8 @@ typedef enum {
     STMT_RETURN,
     STMT_BREAK,
     STMT_CONTINUE,
+    STMT_GOTO,
+    STMT_LABEL,
     STMT_ASM
 } stmt_kind_t;
 
@@ -187,6 +189,12 @@ struct stmt_node {
 
         /* RETURN */
         expr_t *ret_expr;  /* NULL for bare return */
+
+        /* GOTO */
+        char *goto_label;
+
+        /* LABEL */
+        char *label_name;
 
         /* ASM */
         struct {
@@ -349,6 +357,8 @@ stmt_t     *mk_stmt_for(expr_t *start, int end_val, stmt_t *body, int line);
 stmt_t     *mk_stmt_return(expr_t *e, int line);
 stmt_t     *mk_stmt_break(int line);
 stmt_t     *mk_stmt_continue(int line);
+stmt_t     *mk_stmt_goto(const char *label, int line);
+stmt_t     *mk_stmt_label(const char *name, int line);
 stmt_t     *mk_stmt_asm(const char *body, reg_list_t *annotation,
                          bool is_clobbers, bool has_annotation, int line);
 

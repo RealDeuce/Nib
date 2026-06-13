@@ -881,6 +881,14 @@ static void emit_stmt(stmt_t *s) {
         fprintf(C.nir, "    continue\n");
         break;
     }
+    case STMT_GOTO: {
+        fprintf(C.nir, "    jmp %s\n", s->u.goto_label);
+        break;
+    }
+    case STMT_LABEL: {
+        fprintf(C.nir, "%s:\n", s->u.label_name);
+        break;
+    }
     case STMT_ASM: {
         fprintf(C.nir, "    asm");
         if (s->u.asm_stmt.has_annotation) {

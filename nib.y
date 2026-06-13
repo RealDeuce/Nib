@@ -92,7 +92,7 @@ static void mods_reset(void) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS KW_TRAP
+%token KW_BITS KW_TRAP KW_GOTO
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -337,6 +337,8 @@ stmt
     | KW_RETURN ';'                 { $$ = mk_stmt_return(NULL, yyline); }
     | KW_BREAK ';'                  { $$ = mk_stmt_break(yyline); }
     | KW_CONTINUE ';'              { $$ = mk_stmt_continue(yyline); }
+    | KW_GOTO IDENT ';'            { $$ = mk_stmt_goto($2, yyline); }
+    | IDENT ':'                     { $$ = mk_stmt_label($1, yyline); }
     | asm_block                     { $$ = $1; }
     ;
 
