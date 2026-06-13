@@ -2,6 +2,7 @@
 
 ## Hardware Investigation
 - Trace pins between gate array and V20 CPU — does the gate array use LOCK#?
+- Check if any V20 extension instructions expose TA/TB/TC/LC internal registers
 
 ## Emulator (dreamulator)
 - Implement 8080 emulation mode (BRKEM entry, CALLN exit, register mapping, 8080 CPU core)
