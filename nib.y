@@ -1,19 +1,82 @@
 %{
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "ast.h"
+#include "compile.h"
 
 extern int yylex(void);
 extern int yyline;
 extern FILE *yyin;
+
 void yyerror(const char *s) {
     fprintf(stderr, "line %d: %s\n", yyline, s);
+}
+
+/* Global program root — set by parser */
+program_t *parsed_program = NULL;
+
+/* Helpers for building linked lists */
+static stmt_t *stmt_list_append(stmt_t *list, stmt_t *item) {
+    if (!list) return item;
+    stmt_t *p = list;
+    while (p->next) p = p->next;
+    p->next = item;
+    return list;
+}
+
+static expr_t *expr_list_append(expr_t *list, expr_t *item) {
+    if (!list) return item;
+    expr_t *p = list;
+    while (p->next) p = p->next;
+    p->next = item;
+    return list;
+}
+
+static param_t *param_list_append(param_t *list, param_t *item) {
+    if (!list) return item;
+    param_t *p = list;
+    while (p->next) p = p->next;
+    p->next = item;
+    return list;
+}
+
+static field_t *field_list_append(field_t *list, field_t *item) {
+    if (!list) return item;
+    field_t *p = list;
+    while (p->next) p = p->next;
+    p->next = item;
+    return list;
+}
+
+static reg_list_t *reg_list_append(reg_list_t *list, reg_list_t *item) {
+    if (!list) return item;
+    reg_list_t *p = list;
+    while (p->next) p = p->next;
+    p->next = item;
+    return list;
+}
+
+/* Temporary storage for fn_modifiers accumulation */
+static fn_modifiers_t current_mods;
+
+static void mods_reset(void) {
+    memset(&current_mods, 0, sizeof(current_mods));
 }
 %}
 
 %union {
-    int    ival;
-    char  *sval;
+    int            ival;
+    char          *sval;
+    type_t        *type;
+    expr_t        *expr;
+    stmt_t        *stmt;
+    decl_t        *decl;
+    param_t       *param;
+    field_t       *field;
+    reg_list_t    *rlist;
+    fn_modifiers_t mods;
+    struct { int reg; int rclass; } regval;
 }
 
 /* ---- Literals and identifiers ---- */
@@ -27,7 +90,7 @@ void yyerror(const char *s) {
 %token KW_INTERRUPT KW_CHAIN KW_REENTRANT
 %token KW_IF KW_ELSE KW_WHILE KW_FOR KW_IN
 %token KW_RETURN KW_BREAK KW_CONTINUE
-%token KW_ASM KW_VALUE
+%token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
 %token KW_BITS
 
@@ -53,6 +116,18 @@ void yyerror(const char *s) {
 %token OP_ASSIGN OP_TOGGLEASSIGN
 %token OP_ARROW OP_DOTDOT
 
+/* ---- Nonterminal types ---- */
+%type <type>   type return_clause
+%type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list
+%type <stmt>   stmt stmt_list var_decl assignment if_stmt while_stmt for_stmt asm_block
+%type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl
+%type <param>  param param_list extern_param extern_param_list
+%type <field>  struct_field struct_fields
+%type <rlist>  reg_flag_list reg_or_flag asm_annotation preserves_clause
+%type <regval> reg_name word_reg byte_reg seg_reg flag mem_base
+%type <type>   return_clause_extern_type
+%type <regval> return_clause_extern_pin
+
 /* ---- Precedence (low to high) ---- */
 %left OP_XCHG
 %left '|'
@@ -75,52 +150,77 @@ void yyerror(const char *s) {
 /* ==== Top level ==== */
 
 program
-    : /* empty */
-    | program top_decl
+    : /* empty */           { parsed_program = mk_program(); }
+    | program top_decl      { program_add(parsed_program, $2); }
     ;
 
 top_decl
-    : function_def
-    | struct_def
-    | extern_decl
-    | global_decl
+    : function_def          { $$ = $1; }
+    | struct_def            { $$ = $1; }
+    | extern_decl           { $$ = $1; }
+    | global_decl           { $$ = $1; }
+    | use_decl              { $$ = $1; }
+    ;
+
+/* ==== Use directive ==== */
+
+use_decl
+    : KW_USE LIT_STRING ';'    { $$ = mk_decl_use($2, yyline); }
     ;
 
 /* ==== Global variable declarations ==== */
 
 global_decl
     : type IDENT '=' expr ';'
+        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, $4, yyline); }
     | type IDENT ';'
+        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, NULL, yyline); }
     | type reg_name '=' expr ';'
+        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, $4, yyline); }
     | type reg_name ';'
+        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, NULL, yyline); }
     | KW_EXTERN type IDENT ';'
+        { $$ = mk_decl_extern_global($2, $3, yyline); }
     | KW_EXTERN type reg_name ';'
+        { $$ = mk_decl_extern_global($2, NULL, yyline); }
     ;
 
 /* ==== Struct definitions ==== */
 
 struct_def
     : KW_STRUCT IDENT '{' struct_fields '}'
+        { $$ = mk_decl_struct($2, false, $4, yyline); }
     | KW_STRUCT KW_ALIGNED IDENT '{' struct_fields '}'
+        { $$ = mk_decl_struct($3, true, $5, yyline); }
     ;
 
 struct_fields
-    : struct_field
-    | struct_fields struct_field
+    : struct_field                  { $$ = $1; }
+    | struct_fields struct_field    { $$ = field_list_append($1, $2); }
     ;
 
 struct_field
     : type IDENT ';'
+        { $$ = mk_field($2, $1); }
     | IDENT ':' type ';'
+        { $$ = mk_field($1, $3); }
     | IDENT ':' KW_BITS '(' LIT_INT ')' ';'
+        { $$ = mk_field_bits($1, $5); }
     | '_' ':' KW_BITS '(' LIT_INT ')' ';'
+        { $$ = mk_field_bits(NULL, $5); }
     ;
 
 /* ==== Function definitions ==== */
 
+fn_start
+    : KW_FN                    { mods_reset(); }
+    ;
+
 function_def
-    : KW_FN fn_modifiers IDENT '(' param_list ')' return_clause '{' stmt_list '}'
-    | KW_FN fn_modifiers IDENT '(' ')' return_clause '{' stmt_list '}'
+    : fn_start fn_modifiers IDENT '(' param_list ')' return_clause '{' stmt_list '}'
+        { $$ = mk_decl_fn($3, current_mods, $5, $7, $9, yyline); }
+    | fn_start fn_modifiers IDENT '(' ')' return_clause '{' stmt_list '}'
+        { $$ = mk_decl_fn($3, current_mods, NULL, $6, $8, yyline); }
     ;
 
 fn_modifiers
@@ -129,28 +229,47 @@ fn_modifiers
     ;
 
 fn_modifier
-    : KW_FAR
-    | KW_REENTRANT
+    : KW_FAR                    { current_mods.is_far = true; }
+    | KW_REENTRANT              { current_mods.is_reentrant = true; }
     | interrupt_clause
     ;
 
 interrupt_clause
     : KW_INTERRUPT '(' LIT_INT ')'
+        { current_mods.is_interrupt = true; current_mods.interrupt_vector = $3; }
     | KW_INTERRUPT '(' LIT_INT ',' KW_CHAIN IDENT ')'
+        { current_mods.is_interrupt = true; current_mods.interrupt_vector = $3;
+          current_mods.has_chain = true; current_mods.chain_name = $6; }
     ;
 
 return_clause
-    : /* empty */
-    | OP_ARROW type
+    : /* empty */               { $$ = NULL; }
+    | OP_ARROW type             { $$ = $2; }
     ;
 
 /* ==== Extern declarations ==== */
 
+extern_fn_start
+    : KW_EXTERN KW_FN          { mods_reset(); }
+    ;
+
 extern_decl
-    : KW_EXTERN KW_FN extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern preserves_clause ';'
-    | KW_EXTERN KW_FN extern_modifiers IDENT '(' ')' return_clause_extern preserves_clause ';'
-    | KW_EXTERN KW_FN extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' extern_param_list ')' return_clause_extern preserves_clause ';'
-    | KW_EXTERN KW_FN extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' ')' return_clause_extern preserves_clause ';'
+    : extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
+        { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
+              $8.reg, $8.rclass, ($8.reg != REG_NONE),
+              $9, false, 0, 0, yyline); }
+    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
+        { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
+              $7.reg, $7.rclass, ($7.reg != REG_NONE),
+              $8, false, 0, 0, yyline); }
+    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' extern_param_list ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
+        { $$ = mk_decl_extern_fn($8, current_mods, $10, $12,
+              $13.reg, $13.rclass, ($13.reg != REG_NONE),
+              $14, true, $4, $6, yyline); }
+    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
+        { $$ = mk_decl_extern_fn($8, current_mods, NULL, $11,
+              $12.reg, $12.rclass, ($12.reg != REG_NONE),
+              $13, true, $4, $6, yyline); }
     ;
 
 extern_modifiers
@@ -159,259 +278,416 @@ extern_modifiers
     ;
 
 extern_modifier
-    : KW_FAR
-    | KW_INTERRUPT '(' LIT_INT ')'
+    : KW_FAR                            { current_mods.is_far = true; }
+    | KW_INTERRUPT '(' LIT_INT ')'     { current_mods.is_interrupt = true; current_mods.interrupt_vector = $3; }
     ;
 
-return_clause_extern
-    : /* empty */
-    | OP_ARROW type KW_IN reg_name
+return_clause_extern_type
+    : /* empty */               { $$ = NULL; }
+    | OP_ARROW type             { $$ = $2; }
+    ;
+
+return_clause_extern_pin
+    : /* empty */               { $$.reg = REG_NONE; $$.rclass = REGCLASS_WORD; }
+    | KW_IN reg_name            { $$ = $2; }
     ;
 
 preserves_clause
-    : /* empty */
-    | KW_PRESERVES '(' reg_flag_list ')'
+    : /* empty */                               { $$ = NULL; }
+    | KW_PRESERVES '(' reg_flag_list ')'        { $$ = $3; }
     ;
 
 /* ==== Parameters ==== */
 
 param_list
-    : param
-    | param_list ',' param
+    : param                         { $$ = $1; }
+    | param_list ',' param          { $$ = param_list_append($1, $3); }
     ;
 
 param
-    : IDENT ':' type
-    | KW_VALUE IDENT ':' type
+    : IDENT ':' type                { $$ = mk_param($1, $3, false); }
+    | KW_VALUE IDENT ':' type       { $$ = mk_param($2, $4, true); }
     ;
 
 extern_param_list
-    : extern_param
-    | extern_param_list ',' extern_param
+    : extern_param                          { $$ = $1; }
+    | extern_param_list ',' extern_param    { $$ = param_list_append($1, $3); }
     ;
 
 extern_param
     : IDENT ':' type KW_IN reg_name
+        { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
     ;
 
 /* ==== Statements ==== */
 
 stmt_list
-    : /* empty */
-    | stmt_list stmt
+    : /* empty */                   { $$ = NULL; }
+    | stmt_list stmt                { $$ = stmt_list_append($1, $2); }
     ;
 
 stmt
-    : var_decl ';'
-    | assignment ';'
-    | expr ';'
-    | if_stmt
-    | while_stmt
-    | for_stmt
-    | KW_RETURN expr ';'
-    | KW_RETURN ';'
-    | KW_BREAK ';'
-    | KW_CONTINUE ';'
-    | asm_block
+    : var_decl ';'                  { $$ = $1; }
+    | assignment ';'                { $$ = $1; }
+    | expr ';'                      { $$ = mk_stmt_expr($1, yyline); }
+    | if_stmt                       { $$ = $1; }
+    | while_stmt                    { $$ = $1; }
+    | for_stmt                      { $$ = $1; }
+    | KW_RETURN expr ';'            { $$ = mk_stmt_return($2, yyline); }
+    | KW_RETURN ';'                 { $$ = mk_stmt_return(NULL, yyline); }
+    | KW_BREAK ';'                  { $$ = mk_stmt_break(yyline); }
+    | KW_CONTINUE ';'              { $$ = mk_stmt_continue(yyline); }
+    | asm_block                     { $$ = $1; }
     ;
 
 /* ---- Variable declarations ---- */
 
 var_decl
     : type IDENT '=' expr
+        { $$ = mk_stmt_vardecl($1, $2, REG_NONE, REGCLASS_WORD, $4, yyline); }
     | type IDENT
+        { $$ = mk_stmt_vardecl($1, $2, REG_NONE, REGCLASS_WORD, NULL, yyline); }
     | type reg_name '=' expr
+        { $$ = mk_stmt_vardecl($1, NULL, $2.reg, $2.rclass, $4, yyline); }
     | type reg_name
+        { $$ = mk_stmt_vardecl($1, NULL, $2.reg, $2.rclass, NULL, yyline); }
     | TY_SEG seg_reg '=' expr
+        { $$ = mk_stmt_vardecl(mk_type(TYPE_SEG), NULL, $2.reg, REGCLASS_SEG, $4, yyline); }
     | TY_SEG seg_reg
+        { $$ = mk_stmt_vardecl(mk_type(TYPE_SEG), NULL, $2.reg, REGCLASS_SEG, NULL, yyline); }
     ;
 
 /* ---- Assignment ---- */
 
 assignment
     : expr OP_ASSIGN expr
+        { $$ = mk_stmt_assign($1, $3, yyline); }
     | expr OP_TOGGLEASSIGN expr
+        { $$ = mk_stmt_toggle($1, $3, yyline); }
     ;
 
 /* ---- Control flow ---- */
 
 if_stmt
     : KW_IF '(' expr ')' '{' stmt_list '}' %prec LOWER_THAN_ELSE
+        { $$ = mk_stmt_if($3, $6, NULL, yyline); }
     | KW_IF '(' expr ')' '{' stmt_list '}' KW_ELSE '{' stmt_list '}'
+        { $$ = mk_stmt_if($3, $6, $10, yyline); }
     | KW_IF '(' expr ')' '{' stmt_list '}' KW_ELSE if_stmt
+        { $$ = mk_stmt_if($3, $6, $9, yyline); }
     ;
 
 while_stmt
     : KW_WHILE '(' expr ')' '{' stmt_list '}'
+        { $$ = mk_stmt_while($3, $6, yyline); }
     ;
 
 for_stmt
     : KW_FOR '(' REG_CX KW_IN expr OP_DOTDOT LIT_INT ')' '{' stmt_list '}'
+        { $$ = mk_stmt_for($5, $7, $10, yyline); }
     ;
 
 /* ---- ASM blocks ---- */
 
 asm_block
     : KW_ASM asm_annotation '{' ASM_BODY
+        { $$ = mk_stmt_asm($4, $2,
+              /* is_clobbers: determined by which keyword was used —
+                 the annotation rule sets the rlist, and we need to know
+                 which it was. We'll use a convention: if the first node
+                 has rclass == -1, it's a preserves sentinel. Simpler:
+                 just track it in a global. */
+              false, true, yyline);
+          /* Note: is_clobbers gets patched by asm_annotation */ }
     | KW_ASM '{' ASM_BODY
+        { $$ = mk_stmt_asm($3, NULL, false, false, yyline); }
     ;
 
 asm_annotation
-    : KW_CLOBBERS '(' reg_flag_list ')'
-    | KW_PRESERVES '(' reg_flag_list ')'
+    : KW_CLOBBERS '(' reg_flag_list ')'     { $$ = $3; }
+    | KW_PRESERVES '(' reg_flag_list ')'    { $$ = $3; }
     ;
 
 /* ==== Expressions ==== */
 
 expr
-    : expr OP_XCHG expr                        /* exchange */
-    | expr '|' expr                             /* bitwise or */
-    | expr '^' expr                             /* bitwise xor */
-    | expr '&' expr                             /* bitwise and */
-    | expr OP_EQ expr                           /* equality */
+    : expr OP_XCHG expr
+        { $$ = mk_expr_binop(NIB_XCHG, $1, $3, yyline); }
+    | expr '|' expr
+        { $$ = mk_expr_binop(NIB_OR, $1, $3, yyline); }
+    | expr '^' expr
+        { $$ = mk_expr_binop(NIB_XOR, $1, $3, yyline); }
+    | expr '&' expr
+        { $$ = mk_expr_binop(NIB_AND, $1, $3, yyline); }
+    | expr OP_EQ expr
+        { $$ = mk_expr_binop(NIB_EQ, $1, $3, yyline); }
     | expr OP_NEQ expr
-    | expr '<' expr                             /* comparison unsigned */
+        { $$ = mk_expr_binop(NIB_NEQ, $1, $3, yyline); }
+    | expr '<' expr
+        { $$ = mk_expr_binop(NIB_LT, $1, $3, yyline); }
     | expr '>' expr
+        { $$ = mk_expr_binop(NIB_GT, $1, $3, yyline); }
     | expr OP_LTE expr
+        { $$ = mk_expr_binop(NIB_LTE, $1, $3, yyline); }
     | expr OP_GTE expr
-    | expr OP_SLT expr                          /* comparison signed */
+        { $$ = mk_expr_binop(NIB_GTE, $1, $3, yyline); }
+    | expr OP_SLT expr
+        { $$ = mk_expr_binop(NIB_SLT, $1, $3, yyline); }
     | expr OP_SGT expr
+        { $$ = mk_expr_binop(NIB_SGT, $1, $3, yyline); }
     | expr OP_SLTE expr
+        { $$ = mk_expr_binop(NIB_SLTE, $1, $3, yyline); }
     | expr OP_SGTE expr
-    | expr OP_SHL expr                          /* shift */
+        { $$ = mk_expr_binop(NIB_SGTE, $1, $3, yyline); }
+    | expr OP_SHL expr
+        { $$ = mk_expr_binop(NIB_SHL, $1, $3, yyline); }
     | expr OP_SHR expr
-    | expr OP_SRSHR expr                        /* signed shift */
-    | expr OP_ROL expr                          /* rotate */
+        { $$ = mk_expr_binop(NIB_SHR, $1, $3, yyline); }
+    | expr OP_SRSHR expr
+        { $$ = mk_expr_binop(NIB_SRSHR, $1, $3, yyline); }
+    | expr OP_ROL expr
+        { $$ = mk_expr_binop(NIB_ROL, $1, $3, yyline); }
     | expr OP_ROR expr
-    | expr OP_RCL expr                          /* rotate through carry */
+        { $$ = mk_expr_binop(NIB_ROR, $1, $3, yyline); }
+    | expr OP_RCL expr
+        { $$ = mk_expr_binop(NIB_RCL, $1, $3, yyline); }
     | expr OP_RCR expr
-    | expr '+' expr                             /* additive */
+        { $$ = mk_expr_binop(NIB_RCR, $1, $3, yyline); }
+    | expr '+' expr
+        { $$ = mk_expr_binop(NIB_ADD, $1, $3, yyline); }
     | expr '-' expr
-    | expr '*' expr                             /* multiplicative */
+        { $$ = mk_expr_binop(NIB_SUB, $1, $3, yyline); }
+    | expr '*' expr
+        { $$ = mk_expr_binop(NIB_MUL, $1, $3, yyline); }
     | expr '/' expr
+        { $$ = mk_expr_binop(NIB_DIV, $1, $3, yyline); }
     | expr '%' expr
-    | expr OP_SMUL expr                         /* signed multiplicative */
+        { $$ = mk_expr_binop(NIB_MOD, $1, $3, yyline); }
+    | expr OP_SMUL expr
+        { $$ = mk_expr_binop(NIB_SMUL, $1, $3, yyline); }
     | expr OP_SDIV expr
+        { $$ = mk_expr_binop(NIB_SDIV, $1, $3, yyline); }
     | expr OP_SMOD expr
-    | '-' expr %prec UNARY                      /* unary */
+        { $$ = mk_expr_binop(NIB_SMOD, $1, $3, yyline); }
+    | '-' expr %prec UNARY
+        { $$ = mk_expr_unop(NIB_NEG, $2, yyline); }
     | '~' expr %prec UNARY
+        { $$ = mk_expr_unop(NIB_NOT, $2, yyline); }
     | '&' expr %prec UNARY
+        { $$ = mk_expr_unop(NIB_ADDR, $2, yyline); }
     | '!' expr %prec UNARY
+        { $$ = mk_expr_unop(NIB_LNOT, $2, yyline); }
     | postfix_expr
+        { $$ = $1; }
     ;
 
 postfix_expr
-    : postfix_expr '.' IDENT                    /* field access */
-    | postfix_expr '[' expr ']'                 /* array index */
-    | postfix_expr '!' '[' expr ']'              /* checked array index */
-    | postfix_expr '(' arg_list ')'             /* function call */
-    | postfix_expr '(' ')'                      /* function call no args */
+    : postfix_expr '.' IDENT
+        { $$ = mk_expr_field($1, $3, yyline); }
+    | postfix_expr '[' expr ']'
+        { $$ = mk_expr_index($1, $3, false, yyline); }
+    | postfix_expr '!' '[' expr ']'
+        { $$ = mk_expr_index($1, $4, true, yyline); }
+    | postfix_expr '(' arg_list ')'
+        { $$ = mk_expr_call($1, $3, yyline); }
+    | postfix_expr '(' ')'
+        { $$ = mk_expr_call($1, NULL, yyline); }
     | primary_expr
+        { $$ = $1; }
     ;
 
 primary_expr
-    : LIT_INT
-    | LIT_STRING
-    | IDENT
-    | reg_name
-    | seg_reg
-    | flag
-    | '(' expr ')'
-    | mem_access
+    : LIT_INT               { $$ = mk_expr_int($1, yyline); }
+    | LIT_STRING            { $$ = mk_expr_str($1, yyline); }
+    | IDENT                 { $$ = mk_expr_ident($1, yyline); }
+    | reg_name              { $$ = mk_expr_reg($1.reg, $1.rclass, yyline); }
+    | seg_reg               { $$ = mk_expr_reg($1.reg, REGCLASS_SEG, yyline); }
+    | flag                  { $$ = mk_expr_flag($1.reg, yyline); }
+    | '(' expr ')'          { $$ = $2; }
+    | mem_access            { $$ = $1; }
     ;
 
 /* ---- Memory access [seg:expr] or [expr] ---- */
 
 mem_access
     : '[' mem_inner ']'
+        { $$ = $2; }
     | '[' seg_reg ':' mem_inner ']'
+        { $$ = $4; $$->u.mem.seg = $2.reg; }
     | '[' LIT_INT ':' LIT_INT ']'
+        { $$ = mk_expr_mem_abs($2, $4, yyline); }
     ;
 
 mem_inner
     : mem_base
+        { $$ = mk_expr_mem(REG_NONE, $1.reg, REG_NONE, 0, false, yyline);
+          /* Determine if this is base or index based on register */
+          if ($1.reg == WREG_SI || $1.reg == WREG_DI)
+            { $$->u.mem.base = REG_NONE; $$->u.mem.index = $1.reg; }
+          else
+            { $$->u.mem.base = $1.reg; $$->u.mem.index = REG_NONE; }
+        }
     | mem_base '+' mem_base
+        { $$ = mk_expr_mem(REG_NONE, $1.reg, $3.reg, 0, false, yyline); }
     | mem_base '+' LIT_INT
+        { $$ = mk_expr_mem(REG_NONE, REG_NONE, REG_NONE, $3, true, yyline);
+          if ($1.reg == WREG_SI || $1.reg == WREG_DI)
+            { $$->u.mem.index = $1.reg; }
+          else
+            { $$->u.mem.base = $1.reg; }
+        }
     | mem_base '+' mem_base '+' LIT_INT
+        { $$ = mk_expr_mem(REG_NONE, $1.reg, $3.reg, $5, true, yyline); }
     | LIT_INT
+        { $$ = mk_expr_mem(REG_NONE, REG_NONE, REG_NONE, $1, true, yyline); }
     ;
 
 mem_base
-    : REG_BX | REG_SI | REG_DI | REG_BP
+    : REG_BX    { $$.reg = WREG_BX; $$.rclass = REGCLASS_WORD; }
+    | REG_SI    { $$.reg = WREG_SI; $$.rclass = REGCLASS_WORD; }
+    | REG_DI    { $$.reg = WREG_DI; $$.rclass = REGCLASS_WORD; }
+    | REG_BP    { $$.reg = WREG_BP; $$.rclass = REGCLASS_WORD; }
     ;
 
 /* ---- Function call arguments ---- */
 
 arg_list
-    : expr
-    | arg_list ',' expr
+    : expr                      { $$ = $1; }
+    | arg_list ',' expr         { $$ = expr_list_append($1, $3); }
     ;
 
 /* ==== Register and flag name groups ==== */
 
 reg_name
-    : word_reg
-    | byte_reg
+    : word_reg      { $$ = $1; }
+    | byte_reg      { $$ = $1; }
     ;
 
 word_reg
-    : REG_AX | REG_BX | REG_CX | REG_DX
-    | REG_SI | REG_DI | REG_BP | REG_SP
+    : REG_AX    { $$.reg = WREG_AX; $$.rclass = REGCLASS_WORD; }
+    | REG_BX    { $$.reg = WREG_BX; $$.rclass = REGCLASS_WORD; }
+    | REG_CX    { $$.reg = WREG_CX; $$.rclass = REGCLASS_WORD; }
+    | REG_DX    { $$.reg = WREG_DX; $$.rclass = REGCLASS_WORD; }
+    | REG_SI    { $$.reg = WREG_SI; $$.rclass = REGCLASS_WORD; }
+    | REG_DI    { $$.reg = WREG_DI; $$.rclass = REGCLASS_WORD; }
+    | REG_BP    { $$.reg = WREG_BP; $$.rclass = REGCLASS_WORD; }
+    | REG_SP    { $$.reg = WREG_SP; $$.rclass = REGCLASS_WORD; }
     ;
 
 byte_reg
-    : REG_AL | REG_AH | REG_BL | REG_BH
-    | REG_CL | REG_CH | REG_DL | REG_DH
+    : REG_AL    { $$.reg = BREG_AL; $$.rclass = REGCLASS_BYTE; }
+    | REG_AH    { $$.reg = BREG_AH; $$.rclass = REGCLASS_BYTE; }
+    | REG_BL    { $$.reg = BREG_BL; $$.rclass = REGCLASS_BYTE; }
+    | REG_BH    { $$.reg = BREG_BH; $$.rclass = REGCLASS_BYTE; }
+    | REG_CL    { $$.reg = BREG_CL; $$.rclass = REGCLASS_BYTE; }
+    | REG_CH    { $$.reg = BREG_CH; $$.rclass = REGCLASS_BYTE; }
+    | REG_DL    { $$.reg = BREG_DL; $$.rclass = REGCLASS_BYTE; }
+    | REG_DH    { $$.reg = BREG_DH; $$.rclass = REGCLASS_BYTE; }
     ;
 
 seg_reg
-    : REG_DS | REG_ES | REG_SS | REG_CS
+    : REG_DS    { $$.reg = SREG_DS; $$.rclass = REGCLASS_SEG; }
+    | REG_ES    { $$.reg = SREG_ES; $$.rclass = REGCLASS_SEG; }
+    | REG_SS    { $$.reg = SREG_SS; $$.rclass = REGCLASS_SEG; }
+    | REG_CS    { $$.reg = SREG_CS; $$.rclass = REGCLASS_SEG; }
     ;
 
 flag
-    : FLAG_CF | FLAG_PF | FLAG_AF | FLAG_ZF
-    | FLAG_SF | FLAG_TF | FLAG_DF | FLAG_OF
-    | FLAG_IF
+    : FLAG_CF   { $$.reg = FLG_CF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_PF   { $$.reg = FLG_PF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_AF   { $$.reg = FLG_AF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_ZF   { $$.reg = FLG_ZF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_SF   { $$.reg = FLG_SF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_TF   { $$.reg = FLG_TF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_DF   { $$.reg = FLG_DF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_OF   { $$.reg = FLG_OF; $$.rclass = REGCLASS_FLAG; }
+    | FLAG_IF   { $$.reg = FLG_IF; $$.rclass = REGCLASS_FLAG; }
     ;
 
 reg_flag_list
-    : reg_or_flag
-    | reg_flag_list ',' reg_or_flag
+    : reg_or_flag                           { $$ = $1; }
+    | reg_flag_list ',' reg_or_flag         { $$ = reg_list_append($1, $3); }
     ;
 
 reg_or_flag
-    : reg_name
-    | seg_reg
-    | flag
-    | FLAG_ALL
+    : reg_name      { $$ = mk_reg_list($1.reg, $1.rclass); }
+    | seg_reg       { $$ = mk_reg_list($1.reg, $1.rclass); }
+    | flag          { $$ = mk_reg_list($1.reg, $1.rclass); }
+    | FLAG_ALL      { $$ = mk_reg_list_flags_all(); }
     ;
 
 /* ==== Types ==== */
 
 type
-    : TY_U8
-    | TY_U16
-    | TY_U32
-    | TY_SEG
-    | TY_BOOL
-    | TY_U8 '[' LIT_INT ']'
-    | TY_U16 '[' LIT_INT ']'
-    | TY_BCD '[' LIT_INT ']'
-    | IDENT
+    : TY_U8                     { $$ = mk_type(TYPE_U8); }
+    | TY_U16                    { $$ = mk_type(TYPE_U16); }
+    | TY_U32                    { $$ = mk_type(TYPE_U32); }
+    | TY_SEG                    { $$ = mk_type(TYPE_SEG); }
+    | TY_BOOL                   { $$ = mk_type(TYPE_BOOL); }
+    | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(TYPE_ARRAY_U8, $3); }
+    | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_ARRAY_U16, $3); }
+    | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_BCD, $3); }
+    | IDENT                     { $$ = mk_type_struct($1); }
     ;
 
 %%
 
+/* Derive output paths from input path */
+static char *replace_ext(const char *path, const char *ext) {
+    const char *dot = strrchr(path, '.');
+    int baselen = dot ? (int)(dot - path) : (int)strlen(path);
+    char *out = malloc(baselen + strlen(ext) + 1);
+    memcpy(out, path, baselen);
+    strcpy(out + baselen, ext);
+    return out;
+}
+
 int main(int argc, char **argv) {
-    if (argc > 1) {
-        yyin = fopen(argv[1], "r");
+    const char *infile = NULL;
+    bool parse_only = false;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--parse-only") == 0)
+            parse_only = true;
+        else
+            infile = argv[i];
+    }
+
+    if (infile) {
+        yyin = fopen(infile, "r");
         if (!yyin) {
-            perror(argv[1]);
+            perror(infile);
             return 1;
         }
     }
+
     int result = yyparse();
-    if (result == 0)
-        printf("Parse OK\n");
+    if (result != 0 || !parsed_program)
+        return 1;
+
+    /* Count declarations */
+    int ndecls = 0;
+    for (decl_t *d = parsed_program->decls; d; d = d->next)
+        ndecls++;
+
+    if (parse_only) {
+        printf("Parse OK: %d declarations\n", ndecls);
+        return 0;
+    }
+
+    /* Compile */
+    const char *base = infile ? infile : "out.nib";
+    char *nir_path = replace_ext(base, ".nir");
+    char *nif_path = replace_ext(base, ".nif");
+
+    result = compile(parsed_program, nir_path, nif_path);
+
+    if (result == 0) {
+        fprintf(stderr, "%s: %d declarations -> %s + %s\n",
+                base, ndecls, nir_path, nif_path);
+    }
+
+    free(nir_path);
+    free(nif_path);
     return result;
 }

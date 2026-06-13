@@ -11,8 +11,8 @@ nib.tab.c nib.tab.h: nib.y
 lex.yy.c: nib.l nib.tab.h
 	$(FLEX) nib.l
 
-nib: nib.tab.c lex.yy.c ast.h
-	$(CC) $(CFLAGS) -o nib nib.tab.c lex.yy.c
+nib: nib.tab.c lex.yy.c ast.h ast.c compile.c compile.h
+	$(CC) $(CFLAGS) -o nib nib.tab.c lex.yy.c ast.c compile.c
 
 nibasm: asm.c
 	$(CC) $(CFLAGS) -o nibasm asm.c

@@ -66,6 +66,7 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 "break"                 { return KW_BREAK; }
 "continue"              { return KW_CONTINUE; }
 "value"                 { return KW_VALUE; }
+"use"                   { return KW_USE; }
 "preserves"             { return KW_PRESERVES; }
 "clobbers"              { return KW_CLOBBERS; }
 "bits"                  { return KW_BITS; }
