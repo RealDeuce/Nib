@@ -755,8 +755,18 @@ total := total + amount {
 }
 ```
 
-The operation executes first. Then each listed flag is checked in order.
-If the flag is set, its handler block runs. Unlisted flags are ignored.
+The operation executes first. Then each case is checked in order. If
+any flag in the case's list is set, its handler block runs. Unlisted
+flags are ignored. There is no fall-through between cases.
+
+Multiple flags in a single case are OR-ed — any one triggers the handler:
+
+```
+total := total + amount {
+    CF, OF: { handle_any_overflow(); }
+    ZF: { result_was_zero(); }
+}
+```
 
 Only flags set by the preceding operation are meaningful. The compiler
 emits conditional branches after the instruction:
