@@ -13,17 +13,16 @@ assembly.
 ## Toolchain
 
 ```
-source.nib  --[nib compile]-->  object.nob + interface.nif
-.nob + .nif  --[nib bind]-->  assembly.asm
+source.nib + deps.nif  --[nib compile]-->  .nir + .nif
+.nir files  --[nib bind]-->  assembly.asm
 .asm  --[nib asm]-->  binary
 ```
 
 For convenience, `nib build` runs all three stages.
 
 - **nib compile**: Per-file compilation. Parses, type-checks, performs local
-  register allocation, emits object code with relocatable register references,
-  and outputs an interface file describing each function's register
-  requirements and clobber set.
+  register allocation, emits Nib IR (pseudo-assembly with virtual registers),
+  and outputs an interface file consumed by other compilations via `use`.
 
 - **nib bind**: Whole-program pass. Builds the call graph, propagates register
   assignments across function boundaries, resolves conflicts by inserting
@@ -1245,6 +1244,55 @@ fn interrupt(0x08, chain old) reentrant system_timer() {
 - `interrupt` functions cannot be called directly from Nib code.
 - The vector number must be a constant (0x00-0xFF).
 - `chain` names are scoped to the function body.
+
+
+## Modules
+
+### use
+
+The `use` directive imports a module's interface (.nif file) so its
+functions can be called from the current compilation unit.
+
+```
+use "lcd.nif";
+use "../drivers/keyboard.nif";
+```
+
+The path is a string literal, resolved relative to the source file's
+directory. No implicit search paths.
+
+After `use`, the module's functions are available by their names:
+
+```
+use "lcd.nif";
+
+fn main() {
+    lcd_clear();
+    lcd_putchar(0x41);
+}
+```
+
+The compiler reads the .nif to type-check calls and record call graph
+edges. It does not read the .nir (implementation).
+
+### Compiler outputs
+
+Each source file compiles to two files:
+
+- **`.nir`** (Nib IR): Pseudo-assembly with virtual registers and
+  metadata directives (`.fn`, `.param`, `.prefer`, `.calls`, etc).
+  Consumed by the binder.
+- **`.nif`** (Nib interface): Function signatures, parameter types,
+  preferred register assignments. Consumed by `use` in other source
+  files.
+
+### Pipeline
+
+```
+source.nib + deps.nif  →  [nib compile]  →  .nir + .nif
+all .nir files         →  [nib bind]     →  .asm
+.asm                   →  [nib asm]      →  binary
+```
 
 
 ## Unresolved / Future
