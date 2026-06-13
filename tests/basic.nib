@@ -1,0 +1,243 @@
+// Basic Nib test file — exercises major grammar features
+
+// Global variables
+u16 screen_width = 480;
+u8[80] input_buffer;
+bcd[4] running_total = 0;
+
+// Extern globals
+extern u16 rom_version;
+
+// Struct definitions
+struct file_header {
+    u8 type;
+    u16 length;
+    u8[8] name;
+    u16 checksum;
+}
+
+struct aligned cursor {
+    u16 x;
+    u16 y;
+    u8 visible;
+    u16 blink_rate;
+}
+
+// Struct with bit fields
+struct attributes {
+    readonly: bits(1);
+    hidden: bits(1);
+    system: bits(1);
+    archive: bits(1);
+    filetype: bits(4);
+}
+
+struct packed_coord {
+    x: bits(12);
+    y: bits(12);
+    flags: bits(8);
+}
+
+struct mixed {
+    u8 type;
+    u16 size;
+    attrs: bits(4);
+    hidden: bits(1);
+    readonly: bits(1);
+    _: bits(2);
+    u8[8] name;
+}
+
+// Extern function declarations
+extern fn far rom_read(port: u16 in DX) -> u16 in AX
+    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+
+extern fn far bios_scroll(
+    lines: u8 in AL,
+    attr: u8 in BH,
+    top: u16 in CX,
+    bottom: u16 in DX
+) preserves(SI, DI, BP, DS, ES, SS);
+
+extern fn far [0xF000:0x0100] rom_init()
+    preserves(BP, DS, ES, SS);
+
+// Extern interrupt declaration
+extern fn interrupt(0x21) dos_putchar(
+    svc: u8 in AH,
+    char: u8 in DL
+) preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+
+// Simple function
+fn add(a: u16, b: u16) -> u16 {
+    return a + b;
+}
+
+// Function with register pinning
+fn fill(dest: u16, char: u8, count: u16) {
+    seg ES = 0xB800;
+    u16 DI = dest;
+    u8 AL = char;
+    u16 CX = count;
+    asm clobbers(DI, CX, FLAGS) {
+        rep stosb
+    }
+}
+
+// Interrupt handler
+fn interrupt(0xF8) keyboard_handler() {
+    u8 AL = port_in(0x00B0);
+    port_out(0x90, 0x01);
+}
+
+// Re-entrant interrupt with chaining
+fn interrupt(0x1C, chain old_handler) reentrant my_timer() {
+    u16 count = screen_width + 1;
+    old_handler();
+}
+
+// Expressions and control flow
+fn process(data: u8[80]) -> u16 {
+    u16 total = 0;
+    u16 i = 0;
+
+    while (i < 80) {
+        u8 ch = data[i];
+        if (ch == 0) {
+            break;
+        } else if (ch > 0x20) {
+            total := total + ch;
+        } else {
+            continue;
+        }
+        i := i + 1;
+    }
+
+    return total;
+}
+
+// Signed operators
+fn signed_ops(a: u16, b: u16) -> u16 {
+    u16 prod = a $* b;
+    u16 quot = a $/ b;
+    u16 rem = a $% b;
+    u16 shifted = a $>> 4;
+
+    if (a $> b) {
+        return prod;
+    }
+    if (a $<= b) {
+        return quot;
+    }
+    return rem;
+}
+
+// Rotate and exchange
+fn rotate_test(val: u16) -> u16 {
+    u16 r1 = val <<< 3;
+    u16 r2 = val >>> 1;
+    u16 r3 = val <<<. 1;
+    u16 r4 = val >>>. 1;
+    r1 <=> r2;
+    return r1;
+}
+
+// Memory access forms
+fn mem_test() {
+    u8 a = [SI];
+    u8 b = [ES:DI];
+    u16 c = [BX + 4];
+    u8 d = [BX + SI];
+    u8 e = [BX + SI + 2];
+    u8 f = [0x1234];
+    u8 g = [0xB800:0x0000];
+    [DI] := a;
+    [ES:DI] := b;
+}
+
+// BCD operations
+fn bcd_test() {
+    bcd[4] total = 0;
+    bcd[4] item = 1299;
+    total := total + item;
+    total := total - item;
+    if (total > item) {
+        return;
+    }
+}
+
+// For loop (CX countdown)
+fn countdown() {
+    for (CX in 100..0) {
+        nop();
+    }
+}
+
+// Flag variables
+fn flag_test() {
+    CF := 0;
+    CF := 1;
+    DF := 0;
+    IF := 1;
+    CF := ~CF;
+
+    if (CF) {
+        return;
+    }
+    if (!ZF) {
+        return;
+    }
+}
+
+// Struct field access
+fn struct_test(hdr: file_header) -> u16 {
+    u16 len = hdr.length;
+    u8 first = hdr.name[0];
+    return len;
+}
+
+// Checked array access
+fn bounds_test(buf: u8[80], idx: u16) -> u8 {
+    return buf![idx];
+}
+
+// ASM with preserves
+fn asm_test() {
+    asm preserves(BX, CX, DX, SI, DI, BP, DS, ES, SS) {
+        mov ax, 0x1234
+        out 0x50, al
+    }
+}
+
+// String literals
+fn string_test() {
+    u8 ch = "A";
+    u8[5] hello = "Hello";
+    u8[80] line = "Ready";
+}
+
+// Address-of operator
+fn addr_test(buf: u8[80]) -> u16 {
+    u16 addr = &buf;
+    return addr;
+}
+
+// Builtin calls
+fn builtin_test(dst: u8[80], src: u8[80]) {
+    memcopy(dst, src);
+    memset(dst, 0x20);
+    u16 wide = sign_extend(0xFE);
+    u8 ch = xlat(dst, 0x41);
+    halt();
+    nop();
+}
+
+// Far function
+fn far remote_proc(x: u16) -> u16 {
+    return x + 1;
+}
+
+// Value parameter (explicit copy)
+fn modify_copy(value buf: u8[80]) {
+    buf[0] := 0x41;
+}

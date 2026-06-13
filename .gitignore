@@ -1,0 +1,17 @@
+# Build artifacts
+nib
+nibasm
+nibdis
+nib.tab.c
+nib.tab.h
+lex.yy.c
+nib.output
+bison_report.txt
+
+# Test outputs
+tests/*.bin
+tests/*.map
+
+# Editor
+*.swp
+*~
