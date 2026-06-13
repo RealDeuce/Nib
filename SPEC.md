@@ -756,15 +756,28 @@ total := total + amount {
 ```
 
 The operation executes first. Then each case is checked in order. If
-any flag in the case's list is set, its handler block runs. Unlisted
-flags are ignored. There is no fall-through between cases.
+the flag condition is true, its handler block runs. Unlisted flags are
+ignored. There is no fall-through between cases.
 
-Multiple flags in a single case are OR-ed — any one triggers the handler:
+Flag conditions support full boolean logic:
+
+| Syntax       | Meaning           | Compiled as              |
+|--------------|-------------------|--------------------------|
+| `CF`         | carry set         | JC                       |
+| `!CF`        | carry not set     | JNC                      |
+| `CF \| OF`   | either set        | JC or JO                 |
+| `CF & OF`    | both set          | JNC skip; JNO skip       |
+| `CF ^ OF`    | exactly one set   | test both, XOR result    |
+| `!(CF \| OF)`| neither set       | JC skip; JO skip         |
 
 ```
 total := total + amount {
-    CF, OF: { handle_any_overflow(); }
+    CF | OF: { handle_any_overflow(); }
     ZF: { result_was_zero(); }
+}
+
+count := count - 1 {
+    !CF & ZF: { exactly_zero_no_borrow(); }
 }
 ```
 

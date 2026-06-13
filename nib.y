@@ -92,7 +92,7 @@ static void mods_reset(void) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS
+%token KW_BITS KW_TRAP
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -362,8 +362,41 @@ var_decl
 assignment
     : expr OP_ASSIGN expr
         { $$ = mk_stmt_assign($1, $3, yyline); }
+    | expr OP_ASSIGN expr flag_block
+        { $$ = mk_stmt_assign($1, $3, yyline); /* TODO: attach flag_block */ }
     | expr OP_TOGGLEASSIGN expr
         { $$ = mk_stmt_toggle($1, $3, yyline); }
+    | expr OP_TOGGLEASSIGN expr flag_block
+        { $$ = mk_stmt_toggle($1, $3, yyline); /* TODO: attach flag_block */ }
+    ;
+
+/* ---- Flag-check blocks ---- */
+
+flag_block
+    : '{' flag_cases '}'
+    ;
+
+flag_cases
+    : flag_case
+    | flag_cases flag_case
+    ;
+
+flag_case
+    : flag_expr ':' '{' stmt_list '}'
+    | flag_expr ':' KW_TRAP ';'
+    ;
+
+flag_expr
+    : flag_atom
+    | flag_expr '|' flag_atom
+    | flag_expr '&' flag_atom
+    | flag_expr '^' flag_atom
+    ;
+
+flag_atom
+    : flag
+    | '!' flag_atom
+    | '(' flag_expr ')'
     ;
 
 /* ---- Control flow ---- */
