@@ -138,6 +138,16 @@ names. Emit:
 BP is used as frame pointer only when the function has spills
 or local arrays. If no spills, BP is available for allocation.
 
+**Important**: SP cannot appear in any V20 memory addressing mode.
+There is no `[SP+N]` — only `[BP+N]`. So any function that needs
+stack-relative access (spills, local arrays) MUST reserve BP as
+frame pointer, reducing allocatable word registers from 7 to 6.
+
+The allocator handles this as a two-pass decision:
+1. First attempt: 7 registers (BP available)
+2. If spills result, reserve BP and re-allocate with 6 registers
+3. Second pass is final — BP is committed as frame pointer
+
 ## Spill cost model
 
 When choosing which vreg to spill, prefer:
