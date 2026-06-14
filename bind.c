@@ -1534,6 +1534,26 @@ static const char *scoped_label(func_t *fn, const char *label) {
     return buf;
 }
 
+/* Check if a vreg is spilled to memory */
+static bool is_spilled(func_t *fn, int v) {
+    if (v < 0 || v >= MAX_VREGS) return false;
+    return fn->vregs[v].spill_slot >= 0;
+}
+
+/* Emit a mov that handles memory-to-memory via AX scratch */
+static void emit_mov(func_t *fn, int dst, int src) {
+    const char *d = vreg_asm(fn, dst);
+    const char *s = vreg_asm(fn, src);
+    if (strcmp(d, s) == 0) return; /* skip self-moves */
+    if (is_spilled(fn, dst) && is_spilled(fn, src)) {
+        /* mem-to-mem: go through AX */
+        fprintf(out_asm, "    mov AX, %s\n", s);
+        fprintf(out_asm, "    mov %s, AX\n", d);
+    } else {
+        fprintf(out_asm, "    mov %s, %s\n", d, s);
+    }
+}
+
 static void emit_function(func_t *fn) {
     const char *asm_name = fn_asm_name(fn);
     fprintf(out_asm, "\n; === %s ===\n", asm_name);
@@ -1629,10 +1649,7 @@ static void emit_function(func_t *fn) {
                     fprintf(out_asm, "    mov %s, %s\n", d, ins->name);
                 }
             } else {
-                const char *d = vreg_asm(fn, ins->dst);
-                const char *s = vreg_asm(fn, ins->src1);
-                if (strcmp(d, s) != 0) /* skip self-moves */
-                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+                emit_mov(fn, ins->dst, ins->src1);
             }
             break;
 
@@ -1740,15 +1757,20 @@ static void emit_function(func_t *fn) {
 
             /* Three-address -> two-address:
                op %d, %l, %r  becomes  mov %d, %l; op %d, %r
-               op %d, %l, imm becomes  mov %d, %l; op %d, imm */
-            const char *d = vreg_asm(fn, ins->dst);
-            const char *l = vreg_asm(fn, ins->src1);
-            if (strcmp(d, l) != 0)
-                fprintf(out_asm, "    mov %s, %s\n", d, l);
-            if (ins->has_imm)
-                fprintf(out_asm, "    %s %s, %d\n", mnem, d, ins->imm);
-            else
-                fprintf(out_asm, "    %s %s, %s\n", mnem, d, vreg_asm(fn, ins->src2));
+               op %d, %l, imm becomes  mov %d, %l; op %d, imm
+               If both operands are spilled, use AX as scratch. */
+            emit_mov(fn, ins->dst, ins->src1);
+            if (ins->has_imm) {
+                fprintf(out_asm, "    %s %s, %d\n", mnem,
+                        vreg_asm(fn, ins->dst), ins->imm);
+            } else if (is_spilled(fn, ins->dst) && is_spilled(fn, ins->src2)) {
+                /* op [mem], [mem] — load src2 into AX, then op */
+                fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
+                fprintf(out_asm, "    %s %s, AX\n", mnem, vreg_asm(fn, ins->dst));
+            } else {
+                fprintf(out_asm, "    %s %s, %s\n", mnem,
+                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src2));
+            }
             break;
         }
 
@@ -1760,8 +1782,7 @@ static void emit_function(func_t *fn) {
             if (strcmp(mnem, "lnot") == 0) mnem = "not";
             if (strcmp(mnem, "cbw") == 0) {
                 /* CBW: sign-extend AL -> AX */
-                if (strcmp(d, s) != 0)
-                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+                emit_mov(fn, ins->dst, ins->src1);
                 fprintf(out_asm, "    cbw\n");
                 break;
             }
@@ -1782,8 +1803,7 @@ static void emit_function(func_t *fn) {
             }
             if (strcmp(mnem, "swap_flags") == 0) {
                 /* LAHF: load flags into AH, then SAHF to restore from val */
-                if (strcmp(d, s) != 0)
-                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+                emit_mov(fn, ins->dst, ins->src1);
                 fprintf(out_asm, "    lahf\n");
                 fprintf(out_asm, "    mov %s, AH\n", d);
                 fprintf(out_asm, "    mov AH, %s\n", s);
@@ -1792,15 +1812,13 @@ static void emit_function(func_t *fn) {
             }
             if (strcmp(mnem, "zext") == 0) {
                 /* Zero-extend: clear upper byte */
-                if (strcmp(d, s) != 0)
-                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+                emit_mov(fn, ins->dst, ins->src1);
                 fprintf(out_asm, "    xor %s, %s\n", d, d);
                 fprintf(out_asm, "    mov %s, %s\n", d, s);
                 break;
             }
-            if (strcmp(d, s) != 0)
-                fprintf(out_asm, "    mov %s, %s\n", d, s);
-            fprintf(out_asm, "    %s %s\n", mnem, d);
+            emit_mov(fn, ins->dst, ins->src1);
+            fprintf(out_asm, "    %s %s\n", mnem, vreg_asm(fn, ins->dst));
             break;
         }
 
@@ -1978,27 +1996,49 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_LOAD:
-            if (ins->src2 >= 0)
-                fprintf(out_asm, "    mov %s, [%s+%s]\n",
-                        vreg_asm(fn, ins->dst),
-                        vreg_asm(fn, ins->src1),
-                        vreg_asm(fn, ins->src2));
-            else
-                fprintf(out_asm, "    mov %s, [%s]\n",
-                        vreg_asm(fn, ins->dst),
-                        vreg_asm(fn, ins->src1));
+            if (is_spilled(fn, ins->dst)) {
+                /* Load into spill: go through AX */
+                if (ins->src2 >= 0)
+                    fprintf(out_asm, "    mov AX, [%s+%s]\n",
+                            vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2));
+                else
+                    fprintf(out_asm, "    mov AX, [%s]\n",
+                            vreg_asm(fn, ins->src1));
+                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+            } else {
+                if (ins->src2 >= 0)
+                    fprintf(out_asm, "    mov %s, [%s+%s]\n",
+                            vreg_asm(fn, ins->dst),
+                            vreg_asm(fn, ins->src1),
+                            vreg_asm(fn, ins->src2));
+                else
+                    fprintf(out_asm, "    mov %s, [%s]\n",
+                            vreg_asm(fn, ins->dst),
+                            vreg_asm(fn, ins->src1));
+            }
             break;
 
         case IR_STORE:
-            if (ins->src2 >= 0)
-                fprintf(out_asm, "    mov [%s+%s], %s\n",
+            if (is_spilled(fn, ins->dst)) {
+                /* Store from spill: go through AX */
+                fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->dst));
+                if (ins->src2 >= 0)
+                    fprintf(out_asm, "    mov [%s+%s], AX\n",
+                            vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2));
+                else
+                    fprintf(out_asm, "    mov [%s], AX\n",
+                            vreg_asm(fn, ins->src1));
+            } else {
+                if (ins->src2 >= 0)
+                    fprintf(out_asm, "    mov [%s+%s], %s\n",
+                            vreg_asm(fn, ins->src1),
+                            vreg_asm(fn, ins->src2),
+                            vreg_asm(fn, ins->dst));
+                else
+                    fprintf(out_asm, "    mov [%s], %s\n",
                         vreg_asm(fn, ins->src1),
-                        vreg_asm(fn, ins->src2),
                         vreg_asm(fn, ins->dst));
-            else
-                fprintf(out_asm, "    mov [%s], %s\n",
-                        vreg_asm(fn, ins->src1),
-                        vreg_asm(fn, ins->dst));
+            }
             break;
 
         case IR_LOADMEM:
