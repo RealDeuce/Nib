@@ -159,6 +159,8 @@ typedef struct {
 /* Function */
 typedef struct {
     char        name[64];
+    char        module[64];     /* source module name (from .nir filename) */
+    bool        is_pub;
     bool        is_far;
     bool        is_interrupt;
     int         int_vector;
@@ -302,7 +304,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (!word[0]) break;
         p += strlen(word);
 
-        if (strcmp(word, "far") == 0) fn->is_far = true;
+        if (strcmp(word, "pub") == 0) fn->is_pub = true;
+        else if (strcmp(word, "far") == 0) fn->is_far = true;
         else if (strcmp(word, "reentrant") == 0) fn->is_reentrant = true;
         else if (strncmp(word, "interrupt(", 10) == 0) {
             fn->is_interrupt = true;
@@ -999,6 +1002,14 @@ static void parse_nir(const char *path) {
     FILE *fp = fopen(path, "r");
     if (!fp) { perror(path); exit(1); }
 
+    /* Extract module name from filename (strip path and .nir extension) */
+    char cur_module[64] = "";
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    strncpy(cur_module, base, 63);
+    char *dot = strrchr(cur_module, '.');
+    if (dot) *dot = '\0';
+
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
         int len = strlen(line);
@@ -1013,6 +1024,7 @@ static void parse_nir(const char *path) {
             func_t *fn = &functions[nfunctions++];
             memset(fn, 0, sizeof(*fn));
             fn->ret_pin = PREG_NONE;
+            strncpy(fn->module, cur_module, 63);
             for (int i = 0; i < 16; i++)
                 fn->param_pins[i].preg = PREG_NONE;
             for (int i = 0; i < MAX_VREGS; i++) {
@@ -1110,8 +1122,9 @@ static void parse_nir(const char *path) {
                     if (strncmp(dp, "far.ref ", 8) == 0) {
                         char fname[64];
                         read_word(dp + 8, fname, sizeof(fname));
+                        /* Mark with \x01 prefix for deferred resolution */
                         snprintf(db->entries[db->nentries++], 512,
-                                 "    dw %s, SEG %s", fname, fname);
+                                 "\x01%s", fname);
                     } else if (strncmp(dp, "far ", 4) == 0) {
                         int seg = 0, off = 0;
                         char *fp2 = dp + 4;
@@ -1332,15 +1345,33 @@ static const char *vreg_asm(func_t *fn, int v) {
     return b;
 }
 
-/* Scope a label name to the current function to avoid collisions */
+/* Get the assembly label for a function — pub uses bare name, private gets module prefix */
+static const char *fn_asm_name(func_t *fn) {
+    static char buf[128];
+    if (fn->is_pub || !fn->module[0])
+        return fn->name;
+    snprintf(buf, sizeof(buf), "%s_%s", fn->module, fn->name);
+    return buf;
+}
+
+/* Look up a function's assembly name by its Nib name */
+static const char *resolve_fn_name(const char *name) {
+    for (int i = 0; i < nfunctions; i++)
+        if (strcmp(functions[i].name, name) == 0)
+            return fn_asm_name(&functions[i]);
+    return name; /* not found — return as-is (extern, etc.) */
+}
+
+/* Scope a local label to the current function to avoid collisions */
 static const char *scoped_label(func_t *fn, const char *label) {
     static char buf[128];
-    snprintf(buf, sizeof(buf), "%s_%s", fn->name, label);
+    snprintf(buf, sizeof(buf), "%s_%s", fn_asm_name(fn), label);
     return buf;
 }
 
 static void emit_function(func_t *fn) {
-    fprintf(out_asm, "\n; === %s ===\n", fn->name);
+    const char *asm_name = fn_asm_name(fn);
+    fprintf(out_asm, "\n; === %s ===\n", asm_name);
 
     if (fn->has_at) {
         int linear = fn->at_seg * 16 + fn->at_off;
@@ -1377,7 +1408,7 @@ static void emit_function(func_t *fn) {
             fprintf(out_asm, "    sti\n");
     }
 
-    fprintf(out_asm, "%s:\n", fn->name);
+    fprintf(out_asm, "%s:\n", asm_name);
 
     /* Callee-save pushes */
     for (int i = 0; i < nsave; i++)
@@ -1654,9 +1685,9 @@ static void emit_function(func_t *fn) {
                 }
             }
             if (gf_far)
-                fprintf(out_asm, "    jmp far %s\n", ins->name);
+                fprintf(out_asm, "    jmp far %s\n", resolve_fn_name(ins->name));
             else
-                fprintf(out_asm, "    jmp %s\n", ins->name);
+                fprintf(out_asm, "    jmp %s\n", resolve_fn_name(ins->name));
             break;
         }
 
@@ -1689,7 +1720,7 @@ static void emit_function(func_t *fn) {
                 }
             }
             if (!found_extern)
-                fprintf(out_asm, "    call %s\n", ins->name);
+                fprintf(out_asm, "    call %s\n", resolve_fn_name(ins->name));
             break;
         }
 
@@ -1721,9 +1752,9 @@ static void emit_function(func_t *fn) {
                 }
             }
             if (tc_far)
-                fprintf(out_asm, "    jmp far %s\n", ins->name);
+                fprintf(out_asm, "    jmp far %s\n", resolve_fn_name(ins->name));
             else
-                fprintf(out_asm, "    jmp %s\n", ins->name);
+                fprintf(out_asm, "    jmp %s\n", resolve_fn_name(ins->name));
             break;
         }
 
@@ -2279,8 +2310,16 @@ int main(int argc, char **argv) {
     /* Emit constant pool */
     if (nconsts > 0) {
         fprintf(out_asm, "\n; === constant pool ===\n");
-        for (int i = 0; i < nconsts; i++)
-            fprintf(out_asm, "%s\n", consts[i].data);
+        for (int i = 0; i < nconsts; i++) {
+            if (consts[i].is_far_ref) {
+                /* Resolve function name to assembly label */
+                const char *resolved = resolve_fn_name(consts[i].ref_name);
+                fprintf(out_asm, "%s dw %s, SEG %s\n",
+                        consts[i].label, resolved, resolved);
+            } else {
+                fprintf(out_asm, "%s\n", consts[i].data);
+            }
+        }
     }
 
     /* Emit data blocks (initialized globals) */
@@ -2294,8 +2333,15 @@ int main(int argc, char **argv) {
                     linear, db->at_seg, db->at_off);
         }
         fprintf(out_asm, "%s:\n", db->label);
-        for (int j = 0; j < db->nentries; j++)
-            fprintf(out_asm, "%s\n", db->entries[j]);
+        for (int j = 0; j < db->nentries; j++) {
+            if (db->entries[j][0] == '\x01') {
+                /* Deferred far.ref — resolve function name */
+                const char *resolved = resolve_fn_name(db->entries[j] + 1);
+                fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
+            } else {
+                fprintf(out_asm, "%s\n", db->entries[j]);
+            }
+        }
     }
 
     fclose(out_asm);

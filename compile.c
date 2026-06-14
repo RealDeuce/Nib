@@ -1472,6 +1472,7 @@ static void compile_fn(decl_t *d) {
 
     /* Emit .nir function header */
     fprintf(C.nir, "\n.fn %s", d->u.fn.name);
+    if (d->is_pub) fprintf(C.nir, ", pub");
     if (d->u.fn.mods.is_far) fprintf(C.nir, ", far");
     if (d->u.fn.mods.is_interrupt) {
         fprintf(C.nir, ", interrupt(0x%02X)", d->u.fn.mods.interrupt_vector);
