@@ -23,3 +23,5 @@ tests/*.dbg
 # Editor
 *.swp
 *~
+out.nir
+out.nif
