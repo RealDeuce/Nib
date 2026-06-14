@@ -1332,7 +1332,11 @@ static void emit_stmt(stmt_t *s) {
         break;
     }
     case STMT_GOTO: {
-        fprintf(C.nir, "    jmp %s\n", s->u.goto_label);
+        /* Check if target is a function name */
+        if (find_function(s->u.goto_label) >= 0)
+            fprintf(C.nir, "    goto.fn %s\n", s->u.goto_label);
+        else
+            fprintf(C.nir, "    jmp %s\n", s->u.goto_label);
         break;
     }
     case STMT_TAILCALL: {

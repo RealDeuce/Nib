@@ -92,6 +92,7 @@ typedef enum {
     IR_JMP,         /* jmp label */
     IR_CALL,        /* call %d, name, args... */
     IR_TAILCALL,    /* tailcall name, args... */
+    IR_GOTO_FN,     /* goto.fn name — raw jump to function, no cleanup */
     IR_RET,         /* ret */
     IR_RETVAL,      /* retval %s */
     IR_LOAD,        /* load %d, %base[%idx] */
@@ -621,6 +622,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
                 ins->nargs++;
             }
+        }
+        else if (strcmp(opname, "goto.fn") == 0) {
+            ins->op = IR_GOTO_FN;
+            read_word(p, ins->name, sizeof(ins->name));
         }
         else if (strcmp(opname, "tailcall") == 0) {
             ins->op = IR_TAILCALL;
@@ -1610,6 +1615,35 @@ static void emit_function(func_t *fn) {
                 if (cmp->op == IR_LABEL || cmp->op == IR_JMP) break;
             }
             fprintf(out_asm, "    %s %s\n", jcc, ins->name);
+            break;
+        }
+
+        case IR_GOTO_FN: {
+            /* Raw jump to function — no cleanup, no args */
+            bool gf_far = false;
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, ins->name) == 0) {
+                    gf_far = functions[fi2].is_far;
+                    break;
+                }
+            }
+            if (!gf_far) {
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, ins->name) == 0) {
+                        gf_far = externs[e].is_far;
+                        if (externs[e].has_address) {
+                            fprintf(out_asm, "    jmp far 0x%04X:0x%04X\n",
+                                    externs[e].addr_seg, externs[e].addr_off);
+                            gf_far = false;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (gf_far)
+                fprintf(out_asm, "    jmp far %s\n", ins->name);
+            else
+                fprintf(out_asm, "    jmp %s\n", ins->name);
             break;
         }
 

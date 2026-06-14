@@ -1027,8 +1027,7 @@ down to 0. This is the only for loop — general iteration uses `while`.
 
 ### Labels and goto
 
-Labels mark positions within a function for `goto` jumps. Jumps are
-restricted to the same function — no cross-function goto.
+Labels mark positions within a function for `goto` jumps:
 
 ```
 retry:
@@ -1037,6 +1036,21 @@ retry:
         goto retry;             // JMP retry
     }
 ```
+
+`goto` can also target a function name. This emits a raw JMP (near or
+far) with no frame cleanup, no argument passing, and no stack
+manipulation. Used for reset vectors and bare entry points:
+
+```
+fn at(0xFFFF:0x0000) reset() {
+    SP := 0xFFFE;
+    seg SS = 0x0000;
+    goto boot;                  // JMP FAR boot — no cleanup
+}
+```
+
+Compare with `tailcall`, which tears down the current frame before
+jumping and passes arguments.
 
 ### tailcall
 
