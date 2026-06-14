@@ -169,6 +169,7 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 ">"                     { return '>'; }
 "="                     { return '='; }
 "!"                     { return '!'; }
+"@"                     { return '@'; }
 "("                     { return '('; }
 ")"                     { return ')'; }
 "{"                     {

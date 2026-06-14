@@ -1679,15 +1679,16 @@ static void emit_function(func_t *fn) {
                     fprintf(out_asm, "    mov %s, %d\n", d, ins->imm);
                 }
             } else if (ins->name[0]) {
-                /* Label reference — load address of constant */
+                /* Label reference — load address of constant or function */
                 const char *d = vreg_asm(fn, ins->dst);
+                const char *label = resolve_fn_name(ins->name);
                 /* Segment registers can't take label refs either */
                 if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                     fn->vregs[ins->dst].is_seg) {
-                    fprintf(out_asm, "    mov AX, %s\n", ins->name);
+                    fprintf(out_asm, "    mov AX, %s\n", label);
                     fprintf(out_asm, "    mov %s, AX\n", d);
                 } else {
-                    fprintf(out_asm, "    mov %s, %s\n", d, ins->name);
+                    fprintf(out_asm, "    mov %s, %s\n", d, label);
                 }
             } else {
                 emit_mov(fn, ins->dst, ins->src1);

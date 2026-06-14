@@ -45,8 +45,7 @@ typedef enum {
 
 typedef enum {
     TYPE_U8, TYPE_U16, TYPE_U32, TYPE_SEG, TYPE_BOOL,
-    TYPE_ARRAY_U8, TYPE_ARRAY_U16,
-    TYPE_ARRAY,     /* generic array: element_type[array_size] */
+    TYPE_ARRAY,     /* array: element_type[array_size] */
     TYPE_BCD,
     TYPE_STRUCT,
     TYPE_FAR,
@@ -74,7 +73,7 @@ typedef enum {
     NIB_SLT, NIB_SGT, NIB_SLTE, NIB_SGTE,
     NIB_XCHG,
     /* Operators for EXPR_UNOP */
-    NIB_NEG, NIB_NOT, NIB_ADDR, NIB_LNOT
+    NIB_NEG, NIB_NOT, NIB_ADDR, NIB_FAR_ADDR, NIB_LNOT
 } op_kind_t;
 
 typedef enum {
@@ -405,8 +404,7 @@ typedef struct {
 
 /* Implemented in ast.c */
 type_t     *mk_type(type_kind_t kind);
-type_t     *mk_type_array(type_kind_t kind, int size);
-type_t     *mk_type_generic_array(type_t *elem, int size);
+type_t     *mk_type_array(type_t *elem, int size);
 type_t     *mk_type_struct(const char *name);
 
 expr_t     *mk_expr_int(int val, int line);

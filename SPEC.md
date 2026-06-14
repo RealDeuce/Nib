@@ -143,8 +143,8 @@ u16 s = entry`seg;          // segment half
 u16 o = entry`off;          // offset half
 ```
 
-Applying `&` to a function name returns `far` (see Address-of in
-Expressions).
+Applying `@` to a function or global name returns `far` (see
+Address-of in Expressions). `&` returns the near offset (`u16`).
 
 
 ## Declarations
@@ -170,7 +170,7 @@ are zero-filled to the declared size.
 ```
 u8[8] buf = {0x41, 0x42, 0x43};    // 3 bytes + 5 zero bytes
 u16[4] table = {100, 200, 300, 400};
-far[4] ivt = {&handler_a, &handler_b, &handler_c, &handler_d};
+far[4] ivt = {@handler_a, @handler_b, @handler_c, @handler_d};
 ```
 
 ### Constants
@@ -548,24 +548,30 @@ a <=> b                     // XCHG — atomic swap, no temp needed
 
 Works between two registers, or between a register and memory.
 
-#### Address-of
+#### Address-of (near)
 
 ```
 u16 addr = &variable        // LEA — load effective address
+u16 entry = &my_function    // offset of function within its segment
 ```
 
-Returns the offset of a variable within its segment. For struct fields:
+`&` returns the offset (`u16`) of a variable or function within its
+segment. For struct fields:
 
 ```
 u16 addr = &record.field    // LEA with displacement
 ```
 
-When applied to a function name, `&` returns a `far` address (segment:offset)
-that the binder resolves at link time:
+#### Address-of (far)
 
 ```
-far handler_addr = &my_handler  // far pointer to function
+far handler_addr = @my_handler  // seg:off pointer to function
+far data_ptr = @my_global       // seg:off pointer to global
 ```
+
+`@` returns a `far` address (segment:offset) resolved at link time by
+the binder. Works on function names and global variables. The result
+is a 4-byte seg:off pair stored in the constant pool.
 
 ### Comparisons
 
@@ -1518,7 +1524,7 @@ Global variables can be placed at specific far addresses using the
 segment — it refers to the given absolute address.
 
 ```
-far[4] ivt at(0x0000:0x0000) = {&handler_0, &handler_1, &handler_2, &handler_3};
+far[4] ivt at(0x0000:0x0000) = {@handler_0, @handler_1, @handler_2, @handler_3};
 u8 keyboard_reg at(0x0000:0x00B0);
 ```
 

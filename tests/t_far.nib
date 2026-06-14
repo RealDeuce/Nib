@@ -21,12 +21,16 @@ fn get_seg(addr: far) -> u16 {
     return 0;
 }
 
-// Test: &function_name returns a far address
+// Test: @ returns a far address, & returns near offset
 fn my_handler() {
     return;
 }
 
 fn get_handler_addr() -> far {
+    return @my_handler;
+}
+
+fn get_handler_offset() -> u16 {
     return &my_handler;
 }
 

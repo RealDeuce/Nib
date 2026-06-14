@@ -243,11 +243,9 @@ static int type_size(type_t *t) {
     case TYPE_U32:      return 4;
     case TYPE_SEG:      return 2;
     case TYPE_BOOL:     return 0;
-    case TYPE_ARRAY_U8: return t->array_size;
-    case TYPE_ARRAY_U16:return t->array_size * 2;
+    case TYPE_ARRAY:    return t->element_type ? type_size(t->element_type) * t->array_size : 0;
     case TYPE_BCD:      return t->array_size;
     case TYPE_STRUCT:   return 0; /* would need struct lookup */
-    case TYPE_ARRAY:    return t->element_type ? type_size(t->element_type) * t->array_size : 0;
     case TYPE_FAR:      return 4;
     case TYPE_VOID:     return 0;
     }
@@ -255,7 +253,10 @@ static int type_size(type_t *t) {
 }
 
 static const char *type_str(type_t *t) {
-    static char buf[64];
+    static char bufs[2][64];
+    static int which = 0;
+    char *buf = bufs[which];
+    which = 1 - which;
     if (!t) return "void";
     switch (t->kind) {
     case TYPE_U8:       return "u8";
@@ -263,17 +264,13 @@ static const char *type_str(type_t *t) {
     case TYPE_U32:      return "u32";
     case TYPE_SEG:      return "seg";
     case TYPE_BOOL:     return "bool";
-    case TYPE_ARRAY_U8: snprintf(buf, sizeof(buf), "u8[%d]", t->array_size); return buf;
-    case TYPE_ARRAY_U16:snprintf(buf, sizeof(buf), "u16[%d]", t->array_size); return buf;
-    case TYPE_BCD:      snprintf(buf, sizeof(buf), "bcd[%d]", t->array_size); return buf;
-    case TYPE_STRUCT:   return t->struct_name ? t->struct_name : "struct";
-    case TYPE_ARRAY: {
-        static char abuf[64];
-        snprintf(abuf, sizeof(abuf), "%s[%d]",
+    case TYPE_ARRAY:
+        snprintf(buf, 64, "%s[%d]",
                  t->element_type ? type_str(t->element_type) : "?",
                  t->array_size);
-        return abuf;
-    }
+        return buf;
+    case TYPE_BCD:      snprintf(buf, 64, "bcd[%d]", t->array_size); return buf;
+    case TYPE_STRUCT:   return t->struct_name ? t->struct_name : "struct";
     case TYPE_FAR:      return "far";
     case TYPE_VOID:     return "void";
     }
@@ -302,7 +299,8 @@ static const char *op_str(op_kind_t op) {
     case NIB_SLTE: return "cmp.le"; case NIB_SGTE: return "cmp.ge";
     case NIB_XCHG: return "xchg";
     case NIB_NEG: return "neg"; case NIB_NOT: return "not";
-    case NIB_ADDR: return "lea"; case NIB_LNOT: return "lnot";
+    case NIB_ADDR: return "lea"; case NIB_FAR_ADDR: return "far_lea";
+    case NIB_LNOT: return "lnot";
     }
     return "??";
 }
@@ -314,7 +312,10 @@ static const char *op_str(op_kind_t op) {
 static bool types_equal(type_t *a, type_t *b) {
     if (!a || !b) return a == b;
     if (a->kind != b->kind) return false;
-    if (a->kind == TYPE_ARRAY_U8 || a->kind == TYPE_ARRAY_U16 || a->kind == TYPE_BCD)
+    if (a->kind == TYPE_ARRAY)
+        return a->array_size == b->array_size &&
+               types_equal(a->element_type, b->element_type);
+    if (a->kind == TYPE_BCD)
         return a->array_size == b->array_size;
     if (a->kind == TYPE_STRUCT)
         return a->struct_name && b->struct_name &&
@@ -324,9 +325,8 @@ static bool types_equal(type_t *a, type_t *b) {
 
 static bool type_is_aggregate(type_t *t) {
     if (!t) return false;
-    return t->kind == TYPE_ARRAY_U8 || t->kind == TYPE_ARRAY_U16 ||
-           t->kind == TYPE_BCD || t->kind == TYPE_STRUCT ||
-           t->kind == TYPE_FAR || t->kind == TYPE_ARRAY;
+    return t->kind == TYPE_ARRAY || t->kind == TYPE_BCD ||
+           t->kind == TYPE_STRUCT || t->kind == TYPE_FAR;
 }
 
 static bool type_is_integer(type_t *t) {
@@ -340,8 +340,6 @@ static bool type_is_bcd(type_t *t) {
 
 static type_t *type_of_element(type_t *t) {
     if (!t) return NULL;
-    if (t->kind == TYPE_ARRAY_U8) return mk_type(TYPE_U8);
-    if (t->kind == TYPE_ARRAY_U16) return mk_type(TYPE_U16);
     if (t->kind == TYPE_ARRAY) return t->element_type;
     return NULL;
 }
@@ -544,7 +542,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
         fprintf(C.nir, "\"\n");
         fprintf(C.nir, "    mov %%%d, _C%d\n", r, cid);
-        return TV(r, mk_type_array(TYPE_ARRAY_U8, slen));
+        return TV(r, mk_type_array(mk_type(TYPE_U8), slen));
     }
     case EXPR_IDENT: {
         symbol_t *sym = sym_lookup(e->u.ident);
@@ -643,7 +641,17 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     case EXPR_UNOP: {
         /* Special case: &function_name — must check before evaluating operand,
          * since function names aren't in the symbol table as variables */
+        /* &fn_name — near offset to function */
         if (e->u.unop.op == NIB_ADDR &&
+            e->u.unop.operand->kind == EXPR_IDENT &&
+            find_function(e->u.unop.operand->u.ident) >= 0) {
+            int dst = alloc_vreg();
+            fprintf(C.nir, "    mov %%%d, %s\n", dst,
+                    e->u.unop.operand->u.ident);
+            return TV(dst, mk_type(TYPE_U16));
+        }
+        /* @fn_name — far pointer to function */
+        if (e->u.unop.op == NIB_FAR_ADDR &&
             e->u.unop.operand->kind == EXPR_IDENT &&
             find_function(e->u.unop.operand->u.ident) >= 0) {
             int dst = alloc_vreg();
@@ -652,6 +660,21 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                     cid, e->u.unop.operand->u.ident);
             fprintf(C.nir, "    mov %%%d, _C%d\n", dst, cid);
             return TV(dst, mk_type(TYPE_FAR));
+        }
+        /* @global — far pointer to global variable */
+        if (e->u.unop.op == NIB_FAR_ADDR &&
+            e->u.unop.operand->kind == EXPR_IDENT) {
+            symbol_t *sym = sym_lookup(e->u.unop.operand->u.ident);
+            if (sym && sym->is_global) {
+                int dst = alloc_vreg();
+                int cid = C.next_const++;
+                fprintf(C.nir, ".const _C%d, far.ref %s\n",
+                        cid, e->u.unop.operand->u.ident);
+                fprintf(C.nir, "    mov %%%d, _C%d\n", dst, cid);
+                return TV(dst, mk_type(TYPE_FAR));
+            }
+            cerr(e->line, "@ requires a function or global name");
+            return TV(alloc_vreg(), mk_type(TYPE_FAR));
         }
 
         typed_vreg_t operand = emit_expr_typed(e->u.unop.operand);
@@ -1197,6 +1220,13 @@ static void emit_stmt(stmt_t *s) {
                     type_is_integer(val.type) &&
                     type_size(val.type) <= type_size(s->u.vardecl.type))
                     ok = true;
+                /* Array initializer: same element type, init fits */
+                if (!ok && s->u.vardecl.type->kind == TYPE_ARRAY &&
+                    val.type->kind == TYPE_ARRAY &&
+                    types_equal(s->u.vardecl.type->element_type,
+                                val.type->element_type) &&
+                    val.type->array_size <= s->u.vardecl.type->array_size)
+                    ok = true;
                 if (!ok && val.type->kind == TYPE_VOID)
                     ok = true;
                 if (!ok)
@@ -1624,12 +1654,7 @@ static void compile_fn(decl_t *d) {
          * a u16 address, not the aggregate itself. The full type goes
          * in the .nif for type checking, but the .nir type reflects
          * what the register actually contains. */
-        bool is_ref = (p->type && (p->type->kind == TYPE_ARRAY_U8 ||
-                                    p->type->kind == TYPE_ARRAY_U16 ||
-                                    p->type->kind == TYPE_BCD ||
-                                    p->type->kind == TYPE_STRUCT ||
-                                    p->type->kind == TYPE_FAR ||
-                                    p->type->kind == TYPE_ARRAY));
+        bool is_ref = (p->type && type_is_aggregate(p->type));
         const char *ir_type = (is_ref && !p->is_value) ? "u16" : type_str(p->type);
         fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, ir_type, p->name);
         if (p->is_value) fprintf(C.nir, ", value");
@@ -1761,7 +1786,8 @@ static void compile_global(decl_t *d) {
 
         for (expr_t *e = d->u.global.init->u.array_init.elements; e; e = e->next) {
             /* &function_name → far.ref */
-            if (e->kind == EXPR_UNOP && e->u.unop.op == NIB_ADDR &&
+            if (e->kind == EXPR_UNOP &&
+                (e->u.unop.op == NIB_ADDR || e->u.unop.op == NIB_FAR_ADDR) &&
                 e->u.unop.operand->kind == EXPR_IDENT &&
                 find_function(e->u.unop.operand->u.ident) >= 0) {
                 if (elem_type->kind != TYPE_FAR)
@@ -1907,11 +1933,11 @@ static type_t *nif_parse_type(const char *s) {
     if (strcmp(s, "bool") == 0) return mk_type(TYPE_BOOL);
     /* u8[N], u16[N], bcd[N] */
     if (strncmp(s, "u8[", 3) == 0)
-        return mk_type_array(TYPE_ARRAY_U8, atoi(s + 3));
+        return mk_type_array(mk_type(TYPE_U8), atoi(s + 3));
     if (strncmp(s, "u16[", 4) == 0)
-        return mk_type_array(TYPE_ARRAY_U16, atoi(s + 4));
+        return mk_type_array(mk_type(TYPE_U16), atoi(s + 4));
     if (strncmp(s, "bcd[", 4) == 0)
-        return mk_type_array(TYPE_BCD, atoi(s + 4));
+        return mk_type_array(mk_type(TYPE_BCD), atoi(s + 4));
     /* struct name */
     return mk_type_struct(s);
 }

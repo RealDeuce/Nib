@@ -663,6 +663,8 @@ expr
         { $$ = mk_expr_unop(NIB_NOT, $2, yyline); }
     | '&' expr %prec UNARY
         { $$ = mk_expr_unop(NIB_ADDR, $2, yyline); }
+    | '@' expr %prec UNARY
+        { $$ = mk_expr_unop(NIB_FAR_ADDR, $2, yyline); }
     | '!' expr %prec UNARY
         { $$ = mk_expr_unop(NIB_LNOT, $2, yyline); }
     | postfix_expr
@@ -818,11 +820,11 @@ type
     | TY_SEG                    { $$ = mk_type(TYPE_SEG); }
     | TY_BOOL                   { $$ = mk_type(TYPE_BOOL); }
     | KW_FAR                    { $$ = mk_type(TYPE_FAR); }
-    | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(TYPE_ARRAY_U8, $3); }
-    | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_ARRAY_U16, $3); }
-    | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_BCD, $3); }
-    | KW_FAR '[' LIT_INT ']'   { $$ = mk_type_generic_array(mk_type(TYPE_FAR), $3); }
-    | KW_STRUCT IDENT '[' LIT_INT ']' { $$ = mk_type_generic_array(mk_type_struct($2), $4); }
+    | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(mk_type(TYPE_U8), $3); }
+    | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_U16), $3); }
+    | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_BCD), $3); }
+    | KW_FAR '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_FAR), $3); }
+    | KW_STRUCT IDENT '[' LIT_INT ']' { $$ = mk_type_array(mk_type_struct($2), $4); }
     | KW_STRUCT IDENT           { $$ = mk_type_struct($2); }
     ;
 

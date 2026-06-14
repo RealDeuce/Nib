@@ -1,0 +1,9 @@
+// Test: string initializer type matching
+// u8[N] initialized with a string of exactly N characters must not error.
+
+fn test() {
+    u8[5] exact = "Hello";
+    u8[10] padded = "Hi";
+    u8[1] single = "A";
+    u8[17] msg = "DreamWriter ready";
+}

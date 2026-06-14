@@ -28,13 +28,7 @@ type_t *mk_type(type_kind_t kind) {
     return t;
 }
 
-type_t *mk_type_array(type_kind_t kind, int size) {
-    type_t *t = mk_type(kind);
-    t->array_size = size;
-    return t;
-}
-
-type_t *mk_type_generic_array(type_t *elem, int size) {
+type_t *mk_type_array(type_t *elem, int size) {
     type_t *t = mk_type(TYPE_ARRAY);
     t->element_type = elem;
     t->array_size = size;
