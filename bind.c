@@ -1223,6 +1223,8 @@ static void scan_addressing_constraints(func_t *fn) {
         if (ins->op == IR_LOAD || ins->op == IR_STORE) {
             if (ins->src1 >= 0 && ins->src1 < MAX_VREGS)
                 fn->vregs[ins->src1].needs_addressable = true;
+            if (ins->src2 >= 0 && ins->src2 < MAX_VREGS)
+                fn->vregs[ins->src2].needs_addressable = true;
         }
     }
 }
@@ -1781,19 +1783,27 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_LOAD:
-            fprintf(out_asm, "    ; load %s from %s[%s]\n",
-                    vreg_asm(fn, ins->dst),
-                    vreg_asm(fn, ins->src1),
-                    vreg_asm(fn, ins->src2));
-            fprintf(out_asm, "    mov %s, [%s]\n",
-                    vreg_asm(fn, ins->dst),
-                    vreg_asm(fn, ins->src1));
+            if (ins->src2 >= 0)
+                fprintf(out_asm, "    mov %s, [%s+%s]\n",
+                        vreg_asm(fn, ins->dst),
+                        vreg_asm(fn, ins->src1),
+                        vreg_asm(fn, ins->src2));
+            else
+                fprintf(out_asm, "    mov %s, [%s]\n",
+                        vreg_asm(fn, ins->dst),
+                        vreg_asm(fn, ins->src1));
             break;
 
         case IR_STORE:
-            fprintf(out_asm, "    mov [%s], %s\n",
-                    vreg_asm(fn, ins->src1),
-                    vreg_asm(fn, ins->dst));
+            if (ins->src2 >= 0)
+                fprintf(out_asm, "    mov [%s+%s], %s\n",
+                        vreg_asm(fn, ins->src1),
+                        vreg_asm(fn, ins->src2),
+                        vreg_asm(fn, ins->dst));
+            else
+                fprintf(out_asm, "    mov [%s], %s\n",
+                        vreg_asm(fn, ins->src1),
+                        vreg_asm(fn, ins->dst));
             break;
 
         case IR_LOADMEM:

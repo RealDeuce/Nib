@@ -28,6 +28,9 @@ typedef struct symbol {
     int         pinned_reg;
     reg_class_t pin_class;
     bool        is_global;
+    bool        has_at;         /* global with at() placement */
+    int         at_seg;
+    int         at_off;
 } symbol_t;
 
 typedef struct scope {
@@ -548,6 +551,13 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (!sym) {
             cerr(e->line, "undefined variable '%s'", e->u.ident);
             return TV(alloc_vreg(), mk_type(TYPE_U16));
+        }
+        /* For globals with at() placement, load the address into a fresh vreg
+         * each time so the binder can allocate it properly */
+        if (sym->is_global && sym->has_at) {
+            int r = alloc_vreg();
+            fprintf(C.nir, "    mov %%%d, 0x%04X\n", r, sym->at_off);
+            return TV(r, sym->type);
         }
         return TV(sym->vreg, sym->type);
     }
@@ -1699,7 +1709,12 @@ static void compile_global(decl_t *d) {
     if (!name) name = "?";
 
     /* Add to the current (global) scope */
-    sym_add(name, d->u.global.type, true);
+    symbol_t *gsym = sym_add(name, d->u.global.type, true);
+    if (d->u.global.has_at) {
+        gsym->has_at = true;
+        gsym->at_seg = d->u.global.at_seg;
+        gsym->at_off = d->u.global.at_off;
+    }
 
     /* Emit .nif entry (always simple) */
     if (d->is_pub)
