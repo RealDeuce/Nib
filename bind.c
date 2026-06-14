@@ -582,18 +582,32 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->asm_ann[0] = '\0';
         }
         else if (strcmp(opname, "in") == 0) {
-            ins->op = IR_ALU; /* reuse ALU for 2-operand */
+            ins->op = IR_ALU;
             strncpy(ins->name, "in", 63);
             ins->dst = parse_vreg(p, &p);
             skip_comma(&p);
-            ins->src1 = parse_vreg(p, &p);
+            p = skip_ws(p);
+            if (*p == '%') {
+                ins->src1 = parse_vreg(p, &p);
+            } else {
+                ins->has_imm = true;
+                ins->imm = (int)strtol(p, (char **)&p, 0);
+            }
         }
         else if (strcmp(opname, "out") == 0) {
             ins->op = IR_ALU;
             strncpy(ins->name, "out", 63);
-            ins->dst = parse_vreg(p, &p);
-            skip_comma(&p);
-            ins->src1 = parse_vreg(p, &p);
+            p = skip_ws(p);
+            if (*p == '%') {
+                ins->dst = parse_vreg(p, &p);
+                skip_comma(&p);
+                ins->src1 = parse_vreg(p, &p);
+            } else {
+                ins->has_imm = true;
+                ins->imm = (int)strtol(p, (char **)&p, 0);
+                skip_comma(&p);
+                ins->src1 = parse_vreg(p, &p);
+            }
         }
         else if (strcmp(opname, "cbw") == 0) {
             ins->op = IR_UNARY;
@@ -679,7 +693,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 p = skip_ws(p);
                 if (*p == '%') {
                     ins->src2 = parse_vreg(p, &p);
-                    /* Classify: cmp.* -> IR_CMP, else IR_ALU */
+                    if (strncmp(opname, "cmp.", 4) == 0)
+                        ins->op = IR_CMP;
+                    else
+                        ins->op = IR_ALU;
+                } else if (*p == '-' || isdigit(*p)) {
+                    /* Third operand is immediate */
+                    ins->has_imm = true;
+                    ins->imm = (int)strtol(p, (char **)&p, 0);
+                    ins->src2 = -1;
                     if (strncmp(opname, "cmp.", 4) == 0)
                         ins->op = IR_CMP;
                     else
@@ -974,13 +996,22 @@ static void emit_function(func_t *fn) {
 
             /* Special two-operand forms */
             if (strcmp(op, "in") == 0) {
-                fprintf(out_asm, "    in %s, %s\n",
-                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                /* IN: port is in src1 vreg or was an immediate */
+                if (ins->has_imm)
+                    fprintf(out_asm, "    in %s, 0x%02X\n",
+                            vreg_asm(fn, ins->dst), ins->imm);
+                else
+                    fprintf(out_asm, "    in %s, %s\n",
+                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
                 break;
             }
             if (strcmp(op, "out") == 0) {
-                fprintf(out_asm, "    out %s, %s\n",
-                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                if (ins->has_imm)
+                    fprintf(out_asm, "    out 0x%02X, %s\n",
+                            ins->imm, vreg_asm(fn, ins->src1));
+                else
+                    fprintf(out_asm, "    out %s, %s\n",
+                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
                 break;
             }
             if (strcmp(op, "xlat") == 0) {
@@ -1029,13 +1060,16 @@ static void emit_function(func_t *fn) {
             else if (strcmp(op, "rcr") == 0) mnem = "rcr";
 
             /* Three-address -> two-address:
-               op %d, %l, %r  becomes  mov %d, %l; op %d, %r */
+               op %d, %l, %r  becomes  mov %d, %l; op %d, %r
+               op %d, %l, imm becomes  mov %d, %l; op %d, imm */
             const char *d = vreg_asm(fn, ins->dst);
             const char *l = vreg_asm(fn, ins->src1);
-            const char *r = vreg_asm(fn, ins->src2);
             if (strcmp(d, l) != 0)
                 fprintf(out_asm, "    mov %s, %s\n", d, l);
-            fprintf(out_asm, "    %s %s, %s\n", mnem, d, r);
+            if (ins->has_imm)
+                fprintf(out_asm, "    %s %s, %d\n", mnem, d, ins->imm);
+            else
+                fprintf(out_asm, "    %s %s, %s\n", mnem, d, vreg_asm(fn, ins->src2));
             break;
         }
 
@@ -1078,9 +1112,13 @@ static void emit_function(func_t *fn) {
                 if (cmp->op == IR_ALU || cmp->op == IR_CMP) {
                     if (cmp->dst == ins->src1) {
                         /* Emit the CMP */
-                        fprintf(out_asm, "    cmp %s, %s\n",
-                                vreg_asm(fn, cmp->src1),
-                                vreg_asm(fn, cmp->src2));
+                        if (cmp->has_imm)
+                            fprintf(out_asm, "    cmp %s, %d\n",
+                                    vreg_asm(fn, cmp->src1), cmp->imm);
+                        else
+                            fprintf(out_asm, "    cmp %s, %s\n",
+                                    vreg_asm(fn, cmp->src1),
+                                    vreg_asm(fn, cmp->src2));
                         /* Map comparison kind to Jcc — note: jz means
                            "jump if condition NOT met" (the condition
                            vreg is zero), so we invert */

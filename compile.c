@@ -446,8 +446,20 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_BINOP: {
         op_kind_t op = e->u.binop.op;
+
+        /* Check if right operand is an integer literal — emit as immediate */
+        bool right_is_imm = (e->u.binop.right->kind == EXPR_LIT_INT);
+        int right_imm = right_is_imm ? e->u.binop.right->u.lit_int : 0;
+
         typed_vreg_t l = emit_expr_typed(e->u.binop.left);
-        typed_vreg_t r = emit_expr_typed(e->u.binop.right);
+        typed_vreg_t r;
+        if (right_is_imm) {
+            /* Don't allocate a vreg for the immediate */
+            r = TV(-1, NULL);
+        } else {
+            r = emit_expr_typed(e->u.binop.right);
+        }
+
         int dst = alloc_vreg();
         type_t *result_type;
 
@@ -464,16 +476,19 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                      type_str(l.type), type_str(r.type));
             result_type = l.type;
         } else if (is_shift) {
-            if (!type_is_integer(l.type))
+            if (l.type && !type_is_integer(l.type))
                 cerr(e->line, "shift/rotate operand must be integer, got %s",
                      type_str(l.type));
-            /* Shift count is always u8 (CL), no size match needed */
             result_type = l.type;
         } else {
             result_type = check_arith(l.type, r.type, op, e->line);
         }
 
-        fprintf(C.nir, "    %s %%%d, %%%d, %%%d\n", op_str(op), dst, l.vreg, r.vreg);
+        if (right_is_imm) {
+            fprintf(C.nir, "    %s %%%d, %%%d, %d\n", op_str(op), dst, l.vreg, right_imm);
+        } else {
+            fprintf(C.nir, "    %s %%%d, %%%d, %%%d\n", op_str(op), dst, l.vreg, r.vreg);
+        }
         return TV(dst, result_type);
     }
     case EXPR_UNOP: {
@@ -545,13 +560,24 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             return TV(dst, mk_type(TYPE_U8));
         }
         if (strcmp(fn_name, "port_in") == 0) {
-            if (argc >= 1)
-                fprintf(C.nir, "    in %%%d, %%%d\n", dst, arg_vregs[0]);
+            if (argc >= 1) {
+                /* Check if port argument was a literal */
+                expr_t *port_expr = e->u.call.args;
+                if (port_expr && port_expr->kind == EXPR_LIT_INT)
+                    fprintf(C.nir, "    in %%%d, %d\n", dst, port_expr->u.lit_int);
+                else
+                    fprintf(C.nir, "    in %%%d, %%%d\n", dst, arg_vregs[0]);
+            }
             return TV(dst, mk_type(TYPE_U8));
         }
         if (strcmp(fn_name, "port_out") == 0) {
-            if (argc >= 2)
-                fprintf(C.nir, "    out %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+            if (argc >= 2) {
+                expr_t *port_expr = e->u.call.args;
+                if (port_expr && port_expr->kind == EXPR_LIT_INT)
+                    fprintf(C.nir, "    out %d, %%%d\n", port_expr->u.lit_int, arg_vregs[1]);
+                else
+                    fprintf(C.nir, "    out %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+            }
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memcopy") == 0) {

@@ -19,7 +19,7 @@ struct file_entry {
 struct wide_entry {
     u16 id;
     u8 flags;
-    u16 value;
+    u16 val;
 }
 
 struct status_reg {
