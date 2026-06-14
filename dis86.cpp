@@ -68,6 +68,8 @@ pfx:;
 	case 0x2e: snprintf(prefix,sizeof(prefix),"CS:"); goto pfx;
 	case 0x36: snprintf(prefix,sizeof(prefix),"SS:"); goto pfx;
 	case 0x3e: snprintf(prefix,sizeof(prefix),"DS:"); goto pfx;
+	case 0x64: snprintf(prefix,sizeof(prefix),"REPNC "); goto pfx;
+	case 0x65: snprintf(prefix,sizeof(prefix),"REPC "); goto pfx;
 	case 0xf0: snprintf(prefix,sizeof(prefix),"LOCK "); goto pfx;
 	case 0xf2: snprintf(prefix,sizeof(prefix),"REPNE "); goto pfx;
 	case 0xf3: snprintf(prefix,sizeof(prefix),"REP "); goto pfx;
@@ -118,6 +120,10 @@ pfx:;
 		else if (b2==0x26) snprintf(op,sizeof(op),"CMP4S");
 		else if (b2==0x28) snprintf(op,sizeof(op),"ROL4");
 		else if (b2==0x2a) snprintf(op,sizeof(op),"ROR4");
+		else if (b2==0x31) snprintf(op,sizeof(op),"BINS");
+		else if (b2==0x33) snprintf(op,sizeof(op),"BEXT");
+		else if (b2==0x39) { uint8_t imm=fetch(&st); snprintf(op,sizeof(op),"BINS %02Xh",imm); }
+		else if (b2==0x3b) { uint8_t imm=fetch(&st); snprintf(op,sizeof(op),"BEXT %02Xh",imm); }
 		else if (b2==0xff) snprintf(op,sizeof(op),"BRKEM %02Xh", fetch(&st));
 		else snprintf(op,sizeof(op),"DB 0Fh, %02Xh", b2);
 		break;

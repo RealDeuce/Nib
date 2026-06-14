@@ -1234,6 +1234,15 @@ static bool check_prefix(const char *mnemonic) {
         emit(0xF0);
         return true;
     }
+    /* V20: repeat while carry / not carry */
+    if (strcasecmp(mnemonic, "repc") == 0) {
+        emit(0x65);
+        return true;
+    }
+    if (strcasecmp(mnemonic, "repnc") == 0) {
+        emit(0x64);
+        return true;
+    }
     return false;
 }
 
@@ -1412,9 +1421,28 @@ static void assemble_instruction(const char *mnemonic) {
     }
     if (strcasecmp(mnemonic, "imul") == 0) {
         operand_t dst = parse_operand();
-        int w = (dst.size == 2) ? 1 : 0;
-        emit(0xF6 | w);
-        emit_modrm(&dst, 5);
+        const char *save = line_ptr;
+        token_t peek = next_token();
+        if (peek.type == T_COMMA) {
+            /* IMUL reg, imm (186+): 0x6B for byte imm, 0x69 for word */
+            operand_t imm_op = parse_operand();
+            int imm = imm_op.imm;
+            if (imm >= -128 && imm <= 127) {
+                emit(0x6B);
+                emit(0xC0 | (dst.reg << 3) | dst.reg); /* modrm: reg, reg */
+                emit(imm & 0xFF);
+            } else {
+                emit(0x69);
+                emit(0xC0 | (dst.reg << 3) | dst.reg);
+                emit16(imm & 0xFFFF);
+            }
+        } else {
+            /* IMUL r/m (single operand) */
+            line_ptr = save;
+            int w = (dst.size == 2) ? 1 : 0;
+            emit(0xF6 | w);
+            emit_modrm(&dst, 5);
+        }
         return;
     }
     if (strcasecmp(mnemonic, "div") == 0) {
