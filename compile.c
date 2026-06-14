@@ -1218,6 +1218,158 @@ static void compile_extern_fn(decl_t *d) {
 }
 
 /* ================================================================
+ * .nif import (use directive)
+ * ================================================================ */
+
+static char *nif_skip_ws(char *p) {
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+static char *nif_read_word(char *p, char *buf, int bufsz) {
+    p = nif_skip_ws(p);
+    int i = 0;
+    while (*p && !isspace(*p) && *p != ',' && *p != ')' && i < bufsz - 1)
+        buf[i++] = *p++;
+    buf[i] = '\0';
+    return p;
+}
+
+static type_t *nif_parse_type(const char *s) {
+    if (strcmp(s, "u8") == 0) return mk_type(TYPE_U8);
+    if (strcmp(s, "u16") == 0) return mk_type(TYPE_U16);
+    if (strcmp(s, "u32") == 0) return mk_type(TYPE_U32);
+    if (strcmp(s, "seg") == 0) return mk_type(TYPE_SEG);
+    if (strcmp(s, "bool") == 0) return mk_type(TYPE_BOOL);
+    /* u8[N], u16[N], bcd[N] */
+    if (strncmp(s, "u8[", 3) == 0)
+        return mk_type_array(TYPE_ARRAY_U8, atoi(s + 3));
+    if (strncmp(s, "u16[", 4) == 0)
+        return mk_type_array(TYPE_ARRAY_U16, atoi(s + 4));
+    if (strncmp(s, "bcd[", 4) == 0)
+        return mk_type_array(TYPE_BCD, atoi(s + 4));
+    /* struct name */
+    return mk_type_struct(s);
+}
+
+static void import_nif(const char *path, int use_line) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        cerr(use_line, "cannot open '%s'", path);
+        return;
+    }
+
+    char line[512];
+    char cur_fn[64] = "";
+    int cur_nparams = 0;
+    type_t *cur_ret = NULL;
+    bool in_fn = false;
+    bool in_extern = false;
+    bool in_struct = false;
+
+    while (fgets(line, sizeof(line), fp)) {
+        int len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            line[--len] = '\0';
+
+        char *p = nif_skip_ws(line);
+        if (!*p || *p == ';') continue;
+
+        /* .fn name */
+        if (strncmp(p, ".fn ", 4) == 0) {
+            p += 4;
+            char name[64];
+            nif_read_word(p, name, sizeof(name));
+            strncpy(cur_fn, name, 63);
+            cur_nparams = 0;
+            cur_ret = NULL;
+            in_fn = true;
+            in_extern = false;
+            continue;
+        }
+
+        /* .extern name */
+        if (strncmp(p, ".extern ", 8) == 0) {
+            p += 8;
+            char name[64];
+            nif_read_word(p, name, sizeof(name));
+            strncpy(cur_fn, name, 63);
+            cur_nparams = 0;
+            cur_ret = NULL;
+            in_extern = true;
+            in_fn = false;
+            continue;
+        }
+
+        /* .param */
+        if (strncmp(p, ".param", 6) == 0) {
+            cur_nparams++;
+            continue;
+        }
+
+        /* .returns */
+        if (strncmp(p, ".returns", 8) == 0) {
+            p += 8;
+            char type[64];
+            nif_read_word(p, type, sizeof(type));
+            cur_ret = nif_parse_type(type);
+            continue;
+        }
+
+        /* .endfn / .endextern — register the function */
+        if (strncmp(p, ".endfn", 6) == 0 || strncmp(p, ".endextern", 10) == 0) {
+            if (cur_fn[0]) {
+                register_function(cur_fn, cur_nparams, cur_ret);
+            }
+            cur_fn[0] = '\0';
+            in_fn = false;
+            in_extern = false;
+            continue;
+        }
+
+        /* .struct name */
+        if (strncmp(p, ".struct ", 8) == 0) {
+            p += 8;
+            char name[64];
+            nif_read_word(p, name, sizeof(name));
+            /* Register struct name so type checker knows it */
+            if (C.nstructs < 128) {
+                strncpy(C.structs[C.nstructs].name, name, 63);
+                C.structs[C.nstructs].fields = NULL;
+                C.structs[C.nstructs].aligned = false;
+                C.nstructs++;
+            }
+            in_struct = true;
+            continue;
+        }
+        if (strncmp(p, ".endstruct", 10) == 0) {
+            in_struct = false;
+            continue;
+        }
+
+        /* .global name, type */
+        if (strncmp(p, ".global ", 8) == 0) {
+            p += 8;
+            char name[64];
+            p = nif_read_word(p, name, sizeof(name));
+            /* skip comma */
+            p = nif_skip_ws(p);
+            if (*p == ',') p++;
+            char type[64];
+            nif_read_word(p, type, sizeof(type));
+            /* Add to global scope */
+            sym_add(name, nif_parse_type(type), true);
+            continue;
+        }
+
+        /* .preserves — skip (used by binder, not compiler) */
+        /* field declarations inside struct — skip for now */
+    }
+
+    fclose(fp);
+}
+
+/* ================================================================
  * Main compile entry point
  * ================================================================ */
 
@@ -1255,7 +1407,7 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path) {
             break;
         case DECL_USE:
             fprintf(C.nir, "; use \"%s\"\n", d->u.use_path);
-            /* TODO: read .nif and import symbols */
+            import_nif(d->u.use_path, d->line);
             break;
         }
     }

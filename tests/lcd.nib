@@ -1,0 +1,20 @@
+// lcd.nib — LCD driver module
+
+fn lcd_clear(fill_char: u8) {
+    seg ES = 0xB800;
+    u16 DI = 0;
+    u8 AL = fill_char;
+    u16 CX = 480;
+    asm clobbers(DI, CX, FLAGS) {
+        rep stosb
+    }
+}
+
+fn lcd_putchar(x: u16, char: u8) {
+    seg ES = 0xB800;
+    u16 DI = x;
+    u8 AL = char;
+    asm clobbers(DI, FLAGS) {
+        stosb
+    }
+}

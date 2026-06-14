@@ -1,0 +1,9 @@
+// app.nib — application that uses the LCD module
+
+use "tests/lcd.nif";
+
+fn main() {
+    lcd_clear(0x20);
+    lcd_putchar(0, 0x41);
+    lcd_putchar(1, 0x42);
+}

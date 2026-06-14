@@ -187,7 +187,12 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
  /* ---- Literals ---- */
 0[xX][0-9a-fA-F]+       { yylval.ival = (int)strtol(yytext, NULL, 16); return LIT_INT; }
 [0-9]+                  { yylval.ival = atoi(yytext); return LIT_INT; }
-\"([^"\\]|\\.)*\"       { yylval.sval = strdup(yytext); return LIT_STRING; }
+\"([^"\\]|\\.)*\"       {
+    /* Strip surrounding quotes */
+    int len = strlen(yytext);
+    yylval.sval = strndup(yytext + 1, len - 2);
+    return LIT_STRING;
+}
 
  /* ---- Identifiers (lowercase only) ---- */
 [a-z][a-z0-9_]*         { yylval.sval = strdup(yytext); return IDENT; }
