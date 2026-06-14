@@ -1,5 +1,5 @@
 // Test: global with at() placement followed by non-at() items
-// The at() global should not drag subsequent items to its address
+// at() pushes location. Only explicit end at; or module boundary pops.
 
 at(0x1000:0x0000);
 
@@ -7,11 +7,15 @@ fn before() {
     nop();
 }
 
-// Global at a detour address — should auto end-at
-u16[4] table at(0x0000:0x0000);
+// Detour to 0:0 — counter should follow table at 0:8
+at(0x0000:0x0000);
+u16[4] table;
 
-// This should continue at 1000:xxxx, NOT at 0000:0008
+// counter follows table because no end at; was issued
 u16 counter;
+
+// Pop back to 1000:xxxx for the rest
+end at;
 
 fn after() {
     nop();

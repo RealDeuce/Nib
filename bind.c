@@ -2110,9 +2110,6 @@ static void emit_function(func_t *fn) {
         }
     }
 
-    /* at() functions are self-contained — pop back after */
-    if (fn->has_at)
-        fprintf(out_asm, "    endorg\n");
 }
 
 /* ================================================================
@@ -2473,8 +2470,6 @@ static void emit_item(int ei) {
                 fprintf(out_asm, "%s\n", db->entries[j]);
             }
         }
-        if (db->has_at)
-            fprintf(out_asm, "    endorg\n");
     } else if (kind == EMIT_GLOB) {
         global_var_t *g = &globals[idx];
         if (g->has_at) {
@@ -2491,10 +2486,6 @@ static void emit_item(int ei) {
             fprintf(out_asm, "\n");
             for (int b = 0; b < g->size; b += 2)
                 fprintf(out_asm, "    dw 0\n");
-        }
-        if (g->has_at) {
-            fprintf(out_asm, "    endorg\n");
-            at_depth--;
         }
     } else if (kind == EMIT_AT) {
         int s = at_directives[idx].seg;
