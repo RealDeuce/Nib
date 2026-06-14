@@ -3,7 +3,7 @@ BISON = bison
 FLEX = flex
 CFLAGS = -Wall -g
 
-all: nib nibasm nibdis nibbind
+all: nib nibasm nibdis nibbind nibbuild
 
 nib.tab.c nib.tab.h: nib.y
 	$(BISON) -d -v -Wcounterexamples nib.y
@@ -19,6 +19,9 @@ nibasm: asm.c
 
 nibbind: bind.c
 	$(CC) $(CFLAGS) -o nibbind bind.c
+
+nibbuild: build.c
+	$(CC) $(CFLAGS) -o nibbuild build.c
 
 nibdis: dis.cpp
 	c++ $(CFLAGS) -o nibdis dis.cpp
@@ -38,6 +41,6 @@ test: nib
 	done
 
 clean:
-	rm -f nib nibasm nibdis nibbind nib.tab.c nib.tab.h lex.yy.c nib.output bison_report.txt
+	rm -f nib nibasm nibdis nibbind nibbuild nib.tab.c nib.tab.h lex.yy.c nib.output bison_report.txt
 
 .PHONY: all check test clean

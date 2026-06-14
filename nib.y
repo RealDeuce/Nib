@@ -729,7 +729,21 @@ int main(int argc, char **argv) {
     char *nir_path = replace_ext(base, ".nir");
     char *nif_path = replace_ext(base, ".nif");
 
-    result = compile(parsed_program, nir_path, nif_path);
+    /* Get source directory for use resolution */
+    char src_dir[256] = ".";
+    if (infile) {
+        char tmp[256];
+        strncpy(tmp, infile, 255);
+        tmp[255] = '\0';
+        /* Find last / */
+        char *slash = strrchr(tmp, '/');
+        if (slash) {
+            *slash = '\0';
+            strncpy(src_dir, tmp, sizeof(src_dir) - 1);
+        }
+    }
+
+    result = compile(parsed_program, nir_path, nif_path, src_dir);
 
     if (result == 0) {
         fprintf(stderr, "%s: %d declarations -> %s + %s\n",

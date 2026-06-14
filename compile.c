@@ -49,6 +49,7 @@ typedef struct {
     int         loop_depth;     /* for break/continue validation */
     int         loop_break_label;   /* label to jump to for break */
     int         loop_continue_label; /* label to jump to for continue */
+    char        src_dir[256];       /* directory of source file for use resolution */
 
     /* Current function info for .nif emission */
     const char *cur_fn_name;
@@ -1349,7 +1350,13 @@ static type_t *nif_parse_type(const char *s) {
 }
 
 static void import_nif(const char *path, int use_line) {
+    /* Try path as-is first, then resolve relative to source directory */
+    char resolved[512];
     FILE *fp = fopen(path, "r");
+    if (!fp && C.src_dir[0]) {
+        snprintf(resolved, sizeof(resolved), "%s/%s", C.src_dir, path);
+        fp = fopen(resolved, "r");
+    }
     if (!fp) {
         cerr(use_line, "cannot open '%s'", path);
         return;
@@ -1469,8 +1476,11 @@ static void import_nif(const char *path, int use_line) {
  * Main compile entry point
  * ================================================================ */
 
-int compile(program_t *prog, const char *nir_path, const char *nif_path) {
+int compile(program_t *prog, const char *nir_path, const char *nif_path,
+            const char *src_dir) {
     memset(&C, 0, sizeof(C));
+    if (src_dir)
+        strncpy(C.src_dir, src_dir, sizeof(C.src_dir) - 1);
 
     C.nir = fopen(nir_path, "w");
     if (!C.nir) { perror(nir_path); return 1; }
