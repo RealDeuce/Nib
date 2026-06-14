@@ -219,18 +219,21 @@ static void resolve_tool_dir(const char *argv0) {
 int main(int argc, char **argv) {
     const char *root = NULL;
     const char *outbin = NULL;
+    bool force_rebuild = false;
 
     resolve_tool_dir(argv[0]);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
             outbin = argv[++i];
+        else if (strcmp(argv[i], "-f") == 0)
+            force_rebuild = true;
         else
             root = argv[i];
     }
 
     if (!root) {
-        fprintf(stderr, "usage: nibbuild [-o output.bin] main.nib\n");
+        fprintf(stderr, "usage: nibbuild [-f] [-o output.bin] main.nib\n");
         return 1;
     }
 
@@ -264,8 +267,9 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        /* Recompile if source is newer than outputs, or outputs don't exist */
-        m->needs_compile = (nir_time == 0 || nif_time == 0 ||
+        /* Recompile if forced, source is newer than outputs, or outputs don't exist */
+        m->needs_compile = force_rebuild ||
+                            (nir_time == 0 || nif_time == 0 ||
                             src_time > nir_time || src_time > nif_time);
 
         /* Also recompile if any dependency's .nif is newer */

@@ -140,11 +140,12 @@ Follows `use` chains from a root source file, compiles changed modules,
 binds all IR, and assembles the result.
 
 ```
-nibbuild [-o output.bin] main.nib
+nibbuild [-f] [-o output.bin] main.nib
 ```
 
 | Flag | Description |
 |------|-------------|
+| `-f` | Force rebuild all modules (ignore timestamps) |
 | `-o file` | Output binary file (default: derived from input, e.g. `main.bin`) |
 
 Runs three phases automatically:
@@ -163,4 +164,5 @@ compile before dependents.
 ```sh
 ./nibbuild app.nib                  # produces app.bin
 ./nibbuild app.nib -o firmware.bin  # custom output name
+./nibbuild -f app.nib               # force clean rebuild
 ```
