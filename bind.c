@@ -804,10 +804,12 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             p = skip_ws(p);
             read_word(p, ins->name, sizeof(ins->name));
         }
-        else if (strcmp(opname, "in") == 0) {
+        else if (strcmp(opname, "in") == 0 || strcmp(opname, "inb") == 0) {
             ins->op = IR_ALU;
-            strncpy(ins->name, "in", 63);
+            strncpy(ins->name, opname, 63);
             ins->dst = parse_vreg(p, &p);
+            if (strcmp(opname, "inb") == 0 && ins->dst >= 0 && ins->dst < MAX_VREGS)
+                fn->vregs[ins->dst].is_byte = true;
             skip_comma(&p);
             p = skip_ws(p);
             if (*p == '%') {
@@ -817,9 +819,9 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 ins->imm = (int)strtol(p, (char **)&p, 0);
             }
         }
-        else if (strcmp(opname, "out") == 0) {
+        else if (strcmp(opname, "out") == 0 || strcmp(opname, "outb") == 0) {
             ins->op = IR_ALU;
-            strncpy(ins->name, "out", 63);
+            strncpy(ins->name, opname, 63);
             p = skip_ws(p);
             if (*p == '%') {
                 ins->dst = parse_vreg(p, &p);
@@ -831,6 +833,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 skip_comma(&p);
                 ins->src1 = parse_vreg(p, &p);
             }
+            if (strcmp(opname, "outb") == 0 && ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+                fn->vregs[ins->src1].is_byte = true;
         }
         else if (strcmp(opname, "cbw") == 0) {
             ins->op = IR_UNARY;
@@ -1519,12 +1523,26 @@ static void emit_function(func_t *fn) {
 
         case IR_MOV:
             if (ins->has_imm) {
-                fprintf(out_asm, "    mov %s, %d\n",
-                        vreg_asm(fn, ins->dst), ins->imm);
+                const char *d = vreg_asm(fn, ins->dst);
+                /* Segment registers can't take immediates — use AX as intermediate */
+                if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                    fn->vregs[ins->dst].is_seg) {
+                    fprintf(out_asm, "    mov AX, %d\n", ins->imm);
+                    fprintf(out_asm, "    mov %s, AX\n", d);
+                } else {
+                    fprintf(out_asm, "    mov %s, %d\n", d, ins->imm);
+                }
             } else if (ins->name[0]) {
                 /* Label reference — load address of constant */
-                fprintf(out_asm, "    mov %s, %s\n",
-                        vreg_asm(fn, ins->dst), ins->name);
+                const char *d = vreg_asm(fn, ins->dst);
+                /* Segment registers can't take label refs either */
+                if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                    fn->vregs[ins->dst].is_seg) {
+                    fprintf(out_asm, "    mov AX, %s\n", ins->name);
+                    fprintf(out_asm, "    mov %s, AX\n", d);
+                } else {
+                    fprintf(out_asm, "    mov %s, %s\n", d, ins->name);
+                }
             } else {
                 const char *d = vreg_asm(fn, ins->dst);
                 const char *s = vreg_asm(fn, ins->src1);
@@ -1537,8 +1555,7 @@ static void emit_function(func_t *fn) {
             const char *op = ins->name;
 
             /* Special two-operand forms */
-            if (strcmp(op, "in") == 0) {
-                /* IN: port is in src1 vreg or was an immediate */
+            if (strcmp(op, "in") == 0 || strcmp(op, "inb") == 0) {
                 if (ins->has_imm)
                     fprintf(out_asm, "    in %s, 0x%02X\n",
                             vreg_asm(fn, ins->dst), ins->imm);
@@ -1547,7 +1564,7 @@ static void emit_function(func_t *fn) {
                             vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
                 break;
             }
-            if (strcmp(op, "out") == 0) {
+            if (strcmp(op, "out") == 0 || strcmp(op, "outb") == 0) {
                 if (ins->has_imm)
                     fprintf(out_asm, "    out 0x%02X, %s\n",
                             ins->imm, vreg_asm(fn, ins->src1));
@@ -1740,29 +1757,42 @@ static void emit_function(func_t *fn) {
 
         case IR_GOTO_FN: {
             /* Raw jump to function — no cleanup, no args */
-            bool gf_far = false;
+            bool gf_emitted = false;
+            /* Check regular functions */
             for (int fi2 = 0; fi2 < nfunctions; fi2++) {
                 if (strcmp(functions[fi2].name, ins->name) == 0) {
-                    gf_far = functions[fi2].is_far;
+                    if (functions[fi2].has_at) {
+                        fprintf(out_asm, "    jmp far 0x%04X:0x%04X\n",
+                                functions[fi2].at_seg, functions[fi2].at_off);
+                        gf_emitted = true;
+                    } else if (functions[fi2].is_far) {
+                        fprintf(out_asm, "    jmp far %s\n", resolve_fn_name(ins->name));
+                        gf_emitted = true;
+                    } else {
+                        fprintf(out_asm, "    jmp %s\n", resolve_fn_name(ins->name));
+                        gf_emitted = true;
+                    }
                     break;
                 }
             }
-            if (!gf_far) {
+            /* Check externs */
+            if (!gf_emitted) {
                 for (int e = 0; e < nexterns; e++) {
                     if (strcmp(externs[e].name, ins->name) == 0) {
-                        gf_far = externs[e].is_far;
                         if (externs[e].has_address) {
                             fprintf(out_asm, "    jmp far 0x%04X:0x%04X\n",
                                     externs[e].addr_seg, externs[e].addr_off);
-                            gf_far = false;
+                        } else if (externs[e].is_far) {
+                            fprintf(out_asm, "    jmp far %s\n", ins->name);
+                        } else {
+                            fprintf(out_asm, "    jmp %s\n", ins->name);
                         }
+                        gf_emitted = true;
                         break;
                     }
                 }
             }
-            if (gf_far)
-                fprintf(out_asm, "    jmp far %s\n", resolve_fn_name(ins->name));
-            else
+            if (!gf_emitted)
                 fprintf(out_asm, "    jmp %s\n", resolve_fn_name(ins->name));
             break;
         }

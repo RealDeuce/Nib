@@ -725,22 +725,26 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
         if (strcmp(fn_name, "port_in") == 0) {
             if (argc >= 1) {
-                /* Check if port argument was a literal */
                 expr_t *port_expr = e->u.call.args;
                 if (port_expr && port_expr->kind == EXPR_LIT_INT)
-                    fprintf(C.nir, "    in %%%d, %d\n", dst, port_expr->u.lit_int);
+                    fprintf(C.nir, "    inb %%%d, %d\n", dst, port_expr->u.lit_int);
                 else
-                    fprintf(C.nir, "    in %%%d, %%%d\n", dst, arg_vregs[0]);
+                    fprintf(C.nir, "    inb %%%d, %%%d\n", dst, arg_vregs[0]);
             }
             return TV(dst, mk_type(TYPE_U8));
         }
         if (strcmp(fn_name, "port_out") == 0) {
             if (argc >= 2) {
+                /* Use outb for byte data, out for word.
+                 * Literals (NULL type) default to byte if they fit */
+                bool byte_io = !arg_types[1] ||
+                               type_size(arg_types[1]) == 1;
+                const char *op = byte_io ? "outb" : "out";
                 expr_t *port_expr = e->u.call.args;
                 if (port_expr && port_expr->kind == EXPR_LIT_INT)
-                    fprintf(C.nir, "    out %d, %%%d\n", port_expr->u.lit_int, arg_vregs[1]);
+                    fprintf(C.nir, "    %s %d, %%%d\n", op, port_expr->u.lit_int, arg_vregs[1]);
                 else
-                    fprintf(C.nir, "    out %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                    fprintf(C.nir, "    %s %%%d, %%%d\n", op, arg_vregs[0], arg_vregs[1]);
             }
             return TV(dst, mk_type(TYPE_VOID));
         }
