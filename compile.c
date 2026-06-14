@@ -1325,7 +1325,15 @@ static void emit_stmt(stmt_t *s) {
     }
     case STMT_FOR: {
         /* for (CX in start..0) — LOOP instruction */
-        int start = emit_expr(s->u.for_stmt.start);
+        /* Resolve constant start values */
+        expr_t *start_expr = s->u.for_stmt.start;
+        if (start_expr->kind == EXPR_IDENT) {
+            int cv;
+            if (find_constant(start_expr->u.ident, &cv) >= 0) {
+                start_expr->kind = EXPR_LIT_INT;
+                start_expr->u.lit_int = cv;
+            }
+        }
         int lbl_top = C.next_label++;
         int lbl_end = C.next_label++;
         int save_break = C.loop_break_label;
@@ -1334,7 +1342,12 @@ static void emit_stmt(stmt_t *s) {
         C.loop_continue_label = lbl_top;
         int cx_vreg = alloc_vreg();
         fprintf(C.nir, ".prefer %%%d, CX\n", cx_vreg);
-        fprintf(C.nir, "    mov %%%d, %%%d\n", cx_vreg, start);
+        if (start_expr->kind == EXPR_LIT_INT) {
+            fprintf(C.nir, "    mov %%%d, %d\n", cx_vreg, start_expr->u.lit_int);
+        } else {
+            int start = emit_expr(start_expr);
+            fprintf(C.nir, "    mov %%%d, %%%d\n", cx_vreg, start);
+        }
         fprintf(C.nir, ".L%d:\n", lbl_top);
         C.loop_depth++;
         push_scope();
