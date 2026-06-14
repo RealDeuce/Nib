@@ -12,7 +12,7 @@ fn alloc_header(size: u16) -> u16 {
 }
 
 fn test_struct_cast() {
-    header hdr = alloc_header(11) as (header);
+    struct header hdr = alloc_header(11) as (struct header);
     u16 len = hdr.length;
 }
 

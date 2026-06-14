@@ -34,6 +34,13 @@ type_t *mk_type_array(type_kind_t kind, int size) {
     return t;
 }
 
+type_t *mk_type_generic_array(type_t *elem, int size) {
+    type_t *t = mk_type(TYPE_ARRAY);
+    t->element_type = elem;
+    t->array_size = size;
+    return t;
+}
+
 type_t *mk_type_struct(const char *name) {
     type_t *t = mk_type(TYPE_STRUCT);
     t->struct_name = xstrdup(name);
@@ -158,6 +165,12 @@ expr_t *mk_expr_cast(expr_t *operand, type_t *target, int line) {
     expr_t *e = mk_expr(EXPR_CAST, line);
     e->u.cast.operand = operand;
     e->u.cast.target_type = target;
+    return e;
+}
+
+expr_t *mk_expr_array_init(expr_t *elements, int line) {
+    expr_t *e = mk_expr(EXPR_ARRAY_INIT, line);
+    e->u.array_init.elements = elements;
     return e;
 }
 
@@ -421,13 +434,18 @@ decl_t *mk_decl_struct(const char *name, bool aligned,
 
 decl_t *mk_decl_global(type_t *type, const char *name,
                         int pinned_reg, reg_class_t pin_class,
-                        expr_t *init, int line) {
+                        expr_t *init,
+                        bool has_at, int at_seg, int at_off,
+                        int line) {
     decl_t *d = mk_decl(DECL_GLOBAL, line);
     d->u.global.type = type;
     d->u.global.name = xstrdup(name);
     d->u.global.pinned_reg = pinned_reg;
     d->u.global.pin_class = pin_class;
     d->u.global.init = init;
+    d->u.global.has_at = has_at;
+    d->u.global.at_seg = at_seg;
+    d->u.global.at_off = at_off;
     return d;
 }
 
@@ -464,6 +482,13 @@ decl_t *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
 decl_t *mk_decl_use(const char *path, int line) {
     decl_t *d = mk_decl(DECL_USE, line);
     d->u.use_path = xstrdup(path);
+    return d;
+}
+
+decl_t *mk_decl_const(const char *name, int value, int line) {
+    decl_t *d = mk_decl(DECL_CONST, line);
+    d->u.konst.name = xstrdup(name);
+    d->u.konst.value = value;
     return d;
 }
 

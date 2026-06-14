@@ -73,6 +73,13 @@ typedef struct {
         bool    aligned;
     } structs[128];
     int nstructs;
+
+    /* Named constants */
+    struct {
+        char name[64];
+        int  value;
+    } constants[512];
+    int nconstants;
 } compiler_t;
 
 static compiler_t C;
@@ -153,6 +160,24 @@ static int find_struct(const char *name) {
     return -1;
 }
 
+/* ---- Constant lookup ---- */
+
+static int find_constant(const char *name, int *value) {
+    for (int i = 0; i < C.nconstants; i++)
+        if (strcmp(C.constants[i].name, name) == 0) {
+            if (value) *value = C.constants[i].value;
+            return i;
+        }
+    return -1;
+}
+
+static void register_constant(const char *name, int value) {
+    if (C.nconstants >= 512) return;
+    strncpy(C.constants[C.nconstants].name, name, 63);
+    C.constants[C.nconstants].value = value;
+    C.nconstants++;
+}
+
 /* ---- Function lookup ---- */
 
 static int find_function(const char *name) {
@@ -216,6 +241,7 @@ static int type_size(type_t *t) {
     case TYPE_ARRAY_U16:return t->array_size * 2;
     case TYPE_BCD:      return t->array_size;
     case TYPE_STRUCT:   return 0; /* would need struct lookup */
+    case TYPE_ARRAY:    return t->element_type ? type_size(t->element_type) * t->array_size : 0;
     case TYPE_FAR:      return 4;
     case TYPE_VOID:     return 0;
     }
@@ -235,6 +261,13 @@ static const char *type_str(type_t *t) {
     case TYPE_ARRAY_U16:snprintf(buf, sizeof(buf), "u16[%d]", t->array_size); return buf;
     case TYPE_BCD:      snprintf(buf, sizeof(buf), "bcd[%d]", t->array_size); return buf;
     case TYPE_STRUCT:   return t->struct_name ? t->struct_name : "struct";
+    case TYPE_ARRAY: {
+        static char abuf[64];
+        snprintf(abuf, sizeof(abuf), "%s[%d]",
+                 t->element_type ? type_str(t->element_type) : "?",
+                 t->array_size);
+        return abuf;
+    }
     case TYPE_FAR:      return "far";
     case TYPE_VOID:     return "void";
     }
@@ -293,7 +326,7 @@ static bool type_is_aggregate(type_t *t) {
     if (!t) return false;
     return t->kind == TYPE_ARRAY_U8 || t->kind == TYPE_ARRAY_U16 ||
            t->kind == TYPE_BCD || t->kind == TYPE_STRUCT ||
-           t->kind == TYPE_FAR;
+           t->kind == TYPE_FAR || t->kind == TYPE_ARRAY;
 }
 
 static bool type_is_integer(type_t *t) {
@@ -309,6 +342,7 @@ static type_t *type_of_element(type_t *t) {
     if (!t) return NULL;
     if (t->kind == TYPE_ARRAY_U8) return mk_type(TYPE_U8);
     if (t->kind == TYPE_ARRAY_U16) return mk_type(TYPE_U16);
+    if (t->kind == TYPE_ARRAY) return t->element_type;
     return NULL;
 }
 
@@ -434,6 +468,13 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(r, mk_type_array(TYPE_ARRAY_U8, slen));
     }
     case EXPR_IDENT: {
+        /* Check for named constant first */
+        int const_val;
+        if (find_constant(e->u.ident, &const_val) >= 0) {
+            int r = alloc_vreg();
+            fprintf(C.nir, "    mov %%%d, %d\n", r, const_val);
+            return TV(r, mk_type(TYPE_U16));
+        }
         symbol_t *sym = sym_lookup(e->u.ident);
         if (!sym) {
             cerr(e->line, "undefined variable '%s'", e->u.ident);
@@ -511,6 +552,19 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, result_type);
     }
     case EXPR_UNOP: {
+        /* Special case: &function_name — must check before evaluating operand,
+         * since function names aren't in the symbol table as variables */
+        if (e->u.unop.op == NIB_ADDR &&
+            e->u.unop.operand->kind == EXPR_IDENT &&
+            find_function(e->u.unop.operand->u.ident) >= 0) {
+            int dst = alloc_vreg();
+            int cid = C.next_const++;
+            fprintf(C.nir, ".const _C%d, far.ref %s\n",
+                    cid, e->u.unop.operand->u.ident);
+            fprintf(C.nir, "    mov %%%d, _C%d\n", dst, cid);
+            return TV(dst, mk_type(TYPE_FAR));
+        }
+
         typed_vreg_t operand = emit_expr_typed(e->u.unop.operand);
         int dst = alloc_vreg();
         type_t *result_type = operand.type;
@@ -1345,7 +1399,8 @@ static void compile_fn(decl_t *d) {
                                     p->type->kind == TYPE_ARRAY_U16 ||
                                     p->type->kind == TYPE_BCD ||
                                     p->type->kind == TYPE_STRUCT ||
-                                    p->type->kind == TYPE_FAR));
+                                    p->type->kind == TYPE_FAR ||
+                                    p->type->kind == TYPE_ARRAY));
         const char *ir_type = (is_ref && !p->is_value) ? "u16" : type_str(p->type);
         fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, ir_type, p->name);
         if (p->is_value) fprintf(C.nir, ", value");
@@ -1411,15 +1466,99 @@ static void compile_global(decl_t *d) {
     /* Add to the current (global) scope */
     sym_add(name, d->u.global.type, true);
 
-    fprintf(C.nir, ".global %s, %s", name,
-            type_str(d->u.global.type));
-    if (d->u.global.init) {
-        fprintf(C.nir, " ; has initializer");
-    }
-    fprintf(C.nir, "\n");
+    /* Emit .nif entry (always simple) */
+    fprintf(C.nif, ".global %s, %s\n", name, type_str(d->u.global.type));
 
-    fprintf(C.nif, ".global %s, %s\n", name,
-            type_str(d->u.global.type));
+    /* Check for array initializer */
+    if (d->u.global.init && d->u.global.init->kind == EXPR_ARRAY_INIT) {
+        type_t *ty = d->u.global.type;
+        type_t *elem_type = type_of_element(ty);
+        int arr_size = ty ? ty->array_size : 0;
+
+        if (!elem_type) {
+            cerr(d->line, "array initializer on non-array type '%s'",
+                 type_str(ty));
+            return;
+        }
+
+        /* Count initializer elements */
+        int nelem = 0;
+        for (expr_t *e = d->u.global.init->u.array_init.elements; e; e = e->next)
+            nelem++;
+
+        if (nelem > arr_size) {
+            cerr(d->line, "too many initializer elements (%d) for %s",
+                 nelem, type_str(ty));
+            return;
+        }
+
+        /* Emit .data block */
+        fprintf(C.nir, "\n.data %s, %s", name, type_str(ty));
+        if (d->u.global.has_at)
+            fprintf(C.nir, ", at(0x%04X:0x%04X)",
+                    d->u.global.at_seg, d->u.global.at_off);
+        fprintf(C.nir, "\n");
+
+        int elem_sz = type_size(elem_type);
+
+        for (expr_t *e = d->u.global.init->u.array_init.elements; e; e = e->next) {
+            /* &function_name → far.ref */
+            if (e->kind == EXPR_UNOP && e->u.unop.op == NIB_ADDR &&
+                e->u.unop.operand->kind == EXPR_IDENT &&
+                find_function(e->u.unop.operand->u.ident) >= 0) {
+                if (elem_type->kind != TYPE_FAR)
+                    cerr(e->line, "function reference in non-far array");
+                fprintf(C.nir, "  far.ref %s\n",
+                        e->u.unop.operand->u.ident);
+            }
+            /* far literal seg:off */
+            else if (e->kind == EXPR_FAR_LIT) {
+                if (elem_type->kind != TYPE_FAR)
+                    cerr(e->line, "far literal in non-far array");
+                fprintf(C.nir, "  far 0x%04X:0x%04X\n",
+                        e->u.far_lit.seg, e->u.far_lit.off);
+            }
+            /* integer literal */
+            else if (e->kind == EXPR_LIT_INT) {
+                if (elem_sz == 1)
+                    fprintf(C.nir, "  db 0x%02X\n", e->u.lit_int & 0xFF);
+                else if (elem_sz == 2)
+                    fprintf(C.nir, "  dw 0x%04X\n", e->u.lit_int & 0xFFFF);
+                else if (elem_sz == 4)
+                    fprintf(C.nir, "  dd 0x%08X\n", e->u.lit_int);
+                else
+                    fprintf(C.nir, "  dw 0x%04X\n", e->u.lit_int & 0xFFFF);
+            }
+            else {
+                cerr(e->line,
+                     "global initializer must be a constant (literal, &fn, or far)");
+            }
+        }
+
+        /* Zero-fill remaining elements */
+        for (int i = nelem; i < arr_size; i++) {
+            if (elem_type->kind == TYPE_FAR)
+                fprintf(C.nir, "  far 0x0000:0x0000\n");
+            else if (elem_sz == 1)
+                fprintf(C.nir, "  db 0x00\n");
+            else if (elem_sz == 2)
+                fprintf(C.nir, "  dw 0x0000\n");
+            else
+                fprintf(C.nir, "  dw 0x0000\n");
+        }
+
+        fprintf(C.nir, ".enddata\n");
+        return;
+    }
+
+    /* Non-array global */
+    fprintf(C.nir, ".global %s, %s", name, type_str(d->u.global.type));
+    if (d->u.global.has_at)
+        fprintf(C.nir, ", at(0x%04X:0x%04X)",
+                d->u.global.at_seg, d->u.global.at_off);
+    if (d->u.global.init)
+        fprintf(C.nir, " ; has initializer");
+    fprintf(C.nir, "\n");
 }
 
 static void compile_extern_fn(decl_t *d) {
@@ -1684,6 +1823,9 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
         case DECL_USE:
             fprintf(C.nir, "; use \"%s\"\n", d->u.use_path);
             import_nif(d->u.use_path, d->line);
+            break;
+        case DECL_CONST:
+            register_constant(d->u.konst.name, d->u.konst.value);
             break;
         }
     }

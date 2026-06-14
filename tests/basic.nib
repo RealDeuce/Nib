@@ -190,7 +190,7 @@ fn flag_test() {
 }
 
 // Struct field access
-fn struct_test(hdr: file_header) -> u16 {
+fn struct_test(hdr: struct file_header) -> u16 {
     u16 len = hdr.length;
     u8 first = hdr.name[0];
     return len;

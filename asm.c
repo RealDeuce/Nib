@@ -55,6 +55,7 @@ static uint8_t *output;
 static bool    *written;
 static int out_pos = 0;
 static int org_base = 0;
+static int seg_base = 0; /* current segment for SEG operator */
 static int pass = 1;     /* 1 or 2 */
 static int errors = 0;
 
@@ -83,6 +84,7 @@ typedef struct {
     int  value;
     bool defined;
     label_type_t ltype;
+    int  segment;       /* segment value when label was defined */
 } label_t;
 
 static label_t labels[MAX_LABELS];
@@ -112,6 +114,7 @@ static label_t *add_label_typed(const char *name, int value, label_type_t ltype)
         l->value = value;
         l->defined = true;
         l->ltype = ltype;
+        l->segment = seg_base;
         return l;
     }
     if (nlabels >= MAX_LABELS)
@@ -122,6 +125,7 @@ static label_t *add_label_typed(const char *name, int value, label_type_t ltype)
     l->value = value;
     l->defined = true;
     l->ltype = ltype;
+    l->segment = seg_base;
     return l;
 }
 
@@ -344,6 +348,22 @@ static int parse_primary(void) {
     }
     if (t.type == T_IDENT) {
         consume();
+        /* SEG operator: returns the segment a label was defined in */
+        if (strcasecmp(t.sval, "SEG") == 0) {
+            token_t lt = peek_token();
+            if (lt.type == T_IDENT) {
+                consume();
+                label_t *l = find_label(lt.sval);
+                if (!l || !l->defined) {
+                    if (pass == 2) {
+                        err("undefined label '%s'", lt.sval);
+                        errors++;
+                    }
+                    return 0;
+                }
+                return l->segment;
+            }
+        }
         return lookup_label(t.sval);
     }
     if (t.type == T_LPAREN) {
@@ -1567,10 +1587,9 @@ static void process_line(char *line) {
     }
 
     if (strcasecmp(t.sval, "seg") == 0) {
-        /* SEG directive — for now just reset position, segments are
-           handled by the binder in the full toolchain */
+        /* SEG directive — sets current segment base for label tracking */
         operand_t op = parse_operand();
-        (void)op;
+        seg_base = op.imm;
         return;
     }
 
@@ -1630,6 +1649,7 @@ int main(int argc, char **argv) {
     pass = 1;
     out_pos = 0;
     org_base = 0;
+    seg_base = 0;
     errors = 0;
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
@@ -1640,6 +1660,7 @@ int main(int argc, char **argv) {
     pass = 2;
     out_pos = 0;
     org_base = 0;
+    seg_base = 0;
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
         process_line(lines[i]);

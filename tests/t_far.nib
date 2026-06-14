@@ -5,7 +5,7 @@ struct ivt_entry {
     far handler;
 }
 
-fn read_ivt_seg(entry: ivt_entry) -> u16 {
+fn read_ivt_seg(entry: struct ivt_entry) -> u16 {
     far handler = entry.handler;
     seg ES = handler`seg;
     return handler`off;
@@ -20,3 +20,13 @@ fn get_seg(addr: far) -> u16 {
     // (can't return seg type from a u16-returning function)
     return 0;
 }
+
+// Test: &function_name returns a far address
+fn my_handler() {
+    return;
+}
+
+fn get_handler_addr() -> far {
+    return &my_handler;
+}
+

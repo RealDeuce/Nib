@@ -79,6 +79,7 @@ static void mods_reset(void) {
     struct { int reg; int rclass; } regval;
     flag_expr_t   *fexpr;
     flag_case_t   *fcase;
+    struct { bool has_at; int seg; int off; } at_clause;
 }
 
 /* ---- Literals and identifiers ---- */
@@ -94,7 +95,7 @@ static void mods_reset(void) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT
+%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT KW_CONST
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -122,7 +123,7 @@ static void mods_reset(void) {
 %type <type>   type return_clause
 %type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list
 %type <stmt>   stmt stmt_list var_decl assignment checked_assignment if_stmt while_stmt for_stmt asm_block
-%type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl
+%type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl
 %type <param>  param param_list extern_param extern_param_list
 %type <field>  struct_field struct_fields
 %type <rlist>  reg_flag_list reg_or_flag asm_annotation preserves_clause
@@ -132,6 +133,7 @@ static void mods_reset(void) {
 %type <sval>   any_ident
 %type <fcase>  flag_block flag_cases flag_case
 %type <fexpr>  flag_expr flag_atom
+%type <at_clause> at_clause
 
 /* ---- Precedence (low to high) ---- */
 %left OP_XCHG
@@ -165,6 +167,7 @@ top_decl
     | extern_decl           { $$ = $1; }
     | global_decl           { $$ = $1; }
     | use_decl              { $$ = $1; }
+    | const_decl            { $$ = $1; }
     ;
 
 /* ==== Use directive ==== */
@@ -173,21 +176,37 @@ use_decl
     : KW_USE LIT_STRING ';'    { $$ = mk_decl_use($2, yyline); }
     ;
 
+/* ==== Constant declarations ==== */
+
+const_decl
+    : KW_CONST IDENT '=' LIT_INT ';'
+        { $$ = mk_decl_const($2, $4, yyline); }
+    ;
+
 /* ==== Global variable declarations ==== */
 
 global_decl
-    : type IDENT '=' expr ';'
-        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, $4, yyline); }
-    | type IDENT ';'
-        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, NULL, yyline); }
-    | type reg_name '=' expr ';'
-        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, $4, yyline); }
-    | type reg_name ';'
-        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, NULL, yyline); }
+    : type IDENT at_clause '=' expr ';'
+        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, $5, $3.has_at, $3.seg, $3.off, yyline); }
+    | type IDENT at_clause '=' '{' arg_list '}' ';'
+        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, mk_expr_array_init($6, yyline), $3.has_at, $3.seg, $3.off, yyline); }
+    | type IDENT at_clause ';'
+        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, NULL, $3.has_at, $3.seg, $3.off, yyline); }
+    | type reg_name at_clause '=' expr ';'
+        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, $5, $3.has_at, $3.seg, $3.off, yyline); }
+    | type reg_name at_clause ';'
+        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, NULL, $3.has_at, $3.seg, $3.off, yyline); }
     | KW_EXTERN type IDENT ';'
         { $$ = mk_decl_extern_global($2, $3, yyline); }
     | KW_EXTERN type reg_name ';'
         { $$ = mk_decl_extern_global($2, NULL, yyline); }
+    ;
+
+at_clause
+    : /* empty */
+        { $$.has_at = false; $$.seg = 0; $$.off = 0; }
+    | KW_AT '(' LIT_INT ':' LIT_INT ')'
+        { $$.has_at = true; $$.seg = $3; $$.off = $5; }
     ;
 
 /* ==== Struct definitions ==== */
@@ -693,7 +712,9 @@ type
     | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(TYPE_ARRAY_U8, $3); }
     | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_ARRAY_U16, $3); }
     | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_BCD, $3); }
-    | IDENT                     { $$ = mk_type_struct($1); }
+    | KW_FAR '[' LIT_INT ']'   { $$ = mk_type_generic_array(mk_type(TYPE_FAR), $3); }
+    | KW_STRUCT IDENT '[' LIT_INT ']' { $$ = mk_type_generic_array(mk_type_struct($2), $4); }
+    | KW_STRUCT IDENT           { $$ = mk_type_struct($2); }
     ;
 
 /* Identifiers that can appear after backtick — includes keywords

@@ -221,10 +221,28 @@ static int nexterns = 0;
 typedef struct {
     char label[32];
     char data[256];     /* raw text to emit as db/dw */
+    bool is_far_ref;    /* true if this is a far.ref to a function */
+    char ref_name[64];  /* function name for far.ref resolution */
 } const_entry_t;
 
 static const_entry_t consts[MAX_CONSTS];
 static int nconsts = 0;
+
+/* Data blocks (initialized globals with placement) */
+#define MAX_DATA_BLOCKS 64
+#define MAX_DATA_ENTRIES 1024
+typedef struct {
+    char label[64];
+    bool has_at;
+    int  at_seg;
+    int  at_off;
+    /* Entries: raw assembly lines to emit */
+    char entries[MAX_DATA_ENTRIES][128];
+    int  nentries;
+} data_block_t;
+
+static data_block_t data_blocks[MAX_DATA_BLOCKS];
+static int ndata_blocks = 0;
 
 /* Global binder state */
 static func_t functions[MAX_FNS];
@@ -398,6 +416,17 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                                             "'%c'", p[i]);
                         }
                     }
+                } else if (strncmp(p, "far.ref ", 8) == 0) {
+                    /* Far function reference: far.ref function_name
+                     * Deferred to assembler — emit label + SEG operator */
+                    p += 8;
+                    char fname[64];
+                    p = read_word(p, fname, sizeof(fname));
+                    c->is_far_ref = true;
+                    strncpy(c->ref_name, fname, 63);
+                    c->ref_name[63] = '\0';
+                    snprintf(c->data, sizeof(c->data),
+                             "%s dw %s, SEG %s", c->label, fname, fname);
                 } else if (strncmp(p, "far ", 4) == 0) {
                     /* Far constant: far 0xSEG:0xOFF */
                     p += 4;
@@ -930,6 +959,67 @@ static void parse_nir(const char *path) {
             }
             ext->nparams = pi;
         }
+        if (strncmp(p, ".data ", 6) == 0) {
+            if (ndata_blocks >= MAX_DATA_BLOCKS) continue;
+            data_block_t *db = &data_blocks[ndata_blocks++];
+            memset(db, 0, sizeof(*db));
+            p += 6;
+            /* Parse: name, type[, at(seg:off)] */
+            p = read_word(p, db->label, sizeof(db->label));
+            /* strip trailing comma from label */
+            int llen = strlen(db->label);
+            if (llen > 0 && db->label[llen-1] == ',') db->label[llen-1] = '\0';
+            /* scan for at() anywhere on the rest of the line */
+            char *at_ptr = strstr(p, "at(");
+            if (at_ptr) {
+                db->has_at = true;
+                char *colon = strchr(at_ptr + 3, ':');
+                if (colon) {
+                    db->at_seg = (int)strtol(at_ptr + 3, NULL, 0);
+                    db->at_off = (int)strtol(colon + 1, NULL, 0);
+                }
+            }
+            /* Read data entries until .enddata */
+            char dline[512];
+            while (fgets(dline, sizeof(dline), fp)) {
+                char *dp = dline;
+                while (*dp == ' ' || *dp == '\t') dp++;
+                /* strip newline */
+                char *nl = strchr(dp, '\n');
+                if (nl) *nl = '\0';
+                nl = strchr(dp, '\r');
+                if (nl) *nl = '\0';
+                if (strncmp(dp, ".enddata", 8) == 0) break;
+                if (!*dp || *dp == ';') continue;
+                if (db->nentries < MAX_DATA_ENTRIES) {
+                    /* Convert IR data entries to assembly */
+                    if (strncmp(dp, "far.ref ", 8) == 0) {
+                        char fname[64];
+                        read_word(dp + 8, fname, sizeof(fname));
+                        snprintf(db->entries[db->nentries++], 128,
+                                 "    dw %s, SEG %s", fname, fname);
+                    } else if (strncmp(dp, "far ", 4) == 0) {
+                        int seg = 0, off = 0;
+                        char *fp2 = dp + 4;
+                        seg = (int)strtol(fp2, &fp2, 0);
+                        if (*fp2 == ':') fp2++;
+                        off = (int)strtol(fp2, NULL, 0);
+                        snprintf(db->entries[db->nentries++], 128,
+                                 "    dw 0x%04X, 0x%04X", off, seg);
+                    } else if (strncmp(dp, "dw ", 3) == 0) {
+                        snprintf(db->entries[db->nentries++], 128,
+                                 "    %s", dp);
+                    } else if (strncmp(dp, "db ", 3) == 0) {
+                        snprintf(db->entries[db->nentries++], 128,
+                                 "    %s", dp);
+                    } else if (strncmp(dp, "dd ", 3) == 0) {
+                        snprintf(db->entries[db->nentries++], 128,
+                                 "    %s", dp);
+                    }
+                }
+            }
+            continue;
+        }
         /* Skip .global and other top-level directives */
     }
 
@@ -1133,6 +1223,7 @@ static void emit_function(func_t *fn) {
 
     if (fn->has_at) {
         int linear = fn->at_seg * 16 + fn->at_off;
+        fprintf(out_asm, "    seg 0x%04X\n", fn->at_seg);
         fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
                 linear, fn->at_seg, fn->at_off);
     }
@@ -1957,6 +2048,21 @@ int main(int argc, char **argv) {
         fprintf(out_asm, "\n; === constant pool ===\n");
         for (int i = 0; i < nconsts; i++)
             fprintf(out_asm, "%s\n", consts[i].data);
+    }
+
+    /* Emit data blocks (initialized globals) */
+    for (int i = 0; i < ndata_blocks; i++) {
+        data_block_t *db = &data_blocks[i];
+        fprintf(out_asm, "\n; === data: %s ===\n", db->label);
+        if (db->has_at) {
+            int linear = db->at_seg * 16 + db->at_off;
+            fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
+            fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+                    linear, db->at_seg, db->at_off);
+        }
+        fprintf(out_asm, "%s:\n", db->label);
+        for (int j = 0; j < db->nentries; j++)
+            fprintf(out_asm, "%s\n", db->entries[j]);
     }
 
     fclose(out_asm);

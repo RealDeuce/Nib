@@ -46,9 +46,10 @@ typedef enum {
 typedef enum {
     TYPE_U8, TYPE_U16, TYPE_U32, TYPE_SEG, TYPE_BOOL,
     TYPE_ARRAY_U8, TYPE_ARRAY_U16,
+    TYPE_ARRAY,     /* generic array: element_type[array_size] */
     TYPE_BCD,
     TYPE_STRUCT,
-    TYPE_FAR,       /* far pointer: seg:off, 4 bytes */
+    TYPE_FAR,
     TYPE_VOID
 } type_kind_t;
 
@@ -56,6 +57,7 @@ struct type_node {
     type_kind_t kind;
     int         array_size;     /* for arrays and BCD: element count */
     char       *struct_name;    /* for TYPE_STRUCT */
+    type_t     *element_type;   /* for TYPE_ARRAY: element type */
 };
 
 /* ---- Expressions ---- */
@@ -92,7 +94,8 @@ typedef enum {
     EXPR_MEM,
     EXPR_FAR_LIT,   /* far literal: seg:off */
     EXPR_CAST,
-    EXPR_PAREN
+    EXPR_PAREN,
+    EXPR_ARRAY_INIT /* array initializer: [expr, expr, ...] */
 } expr_kind_t;
 
 struct expr_node {
@@ -147,6 +150,9 @@ struct expr_node {
             bool     abs_seg;   /* true for [0xB800:0x0000] form */
             int      abs_seg_val;
         } mem;
+
+        /* ARRAY_INIT — [expr, expr, ...] */
+        struct { expr_t *elements; } array_init;
     } u;
 
     expr_t *next;   /* for argument lists */
@@ -295,7 +301,8 @@ typedef enum {
     DECL_GLOBAL,
     DECL_EXTERN_GLOBAL,
     DECL_EXTERN_FN,
-    DECL_USE
+    DECL_USE,
+    DECL_CONST
 } decl_kind_t;
 
 typedef struct {
@@ -340,6 +347,9 @@ struct decl_node {
             int     pinned_reg;
             reg_class_t pin_class;
             expr_t *init;
+            bool    has_at;
+            int     at_seg;
+            int     at_off;
         } global;
 
         /* EXTERN_FN */
@@ -360,6 +370,12 @@ struct decl_node {
 
         /* USE */
         char *use_path;
+
+        /* CONST */
+        struct {
+            char *name;
+            int   value;
+        } konst;
     } u;
 
     decl_t *next;
@@ -377,6 +393,7 @@ typedef struct {
 /* Implemented in ast.c */
 type_t     *mk_type(type_kind_t kind);
 type_t     *mk_type_array(type_kind_t kind, int size);
+type_t     *mk_type_generic_array(type_t *elem, int size);
 type_t     *mk_type_struct(const char *name);
 
 expr_t     *mk_expr_int(int val, int line);
@@ -395,6 +412,7 @@ expr_t     *mk_expr_mem(reg_id_t seg, reg_id_t base, reg_id_t idx,
 expr_t     *mk_expr_mem_abs(int seg, int off, int line);
 expr_t     *mk_expr_far_lit(int seg, int off, int line);
 expr_t     *mk_expr_cast(expr_t *operand, type_t *target, int line);
+expr_t     *mk_expr_array_init(expr_t *elements, int line);
 
 stmt_t     *mk_stmt_vardecl(type_t *type, const char *name,
                              int pinned_reg, reg_class_t pin_class,
@@ -440,7 +458,9 @@ decl_t     *mk_decl_struct(const char *name, bool aligned,
                             field_t *fields, int line);
 decl_t     *mk_decl_global(type_t *type, const char *name,
                             int pinned_reg, reg_class_t pin_class,
-                            expr_t *init, int line);
+                            expr_t *init,
+                            bool has_at, int at_seg, int at_off,
+                            int line);
 decl_t     *mk_decl_extern_global(type_t *type, const char *name, int line);
 decl_t     *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
                                param_t *params, type_t *ret,
@@ -449,6 +469,7 @@ decl_t     *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
                                bool has_addr, int addr_seg, int addr_off,
                                int line);
 decl_t     *mk_decl_use(const char *path, int line);
+decl_t     *mk_decl_const(const char *name, int value, int line);
 
 program_t  *mk_program(void);
 void        program_add(program_t *p, decl_t *d);

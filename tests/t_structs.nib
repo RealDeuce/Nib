@@ -6,8 +6,8 @@ struct point {
 }
 
 struct rect {
-    point origin;
-    point size;
+    struct point origin;
+    struct point size;
 }
 
 struct file_entry {
@@ -36,26 +36,26 @@ struct mixed_fields {
     u16 data;
 }
 
-fn read_point(p: point) -> u16 {
+fn read_point(p: struct point) -> u16 {
     return p.x;
 }
 
-fn read_file(f: file_entry) -> u16 {
+fn read_file(f: struct file_entry) -> u16 {
     u16 sz = f.size;
     u8 t = f.type;
     return sz;
 }
 
-fn read_nested(r: rect) -> u16 {
+fn read_nested(r: struct rect) -> u16 {
     return r.origin.x;
 }
 
-fn bitfield_read(s: status_reg) -> u8 {
+fn bitfield_read(s: struct status_reg) -> u8 {
     u8 m = s.mode;
     u8 ch = s.channel;
     return m;
 }
 
-fn toggle_bit(m: mixed_fields) {
+fn toggle_bit(m: struct mixed_fields) {
     m.hidden ~= 1;
 }

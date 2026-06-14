@@ -75,6 +75,7 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 "goto"                  { return KW_GOTO; }
 "at"                    { return KW_AT; }
 "tailcall"              { return KW_TAILCALL; }
+"const"                 { return KW_CONST; }
 
  /* ---- Type keywords ---- */
 "u8"                    { return TY_U8; }
@@ -197,8 +198,8 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
     return LIT_STRING;
 }
 
- /* ---- Identifiers (lowercase only) ---- */
-[a-z][a-z0-9_]*         { yylval.sval = strdup(yytext); return IDENT; }
+ /* ---- Identifiers ---- */
+[a-zA-Z_][a-zA-Z0-9_]*  { yylval.sval = strdup(yytext); return IDENT; }
 
  /* ---- Catch-all ---- */
 .                       { fprintf(stderr, "line %d: unexpected character '%c'\n", yyline, yytext[0]); }

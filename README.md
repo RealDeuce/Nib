@@ -23,9 +23,12 @@ allocator) is not yet implemented.
   - Strong type checking (no implicit integer promotion, literals auto-promote)
   - Virtual register allocation with register pinning preferences
   - Scope tracking with shadowing
+  - `const` declarations, array initializers, `at()` placement, `&fn` addresses
+  - Identifiers allow uppercase (`[a-zA-Z_][a-zA-Z0-9_]*`); struct type prefix required
 - Two-pass V20 cross-assembler (`nibasm`)
   - Full 8086/80186 instruction set
   - V20 extensions (bit ops, BCD string ops, nibble rotate, 8080 emulation)
+  - `SEG` operator for segment-relative label references
   - Map file output for symbol/data tracking
 - V20 disassembler (`nibdis`) with map file support
 
@@ -99,6 +102,22 @@ u16 wide = sign_extend(byte_val);
 
 // Checked array access
 u8 val = buffer![index]; // BOUND + access
+
+// Constants inline as literals
+const PORT_LCD = 0x60;
+port_out(PORT_LCD, data);
+
+// Function address as far pointer
+far addr = &my_handler;
+
+// Globals at fixed addresses
+far[4] ivt at(0x0000:0x0000) = {&h0, &h1, &h2, &h3};
+
+// Array initializers (short = zero-filled)
+u8[8] buf = {0x41, 0x42, 0x43};
+
+// Struct types require the struct keyword prefix
+fn read(p: struct Point) -> u16 { ... }
 
 // Cross-module imports
 use "lcd.nif";

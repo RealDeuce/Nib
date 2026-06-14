@@ -1,0 +1,29 @@
+// Test: global declarations with at() placement and array initializers
+
+fn handler0() {
+    return;
+}
+
+fn handler1() {
+    return;
+}
+
+fn handler2() {
+    return;
+}
+
+fn handler3() {
+    return;
+}
+
+// IVT-style: placed far array with function references
+far[4] ivt at(0x0000:0x0000) = {&handler0, &handler1, &handler2, &handler3};
+
+// Simple global (no placement, no init)
+u16 counter;
+
+// Global with initializer
+u16 magic = 0xDEAD;
+
+// Byte array with partial init (remaining zero-filled)
+u8[8] buffer = {0x41, 0x42, 0x43};

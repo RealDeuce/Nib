@@ -10,6 +10,13 @@ whole-program register optimization, and minimal caller-saves overhead.
 The goal is not abstraction — it's a better notation for writing efficient
 assembly.
 
+### Identifiers
+
+Identifiers match `[a-zA-Z_][a-zA-Z0-9_]*`. Registers (`AX`, `BX`, ...)
+and flags (`CF`, `ZF`, ...) are matched as keyword tokens before the
+identifier rule, so there is no ambiguity between uppercase identifiers
+and hardware names.
+
 ## Toolchain
 
 ```
@@ -105,10 +112,11 @@ tracks flag liveness — a flag set by an ADD is available for a subsequent
 |------------|---------------|--------------------------------|
 | `u8[N]`    | N bytes       | Fixed-size byte array          |
 | `u16[N]`   | N * 2 bytes   | Fixed-size word array          |
+| `far[N]`   | N * 4 bytes   | Fixed-size far pointer array   |
 | `bcd[N]`   | N bytes       | Packed BCD, 2 digits per byte  |
 
 Array size is part of the type. `u8[80]` and `u8[40]` are distinct types.
-Arrays do not decay to pointers.
+Arrays do not decay to pointers. Struct arrays use `struct Name[N]` syntax.
 
 
 ## Declarations
@@ -124,6 +132,29 @@ u8  ch = 0x20;
 seg ES = 0xB800;
 bcd[4] price = 9999;
 u8[80] buffer;
+```
+
+### Array initializers
+
+Arrays can be initialized with C-style brace syntax. Short initializers
+are zero-filled to the declared size.
+
+```
+u8[8] buf = {0x41, 0x42, 0x43};    // 3 bytes + 5 zero bytes
+u16[4] table = {100, 200, 300, 400};
+far[4] ivt = {&handler_a, &handler_b, &handler_c, &handler_d};
+```
+
+### Constants
+
+Named compile-time constants are declared with `const`. They inline as
+literals wherever used — no storage is allocated.
+
+```
+const PORT_LCD = 0x60;
+const SCREEN_WIDTH = 480;
+
+port_out(PORT_LCD, data);           // same as port_out(0x60, data)
 ```
 
 ### Register pinning
@@ -159,7 +190,8 @@ fn name(param: type, ...) -> return_type {
 }
 ```
 
-Return type is omitted if the function returns nothing.
+Return type is omitted if the function returns nothing. Struct type
+parameters and return types require the `struct` keyword prefix.
 
 ```
 fn add(a: u16, b: u16) -> u16 {
@@ -168,6 +200,10 @@ fn add(a: u16, b: u16) -> u16 {
 
 fn clear_screen() {
     // ...
+}
+
+fn read_point(p: struct Point) -> u16 {
+    return p.x + p.y;
 }
 ```
 
@@ -376,6 +412,13 @@ Returns the offset of a variable within its segment. For struct fields:
 
 ```
 u16 addr = &record.field    // LEA with displacement
+```
+
+When applied to a function name, `&` returns a `far` address (segment:offset)
+that the binder resolves at link time:
+
+```
+far handler_addr = &my_handler  // far pointer to function
 ```
 
 ### Comparisons
@@ -941,6 +984,20 @@ which conflicts with the Intel port string input instruction
 
 All other instructions use standard Intel 8086/80186 mnemonics.
 
+### SEG operator
+
+The assembler supports `SEG label` in expressions, returning the segment
+value that was active when `label` was defined. The `SEG` directive sets
+the current segment value for subsequent labels.
+
+```
+SEG 0xF000                  ; set segment context
+rom_entry:                  ; rom_entry is in segment 0xF000
+    ...
+
+    mov ax, SEG rom_entry   ; AX = 0xF000
+```
+
 
 ## Segments
 
@@ -1050,12 +1107,26 @@ struct aligned Cursor {
 word accesses are single-cycle. On the V20 unaligned word access works
 but costs an extra bus cycle.
 
+### Struct type references
+
+When referring to a struct type outside of its definition — in variable
+declarations, parameters, return types, casts, or `as` typed pointers —
+the `struct` keyword prefix is required.
+
+```
+struct Point p;                     // variable declaration
+fn read(p: struct Point) -> u16;    // parameter and return type
+```
+
+Struct definitions still use `struct Name { ... }` without a prefix on
+the name being defined.
+
 ### Field access
 
 Dot syntax, compiles to base+displacement addressing:
 
 ```
-fn read_header(hdr: FileHeader) -> u16 {
+fn read_header(hdr: struct FileHeader) -> u16 {
     // hdr is a reference, address in a register (say BX)
     u16 len = hdr.length;       // MOV AX, [BX+1]
     u8 first = hdr.name[0];    // MOV AL, [BX+3]
@@ -1184,6 +1255,19 @@ u16 screen_width = 480;
 u8[80] input_buffer;
 bcd[4] running_total = 0;
 ```
+
+### Placement with `at()`
+
+Global variables can be placed at specific far addresses using the
+`at(seg:off)` modifier. The variable is not allocated in the data
+segment — it refers to the given absolute address.
+
+```
+far[4] ivt at(0x0000:0x0000) = {&handler_0, &handler_1, &handler_2, &handler_3};
+u8 keyboard_reg at(0x0000:0x00B0);
+```
+
+### Cross-unit access
 
 Globals are accessible from any function in the same compilation unit.
 Cross-unit access is declared with `extern`:
