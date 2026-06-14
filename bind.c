@@ -596,7 +596,11 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 p = skip_ws(p);
                 if (*p == '%') {
                     ins->src2 = parse_vreg(p, &p);
-                    ins->op = IR_ALU;
+                    /* Classify: cmp.* -> IR_CMP, else IR_ALU */
+                    if (strncmp(opname, "cmp.", 4) == 0)
+                        ins->op = IR_CMP;
+                    else
+                        ins->op = IR_ALU;
                 } else {
                     ins->op = IR_UNARY;
                 }
@@ -898,20 +902,43 @@ static void emit_function(func_t *fn) {
             break;
         }
 
-        case IR_CMP: {
-            /* cmp.xx %d, %l, %r — sets flags, %d is the condition */
-            const char *l = vreg_asm(fn, ins->src1);
-            const char *r = vreg_asm(fn, ins->src2);
-            fprintf(out_asm, "    cmp %s, %s\n", l, r);
+        case IR_CMP:
+            /* Handled together with the following JZ */
+            break;
+
+        case IR_JZ: {
+            /* Find the preceding CMP that defined this condition vreg */
+            const char *jcc = "jz"; /* fallback */
+            for (int j = i - 1; j >= 0; j--) {
+                ir_insn_t *cmp = &fn->insns[j];
+                if (cmp->op == IR_ALU || cmp->op == IR_CMP) {
+                    if (cmp->dst == ins->src1) {
+                        /* Emit the CMP */
+                        fprintf(out_asm, "    cmp %s, %s\n",
+                                vreg_asm(fn, cmp->src1),
+                                vreg_asm(fn, cmp->src2));
+                        /* Map comparison kind to Jcc — note: jz means
+                           "jump if condition NOT met" (the condition
+                           vreg is zero), so we invert */
+                        const char *op = cmp->name;
+                        if (strcmp(op, "cmp.eq") == 0)       jcc = "jne";
+                        else if (strcmp(op, "cmp.ne") == 0)  jcc = "je";
+                        else if (strcmp(op, "cmp.b") == 0)   jcc = "jnb";
+                        else if (strcmp(op, "cmp.a") == 0)   jcc = "jbe";
+                        else if (strcmp(op, "cmp.be") == 0)  jcc = "ja";
+                        else if (strcmp(op, "cmp.ae") == 0)  jcc = "jb";
+                        else if (strcmp(op, "cmp.l") == 0)   jcc = "jnl";
+                        else if (strcmp(op, "cmp.g") == 0)   jcc = "jle";
+                        else if (strcmp(op, "cmp.le") == 0)  jcc = "jg";
+                        else if (strcmp(op, "cmp.ge") == 0)  jcc = "jl";
+                        break;
+                    }
+                }
+                if (cmp->op == IR_LABEL || cmp->op == IR_JMP) break;
+            }
+            fprintf(out_asm, "    %s %s\n", jcc, ins->name);
             break;
         }
-
-        case IR_JZ:
-            /* jz %cond, label — jump if condition is zero (flag not set) */
-            /* The condition was set by a preceding CMP, so we need the
-               right conditional jump. For now, emit generic JZ. */
-            fprintf(out_asm, "    jz %s\n", ins->name);
-            break;
 
         case IR_JMP:
             fprintf(out_asm, "    jmp %s\n", ins->name);
