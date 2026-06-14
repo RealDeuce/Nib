@@ -247,6 +247,7 @@ typedef struct {
     /* Entries: raw assembly lines to emit */
     char entries[MAX_DATA_ENTRIES][512];
     int  nentries;
+    char module[64];    /* source module this data block belongs to */
 } data_block_t;
 
 static data_block_t data_blocks[MAX_DATA_BLOCKS];
@@ -258,10 +259,27 @@ typedef struct {
     char name[64];
     char type[32];
     int  size;          /* bytes of storage */
+    char module[64];    /* source module this global belongs to */
 } global_var_t;
 
 static global_var_t globals[MAX_GLOBALS];
 static int nglobals = 0;
+
+/* Emission order — tracks the source order of all top-level items */
+#define EMIT_FN    0
+#define EMIT_DATA  1
+#define EMIT_GLOB  2
+#define MAX_EMIT_ORDER 1024
+static struct { int kind; int index; } emit_order[MAX_EMIT_ORDER];
+static int nemit_order = 0;
+
+static void record_emit(int kind, int index) {
+    if (nemit_order < MAX_EMIT_ORDER) {
+        emit_order[nemit_order].kind = kind;
+        emit_order[nemit_order].index = index;
+        nemit_order++;
+    }
+}
 
 /* Global binder state */
 static func_t functions[MAX_FNS];
@@ -1053,6 +1071,7 @@ static void parse_nir(const char *path) {
                 fn->vregs[i].spill_slot = -1;
             }
             parse_function(fp, fn, p);
+            record_emit(EMIT_FN, nfunctions - 1);
         }
         if (strncmp(p, ".extern ", 8) == 0) {
             if (nexterns >= MAX_EXTERNS) continue;
@@ -1109,6 +1128,8 @@ static void parse_nir(const char *path) {
             if (ndata_blocks >= MAX_DATA_BLOCKS) continue;
             data_block_t *db = &data_blocks[ndata_blocks++];
             memset(db, 0, sizeof(*db));
+            strncpy(db->module, cur_module, 63);
+            record_emit(EMIT_DATA, ndata_blocks - 1);
             p += 6;
             /* Parse: name, type[, at(seg:off)] */
             p = read_word(p, db->label, sizeof(db->label));
@@ -1197,7 +1218,9 @@ static void parse_nir(const char *path) {
                     g->size = elem * count;
                 }
             }
+            strncpy(g->module, cur_module, 63);
             nglobals++;
+            record_emit(EMIT_GLOB, nglobals - 1);
             continue;
         }
         /* Skip other top-level directives */
@@ -2428,57 +2451,45 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, " ]\n");
 
-        /* Phase 4: emit all functions in topo order */
-        emit_function(fn);
+        /* Phase 4: deferred — emitted below in source order */
     }
 
-    /* Constant pool is now per-function (emitted in emit_function) */
+    /* Emit everything in source order */
+    for (int ei = 0; ei < nemit_order; ei++) {
+        int kind = emit_order[ei].kind;
+        int idx = emit_order[ei].index;
 
-    for (int i = 0; i < ndata_blocks; i++) {
-        data_block_t *db = &data_blocks[i];
-        if (db->has_at) continue;
-        fprintf(out_asm, "\n; === data: %s ===\n", db->label);
-        fprintf(out_asm, "%s:\n", db->label);
-        for (int j = 0; j < db->nentries; j++) {
-            if (db->entries[j][0] == '\x01') {
-                const char *resolved = resolve_fn_name(db->entries[j] + 1);
-                fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
-            } else {
-                fprintf(out_asm, "%s\n", db->entries[j]);
+        if (kind == EMIT_FN) {
+            emit_function(&functions[idx]);
+        }
+        else if (kind == EMIT_DATA) {
+            data_block_t *db = &data_blocks[idx];
+            fprintf(out_asm, "\n; === data: %s ===\n", db->label);
+            if (db->has_at) {
+                int linear = db->at_seg * 16 + db->at_off;
+                fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
+                fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+                        linear, db->at_seg, db->at_off);
+            }
+            fprintf(out_asm, "%s:\n", db->label);
+            for (int j = 0; j < db->nentries; j++) {
+                if (db->entries[j][0] == '\x01') {
+                    const char *resolved = resolve_fn_name(db->entries[j] + 1);
+                    fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
+                } else {
+                    fprintf(out_asm, "%s\n", db->entries[j]);
+                }
             }
         }
-    }
-
-    if (nglobals > 0) {
-        fprintf(out_asm, "\n; === globals ===\n");
-        for (int i = 0; i < nglobals; i++) {
-            fprintf(out_asm, "%s:", globals[i].name);
-            if (globals[i].size <= 2)
+        else if (kind == EMIT_GLOB) {
+            global_var_t *g = &globals[idx];
+            fprintf(out_asm, "%s:", g->name);
+            if (g->size <= 2)
                 fprintf(out_asm, " dw 0\n");
             else {
                 fprintf(out_asm, "\n");
-                for (int b = 0; b < globals[i].size; b += 2)
+                for (int b = 0; b < g->size; b += 2)
                     fprintf(out_asm, "    dw 0\n");
-            }
-        }
-    }
-
-    /* at()-placed data blocks go after globals */
-    for (int i = 0; i < ndata_blocks; i++) {
-        data_block_t *db = &data_blocks[i];
-        if (!db->has_at) continue;
-        fprintf(out_asm, "\n; === data: %s ===\n", db->label);
-        int linear = db->at_seg * 16 + db->at_off;
-        fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
-        fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
-                linear, db->at_seg, db->at_off);
-        fprintf(out_asm, "%s:\n", db->label);
-        for (int j = 0; j < db->nentries; j++) {
-            if (db->entries[j][0] == '\x01') {
-                const char *resolved = resolve_fn_name(db->entries[j] + 1);
-                fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
-            } else {
-                fprintf(out_asm, "%s\n", db->entries[j]);
             }
         }
     }
