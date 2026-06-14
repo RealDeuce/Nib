@@ -182,6 +182,7 @@ typedef struct {
     bool        has_at;
     int         at_seg;
     int         at_off;
+    int         emit_seg;       /* segment at emission time (-1 = unknown) */
 
     ir_insn_t   insns[MAX_INSNS];
     int         ninsns;
@@ -1600,9 +1601,9 @@ static void emit_function(func_t *fn) {
 
     if (fn->has_at) {
         int linear = fn->at_seg * 16 + fn->at_off;
-        fprintf(out_asm, "    seg 0x%04X\n", fn->at_seg);
         fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
                 linear, fn->at_seg, fn->at_off);
+        fprintf(out_asm, "    seg 0x%04X\n", fn->at_seg);
     }
 
     /* Determine which callee-saved registers need saving.
@@ -1950,7 +1951,9 @@ static void emit_function(func_t *fn) {
                         fprintf(out_asm, "    jmp far 0x%04X:0x%04X\n",
                                 functions[fi2].at_seg, functions[fi2].at_off);
                         gf_emitted = true;
-                    } else if (functions[fi2].is_far) {
+                    } else if (functions[fi2].is_far ||
+                               (fn->emit_seg >= 0 && functions[fi2].emit_seg >= 0 &&
+                                fn->emit_seg != functions[fi2].emit_seg)) {
                         fprintf(out_asm, "    jmp far %s\n", resolve_fn_name(ins->name));
                         gf_emitted = true;
                     } else {
@@ -2616,21 +2619,24 @@ static void propagate_preferences(void) {
  * ================================================================ */
 
 static int at_depth = 0;
+static int current_seg = -1;    /* segment from last at() directive */
 
 static void emit_item(int ei) {
     int kind = emit_order[ei].kind;
     int idx = emit_order[ei].index;
 
     if (kind == EMIT_FN) {
+        functions[idx].emit_seg = functions[idx].has_at
+            ? functions[idx].at_seg : current_seg;
         emit_function(&functions[idx]);
     } else if (kind == EMIT_DATA) {
         data_block_t *db = &data_blocks[idx];
         fprintf(out_asm, "\n; === data: %s ===\n", db->label);
         if (db->has_at) {
             int lin = db->at_seg * 16 + db->at_off;
-            fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
             fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
                     lin, db->at_seg, db->at_off);
+            fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
         }
         fprintf(out_asm, "%s:\n", db->label);
         for (int j = 0; j < db->nentries; j++) {
@@ -2645,9 +2651,9 @@ static void emit_item(int ei) {
         global_var_t *g = &globals[idx];
         if (g->has_at) {
             int lin = g->at_seg * 16 + g->at_off;
-            fprintf(out_asm, "\n    seg 0x%04X\n", g->at_seg);
-            fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+            fprintf(out_asm, "\n    org 0x%05X ; %04X:%04X\n",
                     lin, g->at_seg, g->at_off);
+            fprintf(out_asm, "    seg 0x%04X\n", g->at_seg);
             at_depth++;
         }
         fprintf(out_asm, "%s:", g->name);
@@ -2662,8 +2668,9 @@ static void emit_item(int ei) {
         int s = at_directives[idx].seg;
         int o = at_directives[idx].off;
         int lin = s * 16 + o;
-        fprintf(out_asm, "\n    seg 0x%04X\n", s);
-        fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n", lin, s, o);
+        fprintf(out_asm, "\n    org 0x%05X ; %04X:%04X\n", lin, s, o);
+        fprintf(out_asm, "    seg 0x%04X\n", s);
+        current_seg = s;
         at_depth++;
     } else if (kind == EMIT_ENDAT) {
         fprintf(out_asm, "    endorg\n");

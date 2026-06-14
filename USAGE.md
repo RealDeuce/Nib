@@ -56,7 +56,8 @@ assembly with real register names.
 
 ## nibasm — Assembler
 
-Two-pass V20 cross-assembler. Encodes assembly into machine code.
+V20 cross-assembler with automatic Jcc relaxation. Encodes assembly
+into machine code.
 
 ```
 nibasm [-o output] [-m mapfile] [-d dbgfile] [--ihex] [file.asm]
@@ -141,12 +142,16 @@ binds all IR, and assembles the result.
 
 ```
 nibbuild [-f] [-o output.bin] main.nib
+         [--nib ARGS...] [--asm ARGS...] [--bind ARGS...]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-f` | Force rebuild all modules (ignore timestamps) |
 | `-o file` | Output binary file (default: derived from input, e.g. `main.bin`) |
+| `--nib` | Pass subsequent arguments to the nib compiler |
+| `--bind` | Pass subsequent arguments to nibbind |
+| `--asm` | Pass subsequent arguments to nibasm |
 
 Runs three phases automatically:
 
@@ -159,10 +164,55 @@ Module dependencies are discovered by scanning `use` directives in
 source files. Build order is topologically sorted so dependencies
 compile before dependents.
 
+### Stage argument passthrough
+
+`--nib`, `--asm`, and `--bind` are section markers. All arguments
+after a marker are forwarded to that stage until the next marker or
+end of the command line.
+
+```sh
+./nibbuild app.nib \
+  --nib -D PLATFORM=dw -D DEBUG=1 \
+  --asm -d app.dbg -m app.map
+```
+
+### Build file (`nib.build`)
+
+If a `nib.build` file exists in the current directory, nibbuild reads
+it for default settings. CLI arguments append to (not replace) build
+file values. CLI `-o` and the root file override build file values.
+
+```
+# nib.build
+root    src/reset.nib
+output  src/reset.bin
+
+nib     -D PLATFORM=dreamwriter
+asm     -d src/reset.dbg -m src/reset.map
+bind
+```
+
+| Key | Description |
+|-----|-------------|
+| `root` | Root .nib source file |
+| `output` | Output binary path |
+| `nib` | Extra arguments for the nib compiler |
+| `bind` | Extra arguments for nibbind |
+| `asm` | Extra arguments for nibasm |
+
+Lines starting with `#` are comments. Values for `nib`/`asm`/`bind`
+are tokenized on whitespace; use double quotes for values containing
+spaces.
+
+With a build file in place, a bare `nibbuild` with no arguments is
+sufficient.
+
 ### Examples
 
 ```sh
-./nibbuild app.nib                  # produces app.bin
-./nibbuild app.nib -o firmware.bin  # custom output name
-./nibbuild -f app.nib               # force clean rebuild
+./nibbuild app.nib                          # produces app.bin
+./nibbuild app.nib -o firmware.bin          # custom output name
+./nibbuild -f app.nib                       # force clean rebuild
+./nibbuild app.nib --asm -m app.map         # pass -m to nibasm
+./nibbuild                                  # use nib.build in cwd
 ```

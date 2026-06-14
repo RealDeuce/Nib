@@ -932,6 +932,16 @@ static void asm_jmp_call(const char *mnemonic, operand_t *op) {
     bool is_call = (strcasecmp(mnemonic, "call") == 0);
 
     if (op->type == OP_IMM || op->label[0]) {
+        if (op->is_far) {
+            /* Far direct: JMP FAR seg:off or CALL FAR seg:off */
+            label_t *l = find_label(op->label);
+            int seg_val = (l && l->defined) ? l->segment : 0;
+            emit(is_call ? 0x9A : 0xEA);
+            emit16(op->imm & 0xFFFF);
+            emit16(seg_val & 0xFFFF);
+            return;
+        }
+
         /* Near relative */
         int target = op->imm;
         int next_ip = (out_pos + org_base) + (is_call ? 3 : 2);
@@ -939,7 +949,7 @@ static void asm_jmp_call(const char *mnemonic, operand_t *op) {
         if (!is_call) {
             /* JMP short or near */
             int rel = target - ((out_pos + org_base) + 2);
-            if (rel >= -128 && rel <= 127 && !op->is_far) {
+            if (rel >= -128 && rel <= 127) {
                 emit(0xEB);
                 emit(rel & 0xFF);
                 return;
