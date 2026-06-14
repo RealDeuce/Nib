@@ -522,11 +522,111 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             }
             argc++;
         }
-        /* Get function name and check against known signatures */
+        /* Get function name */
         const char *fn_name = "?";
         type_t *ret_type = mk_type(TYPE_VOID);
-        if (e->u.call.func->kind == EXPR_IDENT) {
+        if (e->u.call.func->kind == EXPR_IDENT)
             fn_name = e->u.call.func->u.ident;
+
+        /* Check for builtins — expand inline instead of call */
+        int dst = alloc_vreg();
+
+        if (strcmp(fn_name, "halt") == 0) {
+            fprintf(C.nir, "    hlt\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "nop") == 0) {
+            fprintf(C.nir, "    nop\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "salc") == 0) {
+            fprintf(C.nir, "    salc %%%d\n", dst);
+            return TV(dst, mk_type(TYPE_U8));
+        }
+        if (strcmp(fn_name, "port_in") == 0) {
+            if (argc >= 1)
+                fprintf(C.nir, "    in %%%d, %%%d\n", dst, arg_vregs[0]);
+            return TV(dst, mk_type(TYPE_U8));
+        }
+        if (strcmp(fn_name, "port_out") == 0) {
+            if (argc >= 2)
+                fprintf(C.nir, "    out %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "memcopy") == 0) {
+            if (argc >= 2) {
+                fprintf(C.nir, "    ; memcopy %%%d <- %%%d\n", arg_vregs[0], arg_vregs[1]);
+                fprintf(C.nir, "    rep movsb\n");
+            }
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "memset") == 0) {
+            if (argc >= 2) {
+                fprintf(C.nir, "    ; memset %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                fprintf(C.nir, "    rep stosb\n");
+            }
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "memcmp") == 0) {
+            if (argc >= 2) {
+                fprintf(C.nir, "    ; memcmp %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                fprintf(C.nir, "    repe cmpsb\n");
+            }
+            return TV(dst, mk_type(TYPE_BOOL));
+        }
+        if (strcmp(fn_name, "memscan") == 0) {
+            if (argc >= 2) {
+                fprintf(C.nir, "    ; memscan %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                fprintf(C.nir, "    repne scasb\n");
+            }
+            return TV(dst, mk_type(TYPE_U16));
+        }
+        if (strcmp(fn_name, "sign_extend") == 0) {
+            if (argc >= 1)
+                fprintf(C.nir, "    cbw %%%d, %%%d\n", dst, arg_vregs[0]);
+            return TV(dst, mk_type(TYPE_U16));
+        }
+        if (strcmp(fn_name, "zero_extend") == 0) {
+            if (argc >= 1)
+                fprintf(C.nir, "    zext %%%d, %%%d\n", dst, arg_vregs[0]);
+            return TV(dst, mk_type(TYPE_U16));
+        }
+        if (strcmp(fn_name, "xlat") == 0) {
+            if (argc >= 2) {
+                fprintf(C.nir, "    ; xlat %%%d[%%%d]\n", arg_vregs[0], arg_vregs[1]);
+                fprintf(C.nir, "    xlat %%%d, %%%d, %%%d\n", dst, arg_vregs[0], arg_vregs[1]);
+            }
+            return TV(dst, mk_type(TYPE_U8));
+        }
+        if (strcmp(fn_name, "bound") == 0) {
+            if (argc >= 3)
+                fprintf(C.nir, "    bound %%%d, %%%d, %%%d\n",
+                        arg_vregs[0], arg_vregs[1], arg_vregs[2]);
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "daa") == 0 || strcmp(fn_name, "das") == 0 ||
+            strcmp(fn_name, "aaa") == 0 || strcmp(fn_name, "aas") == 0 ||
+            strcmp(fn_name, "aam") == 0 || strcmp(fn_name, "aad") == 0) {
+            if (argc >= 1)
+                fprintf(C.nir, "    %s %%%d\n", fn_name, arg_vregs[0]);
+            return TV(dst, mk_type(TYPE_U8));
+        }
+        if (strcmp(fn_name, "emulate") == 0) {
+            if (argc >= 2)
+                fprintf(C.nir, "    brkem %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "divmod") == 0 || strcmp(fn_name, "sdivmod") == 0) {
+            if (argc >= 4) {
+                const char *op = (fn_name[0] == 's') ? "idiv" : "div";
+                fprintf(C.nir, "    %s %%%d, %%%d, %%%d, %%%d\n",
+                        op, arg_vregs[0], arg_vregs[1], arg_vregs[2], arg_vregs[3]);
+            }
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+
+        /* Not a builtin — regular function call */
+        if (e->u.call.func->kind == EXPR_IDENT) {
             int fi = find_function(fn_name);
             if (fi >= 0) {
                 if (C.functions[fi].nparams != argc)
@@ -534,9 +634,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                          fn_name, C.functions[fi].nparams, argc);
                 ret_type = C.functions[fi].return_type;
             }
-            /* builtins — don't error on unknown functions, could be builtins */
         }
-        int dst = alloc_vreg();
         fprintf(C.nir, "    call %%%d, %s", dst, fn_name);
         for (int i = 0; i < argc && i < 16; i++)
             fprintf(C.nir, ", %%%d", arg_vregs[i]);
@@ -994,10 +1092,22 @@ static void compile_fn(decl_t *d) {
 
     for (param_t *p = d->u.fn.params; p; p = p->next) {
         symbol_t *sym = sym_add(p->name, p->type, false);
-        fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, type_str(p->type), p->name);
+        /* In the IR, aggregate params are references — the vreg holds
+         * a u16 address, not the aggregate itself. The full type goes
+         * in the .nif for type checking, but the .nir type reflects
+         * what the register actually contains. */
+        bool is_ref = (p->type && (p->type->kind == TYPE_ARRAY_U8 ||
+                                    p->type->kind == TYPE_ARRAY_U16 ||
+                                    p->type->kind == TYPE_BCD ||
+                                    p->type->kind == TYPE_STRUCT));
+        const char *ir_type = (is_ref && !p->is_value) ? "u16" : type_str(p->type);
+        fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, ir_type, p->name);
         if (p->is_value) fprintf(C.nir, ", value");
+        if (is_ref && !p->is_value)
+            fprintf(C.nir, " ; ref %s", type_str(p->type));
         fprintf(C.nir, "\n");
 
+        /* .nif keeps the full type for cross-module type checking */
         fprintf(C.nif, ".param %%%d, %s, \"%s\"", sym->vreg, type_str(p->type), p->name);
         if (p->is_value) fprintf(C.nif, ", value");
         fprintf(C.nif, "\n");

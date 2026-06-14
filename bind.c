@@ -540,6 +540,59 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         else if (strcmp(opname, "continue") == 0) {
             ins->op = IR_CONTINUE;
         }
+        else if (strcmp(opname, "hlt") == 0 || strcmp(opname, "nop") == 0 ||
+                 strcmp(opname, "salc") == 0 ||
+                 strcmp(opname, "rep") == 0 || strcmp(opname, "repe") == 0 ||
+                 strcmp(opname, "repne") == 0) {
+            /* Pass-through: emit as literal assembly */
+            ins->op = IR_ASM;
+            /* Combine opname with rest of line */
+            p = skip_ws(p);
+            snprintf(ins->asm_body, sizeof(ins->asm_body), "    %s %s", opname, p);
+            ins->asm_ann[0] = '\0';
+        }
+        else if (strcmp(opname, "in") == 0) {
+            ins->op = IR_ALU; /* reuse ALU for 2-operand */
+            strncpy(ins->name, "in", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "out") == 0) {
+            ins->op = IR_ALU;
+            strncpy(ins->name, "out", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "cbw") == 0) {
+            ins->op = IR_UNARY;
+            strncpy(ins->name, "cbw", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "zext") == 0) {
+            ins->op = IR_UNARY;
+            strncpy(ins->name, "zext", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "xlat") == 0) {
+            ins->op = IR_ALU;
+            strncpy(ins->name, "xlat", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src2 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "brkem") == 0) {
+            ins->op = IR_ASM;
+            snprintf(ins->asm_body, sizeof(ins->asm_body), "    brkem %s", p);
+            ins->asm_ann[0] = '\0';
+        }
         else if (strcmp(opname, "asm") == 0) {
             ins->op = IR_ASM;
             p = skip_ws(p);
@@ -866,6 +919,27 @@ static void emit_function(func_t *fn) {
 
         case IR_ALU: {
             const char *op = ins->name;
+
+            /* Special two-operand forms */
+            if (strcmp(op, "in") == 0) {
+                fprintf(out_asm, "    in %s, %s\n",
+                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                break;
+            }
+            if (strcmp(op, "out") == 0) {
+                fprintf(out_asm, "    out %s, %s\n",
+                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                break;
+            }
+            if (strcmp(op, "xlat") == 0) {
+                /* xlat %d, %table, %idx — needs BX=table, AL=idx */
+                fprintf(out_asm, "    ; xlat %s[%s] -> %s\n",
+                        vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2),
+                        vreg_asm(fn, ins->dst));
+                fprintf(out_asm, "    xlat\n");
+                break;
+            }
+
             /* Map IR op names to asm mnemonics */
             const char *mnem = op;
             if (strcmp(op, "add") == 0) mnem = "add";
