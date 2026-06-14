@@ -40,8 +40,10 @@ For convenience, `nibbuild source.nib` runs all three stages, following
   the programmer can inspect exactly what the binder decided.
 
 - **nibasm**: V20 assembler. Encodes the assembly output from the binder
-  into machine code. Two-pass to resolve jump offsets and short/long
-  encoding selection. Also usable standalone for hand-written assembly.
+  into machine code. Two-pass with iterative relaxation — conditional
+  jumps that exceed the ±128-byte short range are automatically relaxed
+  to an inverted short jump over a near JMP. Also usable standalone for
+  hand-written assembly.
   Uses Intel syntax with `bext`/`bins` for the V20 bit field instructions
   (see Inline Assembly for the full mnemonic table). Outputs flat binary,
   Intel HEX (`--ihex`), map files (`-m`), and debug info (`-d`).

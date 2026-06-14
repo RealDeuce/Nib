@@ -158,6 +158,24 @@ if [ -f /tmp/t_flags.asm ]; then
     fi
 fi
 
+# Variable shift counts use CL
+if [ -f /tmp/t_shift_cl.asm ]; then
+    if grep -q "shl.*CL" /tmp/t_shift_cl.asm && grep -q "shr.*CL" /tmp/t_shift_cl.asm; then
+        pass "shift-cl: variable shifts use CL"
+    else
+        fail "shift-cl" "variable shift not routed through CL"
+    fi
+fi
+
+# Overlapping shift counts: parameters must not share a register
+if [ -f /tmp/t_shift_overlap.asm ]; then
+    if grep -q "push CX" /tmp/t_shift_overlap.asm || grep -q "push AX" /tmp/t_shift_overlap.asm; then
+        pass "shift-overlap: CL contention handled with save/restore"
+    else
+        fail "shift-overlap" "no save/restore — overlapping params may share CL"
+    fi
+fi
+
 echo ""
 
 echo "--- Type error tests (expected failures) ---"

@@ -139,6 +139,7 @@ typedef struct {
     bool    needs_addressable; /* true if used in memory operand (any of base/index) */
     bool    needs_base;        /* true if used as base: must be BX or BP */
     bool    needs_index;       /* true if used as index: must be SI or DI */
+    bool    needs_cl;          /* true if used as shift/rotate count: must be CL */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
     /* Liveness */
@@ -207,6 +208,7 @@ typedef struct {
     /* Allocation state */
     bool        needs_frame;    /* BP reserved for frame pointer */
     int         nspill_slots;
+    int         ncl_fixups;     /* CL routing fixups (push/pop CX) */
     int         frame_size;     /* total bytes for spills */
 
     /* Callee-saved registers */
@@ -1341,7 +1343,12 @@ static bool vregs_interfere(func_t *fn, int a, int b) {
     int b_start = fn->vregs[b].def_pos;
     int b_end   = fn->vregs[b].last_use;
 
-    if (a_start < 0 || a_end < 0 || b_start < 0 || b_end < 0)
+    /* Unused vregs don't interfere */
+    if ((a_start < 0 && a_end < 0) || (b_start < 0 && b_end < 0))
+        return false;
+
+    /* Parameters have def_pos=-1 (before first insn); treat as valid */
+    if (a_end < 0 || b_end < 0)
         return false;
 
     /* Ranges overlap if one starts before the other ends */
@@ -1358,6 +1365,19 @@ static void scan_addressing_constraints(func_t *fn) {
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
         /* LOAD: %dst = %base[%idx] — base needs addressable reg */
+        /* Shift/rotate: count operand must be CL */
+        if (ins->op == IR_ALU && !ins->has_imm) {
+            const char *op = ins->name;
+            if (strcmp(op, "shl") == 0 || strcmp(op, "shr") == 0 ||
+                strcmp(op, "sar") == 0 || strcmp(op, "rol") == 0 ||
+                strcmp(op, "ror") == 0 || strcmp(op, "rcl") == 0 ||
+                strcmp(op, "rcr") == 0) {
+                if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
+                    fn->vregs[ins->src2].needs_cl = true;
+                    fn->vregs[ins->src2].is_byte = true;
+                }
+            }
+        }
         if (ins->op == IR_LOAD || ins->op == IR_STORE) {
             if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
                 fn->vregs[ins->src1].needs_addressable = true;
@@ -1404,6 +1424,21 @@ static void allocate_registers(func_t *fn, bool bp_available) {
                 (preg == PREG_AX || preg == PREG_CX || preg == PREG_DX)) {
                 continue;
             }
+            if (fn->vregs[i].needs_cl && preg != PREG_CL) {
+                continue;
+            }
+            /* Check for conflicts with already-assigned vregs */
+            bool conflict = false;
+            for (int j = 0; j < i; j++) {
+                if (fn->vregs[j].assigned == PREG_NONE) continue;
+                if (!vregs_interfere(fn, i, j)) continue;
+                if (fn->vregs[j].assigned == preg ||
+                    pregs_alias(fn->vregs[j].assigned, preg)) {
+                    conflict = true;
+                    break;
+                }
+            }
+            if (conflict) continue;
             fn->vregs[i].assigned = preg;
         }
     }
@@ -1418,6 +1453,11 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         if (fn->vregs[i].is_seg) {
             /* Segment regs handled separately */
             continue;
+        } else if (fn->vregs[i].needs_cl) {
+            /* Shift/rotate count: must be CL */
+            static int cl_pool[] = { PREG_CL };
+            pool = cl_pool;
+            poolsz = 1;
         } else if (fn->vregs[i].is_byte) {
             pool = byte_pool;
             poolsz = nbyte;
@@ -1763,6 +1803,42 @@ static void emit_function(func_t *fn) {
             if (ins->has_imm) {
                 fprintf(out_asm, "    %s %s, %d\n", mnem,
                         vreg_asm(fn, ins->dst), ins->imm);
+            } else if (strcmp(mnem, "shl") == 0 || strcmp(mnem, "shr") == 0 ||
+                       strcmp(mnem, "sar") == 0 || strcmp(mnem, "rol") == 0 ||
+                       strcmp(mnem, "ror") == 0 || strcmp(mnem, "rcl") == 0 ||
+                       strcmp(mnem, "rcr") == 0) {
+                /* Shift/rotate: count must be CL on x86 */
+                if (fn->vregs[ins->src2].assigned == PREG_CL) {
+                    fprintf(out_asm, "    %s %s, CL\n", mnem,
+                            vreg_asm(fn, ins->dst));
+                } else {
+                    /* Route count through CL, saving/restoring CX */
+                    fn->ncl_fixups++;
+                    int dst_preg = fn->vregs[ins->dst].assigned;
+                    bool dst_is_cx = (dst_preg == PREG_CX ||
+                                      dst_preg == PREG_CL ||
+                                      dst_preg == PREG_CH);
+                    if (dst_is_cx) {
+                        /* dst aliases CX — can't push/pop CX.
+                         * Move value to AX, load count to CL,
+                         * shift AX, move result back. */
+                        const char *d = vreg_asm(fn, ins->dst);
+                        fprintf(out_asm, "    push AX\n");
+                        fprintf(out_asm, "    mov AX, %s\n", d);
+                        fprintf(out_asm, "    mov CL, %s\n",
+                                vreg_asm(fn, ins->src2));
+                        fprintf(out_asm, "    %s AX, CL\n", mnem);
+                        fprintf(out_asm, "    mov %s, AX\n", d);
+                        fprintf(out_asm, "    pop AX\n");
+                    } else {
+                        fprintf(out_asm, "    push CX\n");
+                        fprintf(out_asm, "    mov CL, %s\n",
+                                vreg_asm(fn, ins->src2));
+                        fprintf(out_asm, "    %s %s, CL\n", mnem,
+                                vreg_asm(fn, ins->dst));
+                        fprintf(out_asm, "    pop CX\n");
+                    }
+                }
             } else if (is_spilled(fn, ins->dst) && is_spilled(fn, ins->src2)) {
                 /* op [mem], [mem] — load src2 into AX, then op */
                 fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
@@ -1995,51 +2071,86 @@ static void emit_function(func_t *fn) {
             }
             break;
 
-        case IR_LOAD:
+        case IR_LOAD: {
+            const char *base_str;
+            const char *idx_str = NULL;
+            bool pushed_bx = false, pushed_si = false;
+            /* Load spilled base/index into scratch regs */
+            if (is_spilled(fn, ins->src1)) {
+                fprintf(out_asm, "    push BX\n");
+                fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+                base_str = "BX";
+                pushed_bx = true;
+            } else {
+                base_str = vreg_asm(fn, ins->src1);
+            }
+            if (ins->src2 >= 0 && is_spilled(fn, ins->src2)) {
+                fprintf(out_asm, "    push SI\n");
+                fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src2));
+                idx_str = "SI";
+                pushed_si = true;
+            } else if (ins->src2 >= 0) {
+                idx_str = vreg_asm(fn, ins->src2);
+            }
             if (is_spilled(fn, ins->dst)) {
-                /* Load into spill: go through AX */
-                if (ins->src2 >= 0)
-                    fprintf(out_asm, "    mov AX, [%s+%s]\n",
-                            vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2));
+                if (idx_str)
+                    fprintf(out_asm, "    mov AX, [%s+%s]\n", base_str, idx_str);
                 else
-                    fprintf(out_asm, "    mov AX, [%s]\n",
-                            vreg_asm(fn, ins->src1));
+                    fprintf(out_asm, "    mov AX, [%s]\n", base_str);
+                if (pushed_si) fprintf(out_asm, "    pop SI\n");
+                if (pushed_bx) fprintf(out_asm, "    pop BX\n");
                 fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
             } else {
-                if (ins->src2 >= 0)
+                if (idx_str)
                     fprintf(out_asm, "    mov %s, [%s+%s]\n",
-                            vreg_asm(fn, ins->dst),
-                            vreg_asm(fn, ins->src1),
-                            vreg_asm(fn, ins->src2));
+                            vreg_asm(fn, ins->dst), base_str, idx_str);
                 else
                     fprintf(out_asm, "    mov %s, [%s]\n",
-                            vreg_asm(fn, ins->dst),
-                            vreg_asm(fn, ins->src1));
+                            vreg_asm(fn, ins->dst), base_str);
+                if (pushed_si) fprintf(out_asm, "    pop SI\n");
+                if (pushed_bx) fprintf(out_asm, "    pop BX\n");
             }
             break;
+        }
 
-        case IR_STORE:
+        case IR_STORE: {
+            const char *val_str;
+            const char *base_str;
+            const char *idx_str = NULL;
+            bool pushed_bx = false, pushed_si = false;
+            /* Value to store */
             if (is_spilled(fn, ins->dst)) {
-                /* Store from spill: go through AX */
                 fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->dst));
-                if (ins->src2 >= 0)
-                    fprintf(out_asm, "    mov [%s+%s], AX\n",
-                            vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2));
-                else
-                    fprintf(out_asm, "    mov [%s], AX\n",
-                            vreg_asm(fn, ins->src1));
+                val_str = fn->vregs[ins->dst].is_byte ? "AL" : "AX";
             } else {
-                if (ins->src2 >= 0)
-                    fprintf(out_asm, "    mov [%s+%s], %s\n",
-                            vreg_asm(fn, ins->src1),
-                            vreg_asm(fn, ins->src2),
-                            vreg_asm(fn, ins->dst));
-                else
-                    fprintf(out_asm, "    mov [%s], %s\n",
-                        vreg_asm(fn, ins->src1),
-                        vreg_asm(fn, ins->dst));
+                val_str = vreg_asm(fn, ins->dst);
             }
+            /* Load spilled base/index into scratch regs */
+            if (is_spilled(fn, ins->src1)) {
+                fprintf(out_asm, "    push BX\n");
+                fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+                base_str = "BX";
+                pushed_bx = true;
+            } else {
+                base_str = vreg_asm(fn, ins->src1);
+            }
+            if (ins->src2 >= 0 && is_spilled(fn, ins->src2)) {
+                fprintf(out_asm, "    push SI\n");
+                fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src2));
+                idx_str = "SI";
+                pushed_si = true;
+            } else if (ins->src2 >= 0) {
+                idx_str = vreg_asm(fn, ins->src2);
+            }
+            /* Emit the store */
+            if (idx_str)
+                fprintf(out_asm, "    mov [%s+%s], %s\n", base_str, idx_str, val_str);
+            else
+                fprintf(out_asm, "    mov [%s], %s\n", base_str, val_str);
+            if (pushed_si) fprintf(out_asm, "    pop SI\n");
+            if (pushed_bx) fprintf(out_asm, "    pop BX\n");
             break;
+        }
 
         case IR_LOADMEM:
             if (is_spilled(fn, ins->dst)) {
@@ -2453,6 +2564,10 @@ static void propagate_preferences(void) {
                 if (caller->vregs[caller_vreg].prefer == PREG_NONE) {
                     caller->vregs[caller_vreg].prefer = callee_reg;
                 }
+                /* Propagate is_seg from callee parameter */
+                if (a < MAX_VREGS && fn->vregs[a].is_seg) {
+                    caller->vregs[caller_vreg].is_seg = true;
+                }
             }
 
             /* Return value: set preference on caller's dst vreg */
@@ -2666,8 +2781,27 @@ int main(int argc, char **argv) {
             fn->frame_size = fn->nspill_slots * 2;
         }
 
+        /* Count CL fixups: shift/rotate ops where count didn't get CL */
+        fn->ncl_fixups = 0;
+        for (int i = 0; i < fn->ninsns; i++) {
+            ir_insn_t *ins = &fn->insns[i];
+            if (ins->op == IR_ALU && !ins->has_imm && ins->src2 >= 0) {
+                const char *op = ins->name;
+                if (strcmp(op, "shl") == 0 || strcmp(op, "shr") == 0 ||
+                    strcmp(op, "sar") == 0 || strcmp(op, "rol") == 0 ||
+                    strcmp(op, "ror") == 0 || strcmp(op, "rcl") == 0 ||
+                    strcmp(op, "rcr") == 0) {
+                    if (fn->vregs[ins->src2].assigned != PREG_CL)
+                        fn->ncl_fixups++;
+                }
+            }
+        }
+
         /* Debug: show assignments */
-        fprintf(stderr, "  %s: %d vregs, %d spills [", fn->name, fn->nvregs, fn->nspill_slots);
+        fprintf(stderr, "  %s: %d vregs, %d spills", fn->name, fn->nvregs, fn->nspill_slots);
+        if (fn->ncl_fixups > 0)
+            fprintf(stderr, ", %d cl fixups", fn->ncl_fixups);
+        fprintf(stderr, " [");
         for (int v = 0; v < fn->nvregs; v++) {
             if (fn->vregs[v].assigned != PREG_NONE)
                 fprintf(stderr, " %%%d=%s", v, preg_name[fn->vregs[v].assigned]);

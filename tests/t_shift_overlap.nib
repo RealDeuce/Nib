@@ -1,0 +1,10 @@
+// Test: overlapping shift counts must not share CL
+// s1 and s2 have overlapping lifetimes — they cannot both be CL.
+
+fn overlap(val: u8, s1: u8, s2: u8) -> u8 {
+    u8 a = val << s1;
+    u8 b = val >> s2;
+    u8 c = a << s2;
+    u8 d = b >> s1;
+    return c + d;
+}

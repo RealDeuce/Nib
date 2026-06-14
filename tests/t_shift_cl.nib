@@ -1,0 +1,23 @@
+// Test: variable shift counts must use CL
+// Exercises the emitter's CL routing for shift/rotate ops
+
+fn shift_by_var(val: u16, count: u8) -> u16 {
+    u16 left = val << count;
+    u16 right = val >> count;
+    u16 arith = val $>> count;
+    return left + right + arith;
+}
+
+fn rotate_by_var(val: u16, count: u8) -> u16 {
+    u16 rl = val <<< count;
+    u16 rr = val >>> count;
+    return rl + rr;
+}
+
+// Multiple variable shifts with high register pressure
+fn multi_shift(a: u16, b: u16, shift: u8) -> u16 {
+    u16 r1 = a << shift;
+    u16 r2 = b >> shift;
+    u16 r3 = r1 + r2;
+    return r3;
+}

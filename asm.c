@@ -72,6 +72,24 @@ static struct { int org_base; int out_pos; int seg_base; } org_stack[MAX_ORG_STA
 static int org_sp = 0;
 static int pass = 1;     /* 1 or 2 */
 static int errors = 0;
+/* Jcc relaxation: track which source lines need 5-byte relaxed form */
+#define MAX_RELAXED 256
+static int relaxed_lines[MAX_RELAXED];
+static int nrelaxed = 0;
+static bool jcc_relaxed = false;
+
+static bool is_relaxed_line(int line) {
+    for (int i = 0; i < nrelaxed; i++)
+        if (relaxed_lines[i] == line) return true;
+    return false;
+}
+
+static void mark_relaxed_line(int line) {
+    if (is_relaxed_line(line)) return;
+    if (nrelaxed < MAX_RELAXED)
+        relaxed_lines[nrelaxed++] = line;
+    jcc_relaxed = true;
+}
 
 static void emit(uint8_t b) {
     int addr = org_base + out_pos;
@@ -130,7 +148,7 @@ static label_t *add_label(const char *name, int value) {
 static label_t *add_label_typed(const char *name, int value, label_type_t ltype) {
     label_t *l = find_label(name);
     if (l) {
-        if (l->defined && pass == 1) {
+        if (l->defined && pass == 1 && nrelaxed == 0) {
             err("duplicate label '%s'", name);
             errors++;
             return l;
@@ -946,16 +964,45 @@ static void asm_jmp_call(const char *mnemonic, operand_t *op) {
 }
 
 static void asm_jcc(int cc) {
+    /* Save label name before parse_operand consumes it */
+    char jcc_label[64] = {0};
+    const char *save = line_ptr;
+    while (*save == ' ' || *save == '\t') save++;
+    char *lbl = jcc_label;
+    while (*save && !isspace(*save) && *save != ';' &&
+           (size_t)(lbl - jcc_label) < sizeof(jcc_label) - 1)
+        *lbl++ = *save++;
+    *lbl = '\0';
+
     operand_t op = parse_operand();
     int target = op.imm;
     int rel = target - ((out_pos + org_base) + 2);
 
-    if (pass == 1 || (rel >= -128 && rel <= 127)) {
+    /* Check if target label is actually defined (forward refs return 0) */
+    label_t *tgt_label = find_label(jcc_label);
+    bool label_known = (tgt_label && tgt_label->defined);
+
+    if (is_relaxed_line(current_line)) {
+        /* Previously marked for relaxation — always emit 5 bytes */
+        emit(0x70 + (cc ^ 1));
+        emit(3);
+        int rel16 = target - ((out_pos + org_base) + 3);
+        emit(0xE9);
+        emit(rel16 & 0xFF);
+        emit((rel16 >> 8) & 0xFF);
+    } else if (!label_known || (rel >= -128 && rel <= 127)) {
+        /* Forward ref (assume short) or known short — emit 2 bytes */
         emit(0x70 + cc);
         emit(rel & 0xFF);
     } else {
-        err("conditional jump target out of range (short jump only on 8086)");
-        errors++;
+        /* Known label, out of range: mark for relaxation and emit 5 bytes */
+        mark_relaxed_line(current_line);
+        emit(0x70 + (cc ^ 1));
+        emit(3);
+        int rel16 = target - ((out_pos + org_base) + 3);
+        emit(0xE9);
+        emit(rel16 & 0xFF);
+        emit((rel16 >> 8) & 0xFF);
     }
 }
 
@@ -1716,16 +1763,38 @@ int main(int argc, char **argv) {
     if (!output || !written) { fprintf(stderr, "out of memory\n"); return 1; }
     memset(output, 0xFF, MAX_OUTPUT);
 
-    /* Pass 1: collect labels and sizes */
+    /* Pass 1: collect labels and sizes, with iterative Jcc relaxation.
+     * First run establishes labels assuming all Jcc are short.
+     * If any are out of range, mark them, re-run to get correct sizes. */
+    nrelaxed = 0;
     pass = 1;
     out_pos = 0;
     org_base = 0;
     seg_base = 0;
     org_sp = 0;
     errors = 0;
+    jcc_relaxed = false;
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
         process_line(lines[i]);
+    }
+    if (jcc_relaxed) {
+        /* Relaxation changed sizes — re-run pass 1 to update labels.
+         * Keep labels from prior iteration so forward refs resolve. */
+        for (int iter = 0; iter < 4; iter++) {
+            pass = 1;
+            out_pos = 0;
+            org_base = 0;
+            seg_base = 0;
+            org_sp = 0;
+            errors = 0;
+            jcc_relaxed = false;
+            for (int i = 0; i < nlines; i++) {
+                current_line = i + 1;
+                process_line(lines[i]);
+            }
+            if (!jcc_relaxed) break;
+        }
     }
 
     /* Pass 2: emit code */
