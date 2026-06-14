@@ -269,6 +269,11 @@ static int nglobals = 0;
 #define EMIT_FN    0
 #define EMIT_DATA  1
 #define EMIT_GLOB  2
+#define EMIT_AT    3
+#define MAX_AT_DIRECTIVES 64
+static struct { int seg; int off; } at_directives[MAX_AT_DIRECTIVES];
+static int nat_directives = 0;
+
 #define MAX_EMIT_ORDER 1024
 static struct { int kind; int index; } emit_order[MAX_EMIT_ORDER];
 static int nemit_order = 0;
@@ -1221,6 +1226,19 @@ static void parse_nir(const char *path) {
             strncpy(g->module, cur_module, 63);
             nglobals++;
             record_emit(EMIT_GLOB, nglobals - 1);
+            continue;
+        }
+        if (strncmp(p, ".at ", 4) == 0) {
+            p += 4;
+            if (nat_directives < MAX_AT_DIRECTIVES) {
+                int seg = (int)strtol(p, (char **)&p, 0);
+                if (*p == ':') p++;
+                int off = (int)strtol(p, (char **)&p, 0);
+                at_directives[nat_directives].seg = seg;
+                at_directives[nat_directives].off = off;
+                record_emit(EMIT_AT, nat_directives);
+                nat_directives++;
+            }
             continue;
         }
         /* Skip other top-level directives */
@@ -2491,6 +2509,14 @@ int main(int argc, char **argv) {
                 for (int b = 0; b < g->size; b += 2)
                     fprintf(out_asm, "    dw 0\n");
             }
+        }
+        else if (kind == EMIT_AT) {
+            int seg = at_directives[idx].seg;
+            int off = at_directives[idx].off;
+            int linear = seg * 16 + off;
+            fprintf(out_asm, "\n    seg 0x%04X\n", seg);
+            fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+                    linear, seg, off);
         }
     }
 

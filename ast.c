@@ -494,6 +494,13 @@ decl_t *mk_decl_const(const char *name, int value, int line) {
 
 /* ---- Program ---- */
 
+decl_t *mk_decl_at(int seg, int off, int line) {
+    decl_t *d = mk_decl(DECL_AT, line);
+    d->u.at.seg = seg;
+    d->u.at.off = off;
+    return d;
+}
+
 program_t *mk_program(void) {
     return xalloc(sizeof(program_t));
 }

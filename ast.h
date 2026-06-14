@@ -302,7 +302,8 @@ typedef enum {
     DECL_EXTERN_GLOBAL,
     DECL_EXTERN_FN,
     DECL_USE,
-    DECL_CONST
+    DECL_CONST,
+    DECL_AT
 } decl_kind_t;
 
 typedef struct {
@@ -381,6 +382,12 @@ struct decl_node {
             char *name;
             int   value;
         } konst;
+
+        /* AT (standalone placement) */
+        struct {
+            int seg;
+            int off;
+        } at;
     } u;
 
     decl_t *next;
@@ -475,6 +482,7 @@ decl_t     *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
                                int line);
 decl_t     *mk_decl_use(const char *path, int line);
 decl_t     *mk_decl_const(const char *name, int value, int line);
+decl_t     *mk_decl_at(int seg, int off, int line);
 
 program_t  *mk_program(void);
 void        program_add(program_t *p, decl_t *d);

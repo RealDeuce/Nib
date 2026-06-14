@@ -2093,6 +2093,9 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
             if (d->is_pub)
                 fprintf(C.nif, ".const %s, %d\n", d->u.konst.name, d->u.konst.value);
             break;
+        case DECL_AT:
+            fprintf(C.nir, "\n.at 0x%04X:0x%04X\n", d->u.at.seg, d->u.at.off);
+            break;
         }
     }
 
