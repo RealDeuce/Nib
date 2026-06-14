@@ -1,5 +1,7 @@
 # Nib
 
+[![CI](https://github.com/RealDeuce/Nib/actions/workflows/ci.yml/badge.svg)](https://github.com/RealDeuce/Nib/actions/workflows/ci.yml)
+
 A compiled language for the NEC V20HL processor in the
 [DreamWriter](https://en.wikipedia.org/wiki/NTS_DreamWriter) portable
 word processor.
