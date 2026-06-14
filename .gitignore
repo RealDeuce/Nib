@@ -25,3 +25,4 @@ tests/*.dbg
 *~
 out.nir
 out.nif
+nibbuild
