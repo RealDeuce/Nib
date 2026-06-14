@@ -501,6 +501,10 @@ decl_t *mk_decl_at(int seg, int off, int line) {
     return d;
 }
 
+decl_t *mk_decl_endat(int line) {
+    return mk_decl(DECL_ENDAT, line);
+}
+
 program_t *mk_program(void) {
     return xalloc(sizeof(program_t));
 }

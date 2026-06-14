@@ -65,6 +65,11 @@ static bool    *written;
 static int out_pos = 0;
 static int org_base = 0;
 static int seg_base = 0; /* current segment for SEG operator */
+
+/* org stack for at()/end at; */
+#define MAX_ORG_STACK 16
+static struct { int org_base; int out_pos; int seg_base; } org_stack[MAX_ORG_STACK];
+static int org_sp = 0;
 static int pass = 1;     /* 1 or 2 */
 static int errors = 0;
 
@@ -1588,8 +1593,26 @@ static void process_line(char *line) {
     /* --- Directives --- */
     if (strcasecmp(t.sval, "org") == 0) {
         operand_t op = parse_operand();
+        /* Push current position before changing */
+        if (org_sp < MAX_ORG_STACK) {
+            org_stack[org_sp].org_base = org_base;
+            org_stack[org_sp].out_pos = out_pos;
+            org_stack[org_sp].seg_base = seg_base;
+            org_sp++;
+        }
         org_base = op.imm;
-        out_pos = 0;  /* reset relative position within this segment */
+        out_pos = 0;
+        return;
+    }
+
+    if (strcasecmp(t.sval, "endorg") == 0) {
+        /* Pop previous position */
+        if (org_sp > 0) {
+            org_sp--;
+            org_base = org_stack[org_sp].org_base;
+            out_pos = org_stack[org_sp].out_pos;
+            seg_base = org_stack[org_sp].seg_base;
+        }
         return;
     }
 
@@ -1698,6 +1721,7 @@ int main(int argc, char **argv) {
     out_pos = 0;
     org_base = 0;
     seg_base = 0;
+    org_sp = 0;
     errors = 0;
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
@@ -1709,6 +1733,7 @@ int main(int argc, char **argv) {
     out_pos = 0;
     org_base = 0;
     seg_base = 0;
+    org_sp = 0;
     pending_dbg_line = 0;
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;

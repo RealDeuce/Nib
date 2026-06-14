@@ -271,6 +271,7 @@ static int nglobals = 0;
 #define EMIT_GLOB  2
 #define EMIT_AT    3
 #define EMIT_USE   4
+#define EMIT_ENDAT 5
 #define MAX_AT_DIRECTIVES 64
 static struct { int seg; int off; } at_directives[MAX_AT_DIRECTIVES];
 static int nat_directives = 0;
@@ -1254,6 +1255,10 @@ static void parse_nir(const char *path) {
             }
             continue;
         }
+        if (strncmp(p, ".endat", 6) == 0) {
+            record_emit(EMIT_ENDAT, 0);
+            continue;
+        }
         if (strncmp(p, ".at ", 4) == 0) {
             p += 4;
             if (nat_directives < MAX_AT_DIRECTIVES) {
@@ -2091,6 +2096,10 @@ static void emit_function(func_t *fn) {
             fprintf(out_asm, "%s\n", c->data);
         }
     }
+
+    /* at() functions are self-contained — pop back after */
+    if (fn->has_at)
+        fprintf(out_asm, "    endorg\n");
 }
 
 /* ================================================================
@@ -2425,6 +2434,8 @@ static void propagate_preferences(void) {
  * Source-order emission with depth-first use expansion
  * ================================================================ */
 
+static int at_depth = 0;
+
 static void emit_item(int ei) {
     int kind = emit_order[ei].kind;
     int idx = emit_order[ei].index;
@@ -2449,6 +2460,8 @@ static void emit_item(int ei) {
                 fprintf(out_asm, "%s\n", db->entries[j]);
             }
         }
+        if (db->has_at)
+            fprintf(out_asm, "    endorg\n");
     } else if (kind == EMIT_GLOB) {
         global_var_t *g = &globals[idx];
         fprintf(out_asm, "%s:", g->name);
@@ -2465,6 +2478,10 @@ static void emit_item(int ei) {
         int lin = s * 16 + o;
         fprintf(out_asm, "\n    seg 0x%04X\n", s);
         fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n", lin, s, o);
+        at_depth++;
+    } else if (kind == EMIT_ENDAT) {
+        fprintf(out_asm, "    endorg\n");
+        if (at_depth > 0) at_depth--;
     }
 }
 
@@ -2501,7 +2518,13 @@ static void emit_module(const char *path) {
             } else {
                 snprintf(use_path, sizeof(use_path), "%s.nir", use_mod);
             }
+            int saved_depth = at_depth;
             emit_module(use_path);
+            /* Unwind any at() the used module left on the stack */
+            while (at_depth > saved_depth) {
+                fprintf(out_asm, "    endorg ; unwind use\n");
+                at_depth--;
+            }
         } else {
             emit_item(ei);
         }

@@ -2096,6 +2096,9 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
         case DECL_AT:
             fprintf(C.nir, "\n.at 0x%04X:0x%04X\n", d->u.at.seg, d->u.at.off);
             break;
+        case DECL_ENDAT:
+            fprintf(C.nir, ".endat\n");
+            break;
         }
     }
 

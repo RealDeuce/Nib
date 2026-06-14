@@ -144,7 +144,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT KW_CONST KW_PUB KW_WHEN
+%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT KW_CONST KW_PUB KW_WHEN KW_END
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -172,7 +172,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 %type <type>   type return_clause
 %type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list
 %type <stmt>   stmt stmt_list var_decl assignment checked_assignment if_stmt while_stmt for_stmt asm_block when_stmt
-%type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl when_body when_block at_decl
+%type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl when_body when_block at_decl end_at_decl
 %type <param>  param param_list extern_param extern_param_list
 %type <field>  struct_field struct_fields
 %type <rlist>  reg_flag_list reg_or_flag asm_annotation preserves_clause
@@ -242,11 +242,17 @@ top_decl
     | KW_PUB global_decl    { $$ = $2; $$->is_pub = true; }
     | KW_PUB const_decl     { $$ = $2; $$->is_pub = true; }
     | at_decl               { $$ = $1; }
+    | end_at_decl           { $$ = $1; }
     ;
 
 at_decl
     : KW_AT '(' LIT_INT ':' LIT_INT ')' ';'
         { $$ = mk_decl_at($3, $5, yyline); }
+    ;
+
+end_at_decl
+    : KW_END KW_AT ';'
+        { $$ = mk_decl_endat(yyline); }
     ;
 
 /* ==== Use directive ==== */
