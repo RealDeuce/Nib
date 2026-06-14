@@ -1,0 +1,22 @@
+// Test: far pointer type
+// Access components with backtick: ptr`seg, ptr`off
+
+struct ivt_entry {
+    far handler;
+}
+
+fn read_ivt_seg(entry: ivt_entry) -> u16 {
+    far handler = entry.handler;
+    seg ES = handler`seg;
+    return handler`off;
+}
+
+fn test_far_param(addr: far) -> u16 {
+    return addr`off;
+}
+
+fn get_seg(addr: far) -> u16 {
+    // Returns raw u16 of the segment
+    // (can't return seg type from a u16-returning function)
+    return 0;
+}

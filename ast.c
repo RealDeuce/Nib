@@ -147,6 +147,13 @@ expr_t *mk_expr_mem_abs(int seg, int off, int line) {
     return e;
 }
 
+expr_t *mk_expr_far_lit(int seg, int off, int line) {
+    expr_t *e = mk_expr(EXPR_FAR_LIT, line);
+    e->u.far_lit.seg = seg;
+    e->u.far_lit.off = off;
+    return e;
+}
+
 expr_t *mk_expr_cast(expr_t *operand, type_t *target, int line) {
     expr_t *e = mk_expr(EXPR_CAST, line);
     e->u.cast.operand = operand;

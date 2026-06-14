@@ -587,6 +587,34 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         else if (strcmp(opname, "continue") == 0) {
             ins->op = IR_CONTINUE;
         }
+        else if (strncmp(opname, "far.", 4) == 0) {
+            /* far.off, far.seg, far.lit — far pointer operations */
+            strncpy(ins->name, opname, 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            if (strcmp(opname, "far.lit") == 0) {
+                /* far.lit %d, seg, off — store 4 bytes on stack */
+                ins->op = IR_ASM;
+                p = skip_ws(p);
+                int seg_val = (int)strtol(p, (char **)&p, 0);
+                skip_comma(&p);
+                int off_val = (int)strtol(p, (char **)&p, 0);
+                snprintf(ins->asm_body, sizeof(ins->asm_body),
+                    "    sub sp, 4\n"
+                    "    mov word [sp], 0x%04X\n"
+                    "    mov word [sp+2], 0x%04X\n"
+                    "    mov %%_%d, sp",
+                    off_val, seg_val, ins->dst);
+                ins->asm_ann[0] = '\0';
+            } else {
+                /* far.off / far.seg — load word from [ptr] or [ptr+2] */
+                ins->op = IR_ALU;
+                ins->src1 = parse_vreg(p, &p);
+                /* Mark src1 as needing addressable register */
+                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+                    fn->vregs[ins->src1].needs_addressable = true;
+            }
+        }
         else if (strcmp(opname, "hlt") == 0 || strcmp(opname, "nop") == 0 ||
                  strcmp(opname, "salc") == 0 || strcmp(opname, "into") == 0 ||
                  strcmp(opname, "rep") == 0 || strcmp(opname, "repe") == 0 ||
@@ -1116,6 +1144,18 @@ static void emit_function(func_t *fn) {
                 else
                     fprintf(out_asm, "    out %s, %s\n",
                             vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                break;
+            }
+            if (strcmp(op, "far.off") == 0) {
+                /* Load offset word from [ptr+0] */
+                fprintf(out_asm, "    mov %s, [%s]\n",
+                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                break;
+            }
+            if (strcmp(op, "far.seg") == 0) {
+                /* Load segment word from [ptr+2] */
+                fprintf(out_asm, "    mov %s, [%s+2]\n",
+                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
                 break;
             }
             if (strcmp(op, "xlat") == 0) {

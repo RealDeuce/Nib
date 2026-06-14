@@ -215,6 +215,7 @@ static int type_size(type_t *t) {
     case TYPE_ARRAY_U16:return t->array_size * 2;
     case TYPE_BCD:      return t->array_size;
     case TYPE_STRUCT:   return 0; /* would need struct lookup */
+    case TYPE_FAR:      return 4;
     case TYPE_VOID:     return 0;
     }
     return 0;
@@ -233,6 +234,7 @@ static const char *type_str(type_t *t) {
     case TYPE_ARRAY_U16:snprintf(buf, sizeof(buf), "u16[%d]", t->array_size); return buf;
     case TYPE_BCD:      snprintf(buf, sizeof(buf), "bcd[%d]", t->array_size); return buf;
     case TYPE_STRUCT:   return t->struct_name ? t->struct_name : "struct";
+    case TYPE_FAR:      return "far";
     case TYPE_VOID:     return "void";
     }
     return "?";
@@ -289,7 +291,8 @@ static bool type_is_scalar(type_t *t) {
 static bool type_is_aggregate(type_t *t) {
     if (!t) return false;
     return t->kind == TYPE_ARRAY_U8 || t->kind == TYPE_ARRAY_U16 ||
-           t->kind == TYPE_BCD || t->kind == TYPE_STRUCT;
+           t->kind == TYPE_BCD || t->kind == TYPE_STRUCT ||
+           t->kind == TYPE_FAR;
 }
 
 static bool type_is_integer(type_t *t) {
@@ -706,6 +709,12 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     case EXPR_FIELD: {
         typed_vreg_t obj = emit_expr_typed(e->u.field.object);
 
+        /* far type: use backtick for component access (ptr`seg, ptr`off) */
+        if (obj.type && obj.type->kind == TYPE_FAR) {
+            cerr(e->line, "use backtick for far components: ptr`seg, ptr`off");
+            return TV(alloc_vreg(), mk_type(TYPE_U16));
+        }
+
         /* Verify the struct type has this field */
         type_t *field_type = NULL;
         if (obj.type && obj.type->kind == TYPE_STRUCT && obj.type->struct_name) {
@@ -769,9 +778,38 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* Type inferred from declaration context — caller must check */
         return TV(dst, mk_type(TYPE_U8));
     }
+    case EXPR_FAR_LIT: {
+        /* Far literals are stored as two separate values.
+         * The vardecl handler will store them into the far variable's memory.
+         * Emit as two immediates that get combined at the assignment. */
+        int r_off = alloc_vreg();
+        int r_seg = alloc_vreg();
+        fprintf(C.nir, "    mov %%%d, 0x%04X ; far offset\n", r_off, e->u.far_lit.off);
+        fprintf(C.nir, "    mov %%%d, 0x%04X ; far segment\n", r_seg, e->u.far_lit.seg);
+        /* Return the offset vreg — the assignment handler needs to
+         * store both components. For now this is incomplete. */
+        return TV(r_off, mk_type(TYPE_FAR));
+    }
     case EXPR_RAW_FIELD: {
-        /* Same as EXPR_FIELD but returns storage type, ignoring as annotation */
+        /* Same as EXPR_FIELD but returns storage type, ignoring as annotation.
+         * Also handles far type component access: ptr`seg, ptr`off */
         typed_vreg_t obj = emit_expr_typed(e->u.field.object);
+
+        /* far type: `seg and `off */
+        if (obj.type && obj.type->kind == TYPE_FAR) {
+            int dst = alloc_vreg();
+            if (strcmp(e->u.field.field_name, "off") == 0) {
+                fprintf(C.nir, "    far.off %%%d, %%%d\n", dst, obj.vreg);
+                return TV(dst, mk_type(TYPE_U16));
+            } else if (strcmp(e->u.field.field_name, "seg") == 0) {
+                fprintf(C.nir, "    far.seg %%%d, %%%d\n", dst, obj.vreg);
+                return TV(dst, mk_type(TYPE_SEG));
+            } else {
+                cerr(e->line, "far type only has `seg and `off");
+            }
+            return TV(dst, mk_type(TYPE_U16));
+        }
+
         type_t *field_type = NULL;
         if (obj.type && obj.type->kind == TYPE_STRUCT && obj.type->struct_name) {
             int si = find_struct(obj.type->struct_name);
@@ -1291,7 +1329,8 @@ static void compile_fn(decl_t *d) {
         bool is_ref = (p->type && (p->type->kind == TYPE_ARRAY_U8 ||
                                     p->type->kind == TYPE_ARRAY_U16 ||
                                     p->type->kind == TYPE_BCD ||
-                                    p->type->kind == TYPE_STRUCT));
+                                    p->type->kind == TYPE_STRUCT ||
+                                    p->type->kind == TYPE_FAR));
         const char *ir_type = (is_ref && !p->is_value) ? "u16" : type_str(p->type);
         fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, ir_type, p->name);
         if (p->is_value) fprintf(C.nir, ", value");

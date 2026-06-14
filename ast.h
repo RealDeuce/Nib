@@ -48,6 +48,7 @@ typedef enum {
     TYPE_ARRAY_U8, TYPE_ARRAY_U16,
     TYPE_BCD,
     TYPE_STRUCT,
+    TYPE_FAR,       /* far pointer: seg:off, 4 bytes */
     TYPE_VOID
 } type_kind_t;
 
@@ -89,6 +90,7 @@ typedef enum {
     EXPR_FIELD,
     EXPR_RAW_FIELD,
     EXPR_MEM,
+    EXPR_FAR_LIT,   /* far literal: seg:off */
     EXPR_CAST,
     EXPR_PAREN
 } expr_kind_t;
@@ -128,6 +130,9 @@ struct expr_node {
 
         /* FIELD */
         struct { expr_t *object; char *field_name; } field;
+
+        /* FAR_LIT — seg:off constant */
+        struct { int seg; int off; } far_lit;
 
         /* CAST (as) — reinterpret type, no code */
         struct { expr_t *operand; type_t *target_type; } cast;
@@ -385,6 +390,7 @@ expr_t     *mk_expr_raw_field(expr_t *obj, const char *field, int line);
 expr_t     *mk_expr_mem(reg_id_t seg, reg_id_t base, reg_id_t idx,
                          int disp, bool has_disp, int line);
 expr_t     *mk_expr_mem_abs(int seg, int off, int line);
+expr_t     *mk_expr_far_lit(int seg, int off, int line);
 expr_t     *mk_expr_cast(expr_t *operand, type_t *target, int line);
 
 stmt_t     *mk_stmt_vardecl(type_t *type, const char *name,

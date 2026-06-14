@@ -129,6 +129,7 @@ static void mods_reset(void) {
 %type <regval> reg_name word_reg byte_reg seg_reg flag mem_base
 %type <type>   return_clause_extern_type
 %type <regval> return_clause_extern_pin
+%type <sval>   any_ident
 %type <fcase>  flag_block flag_cases flag_case
 %type <fexpr>  flag_expr flag_atom
 
@@ -543,7 +544,7 @@ postfix_expr
         { $$ = mk_expr_cast($1, $4, yyline); }
     | postfix_expr '.' IDENT
         { $$ = mk_expr_field($1, $3, yyline); }
-    | postfix_expr '`' IDENT
+    | postfix_expr '`' any_ident
         { $$ = mk_expr_raw_field($1, $3, yyline); }
     | postfix_expr '[' expr ']'
         { $$ = mk_expr_index($1, $3, false, yyline); }
@@ -564,6 +565,7 @@ primary_expr
     | reg_name              { $$ = mk_expr_reg($1.reg, $1.rclass, yyline); }
     | seg_reg               { $$ = mk_expr_reg($1.reg, REGCLASS_SEG, yyline); }
     | flag                  { $$ = mk_expr_flag($1.reg, yyline); }
+    | LIT_INT ':' LIT_INT   { $$ = mk_expr_far_lit($1, $3, yyline); }
     | '(' expr ')'          { $$ = $2; }
     | mem_access            { $$ = $1; }
     ;
@@ -685,10 +687,21 @@ type
     | TY_U32                    { $$ = mk_type(TYPE_U32); }
     | TY_SEG                    { $$ = mk_type(TYPE_SEG); }
     | TY_BOOL                   { $$ = mk_type(TYPE_BOOL); }
+    | KW_FAR                    { $$ = mk_type(TYPE_FAR); }
     | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(TYPE_ARRAY_U8, $3); }
     | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_ARRAY_U16, $3); }
     | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(TYPE_BCD, $3); }
     | IDENT                     { $$ = mk_type_struct($1); }
+    ;
+
+/* Identifiers that can appear after backtick — includes keywords
+ * that are valid as field/component names */
+any_ident
+    : IDENT                     { $$ = $1; }
+    | TY_SEG                    { $$ = strdup("seg"); }
+    | TY_U8                     { $$ = strdup("u8"); }
+    | TY_U16                    { $$ = strdup("u16"); }
+    | KW_FAR                    { $$ = strdup("far"); }
     ;
 
 %%
