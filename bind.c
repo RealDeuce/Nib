@@ -1082,15 +1082,28 @@ static void emit_function(func_t *fn) {
                     vreg_asm(fn, ins->dst));
             break;
 
-        case IR_SETFLAG:
-            if (strcmp(ins->name, "CF") == 0) {
-                fprintf(out_asm, "    stc\n"); /* TODO: check value */
-            } else if (strcmp(ins->name, "DF") == 0) {
-                fprintf(out_asm, "    std\n");
-            } else if (strcmp(ins->name, "IF") == 0) {
-                fprintf(out_asm, "    sti\n");
+        case IR_SETFLAG: {
+            /* Determine value: look back for the mov that defined src1 */
+            int val = 1; /* default assume set */
+            if (ins->src1 >= 0) {
+                for (int j = i - 1; j >= 0; j--) {
+                    if (fn->insns[j].dst == ins->src1 &&
+                        fn->insns[j].op == IR_MOV && fn->insns[j].has_imm) {
+                        val = fn->insns[j].imm;
+                        break;
+                    }
+                }
             }
+            if (strcmp(ins->name, "CF") == 0)
+                fprintf(out_asm, "    %s\n", val ? "stc" : "clc");
+            else if (strcmp(ins->name, "DF") == 0)
+                fprintf(out_asm, "    %s\n", val ? "std" : "cld");
+            else if (strcmp(ins->name, "IF") == 0)
+                fprintf(out_asm, "    %s\n", val ? "sti" : "cli");
+            else if (strcmp(ins->name, "TF") == 0)
+                fprintf(out_asm, "    ; TF := %d (no direct instruction)\n", val);
             break;
+        }
 
         case IR_GETFLAG:
             fprintf(out_asm, "    ; getflag %s -> %s\n",
@@ -1102,9 +1115,11 @@ static void emit_function(func_t *fn) {
                 fprintf(out_asm, "    cmc\n");
             break;
 
-        case IR_LOOP:
+        case IR_LOOP: {
+            /* LOOP decrements CX and jumps if CX != 0 */
             fprintf(out_asm, "    loop %s\n", ins->name);
             break;
+        }
 
         case IR_ASM:
             fprintf(out_asm, "    ; asm %s\n", ins->asm_ann);
@@ -1117,8 +1132,7 @@ static void emit_function(func_t *fn) {
 
         case IR_BREAK:
         case IR_CONTINUE:
-            fprintf(out_asm, "    ; %s (TODO)\n",
-                    ins->op == IR_BREAK ? "break" : "continue");
+            /* Dead code — compiler resolves these to JMPs */
             break;
 
         default:

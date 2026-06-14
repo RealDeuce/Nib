@@ -10,12 +10,14 @@
 - Implement INS instruction (0x0F 0x31, 0x0F 0x39) in v20.cpp
 - Implement BOUND instruction in v20.cpp (currently stubbed)
 
-## Language Design
-- Determine .nif binary format
-- Determine .nob binary format
+## Toolchain — remaining work
+- `use` directive: read .nif files and import function signatures for cross-module type checking
+- Flag-check blocks: AST nodes and IR emission (grammar parses them, not wired up)
+- String literal storage: `u8[5] hello = "Hello"` needs data segment emission
+- `nib build` convenience driver: follow `use` chains, timestamp-based recompilation
+- Peephole optimizer: post-binder pass to eliminate self-moves, fold mov+op sequences
 
-## Toolchain
-- V20 assembler (nib asm) — two-pass, Intel syntax, V20 extensions
-- Compiler implementation (nib compile)
-- Binder implementation (nib bind)
-- `nib build` convenience driver
+## Nice to have
+- Binder: caller-save push/pop insertion at call sites based on preserves info
+- Binder: inter-procedural return register propagation to callers
+- Better error messages with source context

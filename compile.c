@@ -946,7 +946,9 @@ static void emit_stmt(stmt_t *s) {
         int save_continue = C.loop_continue_label;
         C.loop_break_label = lbl_end;
         C.loop_continue_label = lbl_top;
-        fprintf(C.nir, "    mov %%cx, %%%d\n", start);
+        int cx_vreg = alloc_vreg();
+        fprintf(C.nir, ".prefer %%%d, CX\n", cx_vreg);
+        fprintf(C.nir, "    mov %%%d, %%%d\n", cx_vreg, start);
         fprintf(C.nir, ".L%d:\n", lbl_top);
         C.loop_depth++;
         push_scope();
