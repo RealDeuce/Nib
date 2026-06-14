@@ -1,0 +1,28 @@
+// Test: conditional compilation with when blocks
+// Run with: ./nib -D DEBUG -D PLATFORM=dreamwriter tests/t_when.nib
+
+// Top-level when: defined check
+when DEBUG {
+    const DEBUG_PORT = 0x90;
+}
+
+// Top-level when: value comparison
+when PLATFORM == "dreamwriter" {
+    const LCD_PORT = 0x60;
+}
+
+// This should NOT be included (no -D TESTING expected)
+when TESTING {
+    const SHOULD_NOT_EXIST = 0xFF;
+}
+
+fn init() {
+    // Statement-level when
+    when DEBUG {
+        port_out(DEBUG_PORT, 0xFF);
+    }
+
+    when PLATFORM == "dreamwriter" {
+        port_out(LCD_PORT, 0x00);
+    }
+}

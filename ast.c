@@ -499,6 +499,7 @@ program_t *mk_program(void) {
 }
 
 void program_add(program_t *p, decl_t *d) {
+    if (!d) return;
     if (!p->decls) {
         p->decls = d;
         p->decls_tail = d;

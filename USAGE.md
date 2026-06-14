@@ -5,12 +5,14 @@
 Compiles a `.nib` source file to Nib IR (`.nir`) and interface (`.nif`).
 
 ```
-nib [--parse-only] [file.nib]
+nib [--parse-only] [-D NAME[=VALUE] ...] [file.nib]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--parse-only` | Parse and validate only; do not compile |
+| `-D NAME` | Define a compile-time name for `when` blocks |
+| `-D NAME=VALUE` | Define a name with a value for `when` comparisons |
 
 If no input file is given, reads from stdin (output files default to
 `out.nir` and `out.nif`). Otherwise, output filenames are derived from
@@ -19,8 +21,9 @@ the input: `source.nib` produces `source.nir` and `source.nif`.
 ### Examples
 
 ```sh
-./nib source.nib                # compile to source.nir + source.nif
-./nib source.nib --parse-only   # parse only, report declaration count
+./nib source.nib                          # compile
+./nib source.nib --parse-only             # parse only
+./nib -D DEBUG -D PLATFORM=dw source.nib  # with compile-time defines
 ```
 
 ---

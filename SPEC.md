@@ -1700,7 +1700,7 @@ all .nir files         →  [nibbind]  →  .asm
 ### Control flow
 
 `if`, `else`, `while`, `for`, `break`, `continue`, `return`, `goto`,
-`tailcall`, `trap`
+`tailcall`, `trap`, `when`
 
 ### Functions
 
@@ -1724,6 +1724,59 @@ all .nir files         →  [nibbind]  →  .asm
 ### Struct field modifiers
 
 `as`
+
+
+## Conditional Compilation
+
+The `when` construct conditionally includes or excludes code at compile
+time based on `-D` command-line flags. No preprocessor — `when` is a
+language construct evaluated by the parser.
+
+### Command line
+
+```sh
+./nib -D DEBUG -D PLATFORM=dreamwriter source.nib
+```
+
+`-D NAME` defines a name. `-D NAME=VALUE` defines a name with a value.
+
+### Top-level (declarations)
+
+```
+when PLATFORM == "dreamwriter" {
+    const LCD_PORT = 0x60;
+    pub fn lcd_init() { ... }
+} else {
+    const LCD_PORT = 0x80;
+}
+```
+
+### Statement-level
+
+```
+fn init() {
+    when DEBUG {
+        port_out(0x90, 0xFF);   // debug LED
+    }
+}
+```
+
+### Conditions
+
+| Form | True when |
+|------|-----------|
+| `when NAME` | NAME is defined (any value) |
+| `when NAME == "value"` | NAME is defined with that value |
+| `when NAME != "value"` | NAME is not defined or has different value |
+
+### Behavior
+
+- Evaluated at parse time — no runtime cost, no AST nodes
+- False branches are parsed but discarded
+- `else` is optional
+- `when` blocks can be nested
+- Top-level `when` can contain any declarations (functions, structs, globals, constants)
+- Statement-level `when` can contain any statements
 
 
 ## Unresolved / Future

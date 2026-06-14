@@ -18,6 +18,7 @@ program_t *parsed_program = NULL;
 
 /* Helpers for building linked lists */
 static stmt_t *stmt_list_append(stmt_t *list, stmt_t *item) {
+    if (!item) return list;
     if (!list) return item;
     stmt_t *p = list;
     while (p->next) p = p->next;
@@ -63,6 +64,65 @@ static fn_modifiers_t current_mods;
 static void mods_reset(void) {
     memset(&current_mods, 0, sizeof(current_mods));
 }
+
+/* ---- Compile-time defines for `when` conditional compilation ---- */
+#define MAX_DEFINES 64
+static struct {
+    char name[64];
+    char value[256];
+    bool has_value;
+} defines[MAX_DEFINES];
+static int ndefines = 0;
+
+static void add_define(const char *spec) {
+    if (ndefines >= MAX_DEFINES) return;
+    const char *eq = strchr(spec, '=');
+    if (eq) {
+        int nlen = (int)(eq - spec);
+        if (nlen > 63) nlen = 63;
+        memcpy(defines[ndefines].name, spec, nlen);
+        defines[ndefines].name[nlen] = '\0';
+        strncpy(defines[ndefines].value, eq + 1, 255);
+        defines[ndefines].has_value = true;
+    } else {
+        strncpy(defines[ndefines].name, spec, 63);
+        defines[ndefines].name[63] = '\0';
+        defines[ndefines].has_value = false;
+    }
+    ndefines++;
+}
+
+static bool when_defined(const char *name) {
+    for (int i = 0; i < ndefines; i++)
+        if (strcmp(defines[i].name, name) == 0) return true;
+    return false;
+}
+
+static bool when_eq(const char *name, const char *value) {
+    for (int i = 0; i < ndefines; i++)
+        if (strcmp(defines[i].name, name) == 0 &&
+            defines[i].has_value &&
+            strcmp(defines[i].value, value) == 0) return true;
+    return false;
+}
+
+static bool when_neq(const char *name, const char *value) {
+    return !when_eq(name, value);
+}
+
+/* Splice a decl list into a program */
+static void program_splice(program_t *prog, decl_t *list) {
+    if (!list) return;
+    if (!prog->decls) {
+        prog->decls = list;
+    } else {
+        prog->decls_tail->next = list;
+    }
+    /* Find new tail */
+    decl_t *p = list;
+    while (p->next) p = p->next;
+    prog->decls_tail = p;
+}
 %}
 
 %union {
@@ -95,7 +155,7 @@ static void mods_reset(void) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT KW_CONST KW_PUB
+%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT KW_CONST KW_PUB KW_WHEN
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -122,8 +182,8 @@ static void mods_reset(void) {
 /* ---- Nonterminal types ---- */
 %type <type>   type return_clause
 %type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list
-%type <stmt>   stmt stmt_list var_decl assignment checked_assignment if_stmt while_stmt for_stmt asm_block
-%type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl
+%type <stmt>   stmt stmt_list var_decl assignment checked_assignment if_stmt while_stmt for_stmt asm_block when_stmt
+%type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl when_body when_block
 %type <param>  param param_list extern_param extern_param_list
 %type <field>  struct_field struct_fields
 %type <rlist>  reg_flag_list reg_or_flag asm_annotation preserves_clause
@@ -159,6 +219,30 @@ static void mods_reset(void) {
 program
     : /* empty */           { parsed_program = mk_program(); }
     | program top_decl      { program_add(parsed_program, $2); }
+    | program when_block    { program_splice(parsed_program, $2); }
+    ;
+
+when_body
+    : /* empty */           { $$ = NULL; }
+    | when_body top_decl    {
+        if ($1 == NULL) { $$ = $2; }
+        else { decl_t *p = $1; while (p->next) p = p->next; p->next = $2; $$ = $1; }
+    }
+    ;
+
+when_block
+    : KW_WHEN IDENT '{' when_body '}'
+        { $$ = when_defined($2) ? $4 : NULL; }
+    | KW_WHEN IDENT '{' when_body '}' KW_ELSE '{' when_body '}'
+        { $$ = when_defined($2) ? $4 : $8; }
+    | KW_WHEN IDENT OP_EQ LIT_STRING '{' when_body '}'
+        { $$ = when_eq($2, $4) ? $6 : NULL; }
+    | KW_WHEN IDENT OP_EQ LIT_STRING '{' when_body '}' KW_ELSE '{' when_body '}'
+        { $$ = when_eq($2, $4) ? $6 : $10; }
+    | KW_WHEN IDENT OP_NEQ LIT_STRING '{' when_body '}'
+        { $$ = when_neq($2, $4) ? $6 : NULL; }
+    | KW_WHEN IDENT OP_NEQ LIT_STRING '{' when_body '}' KW_ELSE '{' when_body '}'
+        { $$ = when_neq($2, $4) ? $6 : $10; }
     ;
 
 top_decl
@@ -392,6 +476,22 @@ stmt
     | KW_TAILCALL expr ';'         { $$ = mk_stmt_tailcall($2, yyline); }
     | IDENT ':'                     { $$ = mk_stmt_label($1, yyline); }
     | asm_block                     { $$ = $1; }
+    | when_stmt                     { $$ = $1; }
+    ;
+
+when_stmt
+    : KW_WHEN IDENT '{' stmt_list '}'
+        { $$ = when_defined($2) ? $4 : NULL; }
+    | KW_WHEN IDENT '{' stmt_list '}' KW_ELSE '{' stmt_list '}'
+        { $$ = when_defined($2) ? $4 : $8; }
+    | KW_WHEN IDENT OP_EQ LIT_STRING '{' stmt_list '}'
+        { $$ = when_eq($2, $4) ? $6 : NULL; }
+    | KW_WHEN IDENT OP_EQ LIT_STRING '{' stmt_list '}' KW_ELSE '{' stmt_list '}'
+        { $$ = when_eq($2, $4) ? $6 : $10; }
+    | KW_WHEN IDENT OP_NEQ LIT_STRING '{' stmt_list '}'
+        { $$ = when_neq($2, $4) ? $6 : NULL; }
+    | KW_WHEN IDENT OP_NEQ LIT_STRING '{' stmt_list '}' KW_ELSE '{' stmt_list '}'
+        { $$ = when_neq($2, $4) ? $6 : $10; }
     ;
 
 /* ---- Variable declarations ---- */
@@ -762,6 +862,10 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--parse-only") == 0)
             parse_only = true;
+        else if (strcmp(argv[i], "-D") == 0 && i + 1 < argc)
+            add_define(argv[++i]);
+        else if (strncmp(argv[i], "-D", 2) == 0 && argv[i][2])
+            add_define(argv[i] + 2);
         else
             infile = argv[i];
     }
