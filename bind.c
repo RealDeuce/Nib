@@ -260,6 +260,9 @@ typedef struct {
     char type[32];
     int  size;          /* bytes of storage */
     char module[64];    /* source module this global belongs to */
+    bool has_at;
+    int  at_seg;
+    int  at_off;
 } global_var_t;
 
 static global_var_t globals[MAX_GLOBALS];
@@ -1234,6 +1237,16 @@ static void parse_nir(const char *path) {
                     else if (strncmp(g->type, "u32", 3) == 0) elem = 4;
                     else if (strncmp(g->type, "far", 3) == 0) elem = 4;
                     g->size = elem * count;
+                }
+            }
+            /* Check for at() placement */
+            char *at_ptr = strstr(p, "at(");
+            if (at_ptr) {
+                g->has_at = true;
+                char *colon = strchr(at_ptr + 3, ':');
+                if (colon) {
+                    g->at_seg = (int)strtol(at_ptr + 3, NULL, 0);
+                    g->at_off = (int)strtol(colon + 1, NULL, 0);
                 }
             }
             strncpy(g->module, cur_module, 63);
@@ -2464,6 +2477,13 @@ static void emit_item(int ei) {
             fprintf(out_asm, "    endorg\n");
     } else if (kind == EMIT_GLOB) {
         global_var_t *g = &globals[idx];
+        if (g->has_at) {
+            int lin = g->at_seg * 16 + g->at_off;
+            fprintf(out_asm, "\n    seg 0x%04X\n", g->at_seg);
+            fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+                    lin, g->at_seg, g->at_off);
+            at_depth++;
+        }
         fprintf(out_asm, "%s:", g->name);
         if (g->size <= 2)
             fprintf(out_asm, " dw 0\n");
@@ -2471,6 +2491,10 @@ static void emit_item(int ei) {
             fprintf(out_asm, "\n");
             for (int b = 0; b < g->size; b += 2)
                 fprintf(out_asm, "    dw 0\n");
+        }
+        if (g->has_at) {
+            fprintf(out_asm, "    endorg\n");
+            at_depth--;
         }
     } else if (kind == EMIT_AT) {
         int s = at_directives[idx].seg;

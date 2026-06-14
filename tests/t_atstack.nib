@@ -1,0 +1,26 @@
+// Test: at() stack with end at; for non-contiguous placement
+// Verifies: org push/pop, IVT-before-code pattern, self-contained at() on functions
+
+at(0x1000:0x0000);
+
+fn first() {
+    nop();
+}
+
+// Detour to place data at 0:0, then resume
+at(0x0000:0x0000);
+u16[4] ivt;
+end at;
+
+fn second() {
+    nop();
+}
+
+// Function with at() is self-contained (auto end at)
+fn at(0x2000:0x0000) placed() {
+    nop();
+}
+
+fn third() {
+    nop();
+}

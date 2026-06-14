@@ -1,0 +1,18 @@
+// Test: global with at() placement followed by non-at() items
+// The at() global should not drag subsequent items to its address
+
+at(0x1000:0x0000);
+
+fn before() {
+    nop();
+}
+
+// Global at a detour address — should auto end-at
+u16[4] table at(0x0000:0x0000);
+
+// This should continue at 1000:xxxx, NOT at 0000:0008
+u16 counter;
+
+fn after() {
+    nop();
+}
