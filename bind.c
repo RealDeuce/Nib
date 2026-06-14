@@ -93,6 +93,7 @@ typedef enum {
     IR_CALL,        /* call %d, name, args... */
     IR_TAILCALL,    /* tailcall name, args... */
     IR_GOTO_FN,     /* goto.fn name — raw jump to function, no cleanup */
+    IR_CJMP,        /* conditional jump: jcc label (flag-check blocks) */
     IR_RET,         /* ret */
     IR_RETVAL,      /* retval %s */
     IR_LOAD,        /* load %d, %base[%idx] */
@@ -766,18 +767,23 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                  strcmp(opname, "rep") == 0 || strcmp(opname, "repe") == 0 ||
                  strcmp(opname, "repne") == 0 ||
                  /* Conditional jumps from flag-check blocks */
-                 strcmp(opname, "jc") == 0 || strcmp(opname, "jnc") == 0 ||
-                 strcmp(opname, "jo") == 0 || strcmp(opname, "jno") == 0 ||
-                 strcmp(opname, "jz") == 0 || strcmp(opname, "jnz") == 0 ||
-                 strcmp(opname, "js") == 0 || strcmp(opname, "jns") == 0 ||
-                 strcmp(opname, "jp") == 0 || strcmp(opname, "jnp") == 0 ||
                  strcmp(opname, "int") == 0) {
             /* Pass-through: emit as literal assembly */
             ins->op = IR_ASM;
-            /* Combine opname with rest of line */
             p = skip_ws(p);
             snprintf(ins->asm_body, sizeof(ins->asm_body), "    %s %s", opname, p);
             ins->asm_ann[0] = '\0';
+        }
+        else if (strcmp(opname, "jc") == 0 || strcmp(opname, "jnc") == 0 ||
+                 strcmp(opname, "jo") == 0 || strcmp(opname, "jno") == 0 ||
+                 strcmp(opname, "jz") == 0 || strcmp(opname, "jnz") == 0 ||
+                 strcmp(opname, "js") == 0 || strcmp(opname, "jns") == 0 ||
+                 strcmp(opname, "jp") == 0 || strcmp(opname, "jnp") == 0) {
+            /* Flag-check conditional jump — store mnemonic and label separately */
+            ins->op = IR_CJMP;
+            strncpy(ins->asm_ann, opname, sizeof(ins->asm_ann) - 1);
+            p = skip_ws(p);
+            read_word(p, ins->name, sizeof(ins->name));
         }
         else if (strcmp(opname, "in") == 0) {
             ins->op = IR_ALU;
@@ -1326,6 +1332,13 @@ static const char *vreg_asm(func_t *fn, int v) {
     return b;
 }
 
+/* Scope a label name to the current function to avoid collisions */
+static const char *scoped_label(func_t *fn, const char *label) {
+    static char buf[128];
+    snprintf(buf, sizeof(buf), "%s_%s", fn->name, label);
+    return buf;
+}
+
 static void emit_function(func_t *fn) {
     fprintf(out_asm, "\n; === %s ===\n", fn->name);
 
@@ -1394,7 +1407,7 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_LABEL:
-            fprintf(out_asm, "%s:\n", ins->name);
+            fprintf(out_asm, "%s:\n", scoped_label(fn, ins->name));
             break;
 
         case IR_MOV:
@@ -1614,7 +1627,7 @@ static void emit_function(func_t *fn) {
                 }
                 if (cmp->op == IR_LABEL || cmp->op == IR_JMP) break;
             }
-            fprintf(out_asm, "    %s %s\n", jcc, ins->name);
+            fprintf(out_asm, "    %s %s\n", jcc, scoped_label(fn, ins->name));
             break;
         }
 
@@ -1648,7 +1661,7 @@ static void emit_function(func_t *fn) {
         }
 
         case IR_JMP:
-            fprintf(out_asm, "    jmp %s\n", ins->name);
+            fprintf(out_asm, "    jmp %s\n", scoped_label(fn, ins->name));
             break;
 
         case IR_CALL: {
@@ -1803,9 +1816,15 @@ static void emit_function(func_t *fn) {
 
         case IR_LOOP: {
             /* LOOP decrements CX and jumps if CX != 0 */
-            fprintf(out_asm, "    loop %s\n", ins->name);
+            fprintf(out_asm, "    loop %s\n", scoped_label(fn, ins->name));
             break;
         }
+
+        case IR_CJMP:
+            /* Flag-check conditional jump with scoped label */
+            fprintf(out_asm, "    %s %s\n", ins->asm_ann,
+                    scoped_label(fn, ins->name));
+            break;
 
         case IR_ASM:
             if (ins->asm_ann[0])
