@@ -1,0 +1,77 @@
+// Test: control flow — if/else, while, for, break, continue, goto
+
+fn if_else(x: u16) -> u16 {
+    if (x == 0) {
+        return 0;
+    } else if (x == 1) {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+fn while_loop(n: u16) -> u16 {
+    u16 sum = 0;
+    u16 i = 0;
+    while (i < n) {
+        sum := sum + i;
+        i := i + 1;
+    }
+    return sum;
+}
+
+fn for_loop() -> u16 {
+    u16 total = 0;
+    for (CX in 10..0) {
+        total := total + 1;
+    }
+    return total;
+}
+
+fn break_test(n: u16) -> u16 {
+    u16 i = 0;
+    while (i < 100) {
+        if (i == n) {
+            break;
+        }
+        i := i + 1;
+    }
+    return i;
+}
+
+fn continue_test(n: u16) -> u16 {
+    u16 sum = 0;
+    u16 i = 0;
+    while (i < n) {
+        i := i + 1;
+        if (i == 5) {
+            continue;
+        }
+        sum := sum + i;
+    }
+    return sum;
+}
+
+fn nested_loops() -> u16 {
+    u16 count = 0;
+    u16 i = 0;
+    while (i < 10) {
+        u16 j = 0;
+        while (j < 10) {
+            count := count + 1;
+            j := j + 1;
+        }
+        i := i + 1;
+    }
+    return count;
+}
+
+fn goto_test(x: u16) -> u16 {
+    u16 result = 0;
+    if (x == 0) {
+        goto done;
+    }
+    result := x + 1;
+done:
+    return result;
+}

@@ -1,0 +1,34 @@
+// Test: register pinning and inter-procedural propagation
+
+fn string_fill(dest: u16, char: u8, count: u16) {
+    seg ES = 0xB800;
+    u16 DI = dest;
+    u8 AL = char;
+    u16 CX = count;
+    asm clobbers(DI, CX, FLAGS) {
+        rep stosb
+    }
+}
+
+fn string_copy(src: u16, dst: u16, count: u16) {
+    u16 SI = src;
+    u16 DI = dst;
+    u16 CX = count;
+    seg ES = 0;
+    asm clobbers(SI, DI, CX, FLAGS) {
+        rep movsb
+    }
+}
+
+fn test_propagation() {
+    // Caller should set up DI, AL, CX directly for string_fill
+    string_fill(0, 0x20, 80);
+    // Caller should set up SI, DI, CX directly for string_copy
+    string_copy(80, 0, 80);
+}
+
+fn multiple_calls() {
+    // Second call should correctly reassign registers
+    string_fill(0, 0x41, 10);
+    string_fill(10, 0x42, 20);
+}

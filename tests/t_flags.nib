@@ -1,0 +1,53 @@
+// Test: flag variables, flag assignments, flag-check blocks
+
+fn flag_set_clear() {
+    CF := 0;
+    CF := 1;
+    DF := 0;
+    DF := 1;
+    IF := 0;
+    IF := 1;
+    CF := ~CF;
+}
+
+fn flag_conditions() {
+    if (CF) {
+        nop();
+    }
+    if (!ZF) {
+        nop();
+    }
+}
+
+fn saturating_add(a: u16, b: u16) -> u16 {
+    u16 result = a;
+    result := result + b {
+        CF: { result := 0xFFFF; }
+    }
+    return result;
+}
+
+fn checked_add(a: u16, b: u16) -> u16 {
+    u16 result = a;
+    result := result + b {
+        OF: trap;
+    }
+    return result;
+}
+
+fn multi_flag(a: u16, b: u16) -> u16 {
+    u16 result = a;
+    result := result + b {
+        CF | OF: { result := 0xFFFF; }
+        ZF: { result := 0; }
+    }
+    return result;
+}
+
+fn and_flags(a: u16, b: u16) -> u16 {
+    u16 result = a;
+    result := result + b {
+        !CF & ZF: { result := 0; }
+    }
+    return result;
+}

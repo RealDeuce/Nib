@@ -1,0 +1,41 @@
+// Test: memory access, arrays, address-of
+
+fn mem_read_write() {
+    seg ES = 0xB800;
+    u8 AL = [SI];
+    u8 val = [BX + 4];
+    [DI] := val;
+    [ES:DI] := val;
+}
+
+fn array_access(buf: u8[80]) -> u8 {
+    u8 first = buf[0];
+    u8 fifth = buf[4];
+    return first;
+}
+
+fn checked_access(buf: u8[80], idx: u16) -> u8 {
+    return buf![idx];
+}
+
+fn array_write(buf: u8[80]) {
+    buf[0] := 0x41;
+    buf[1] := 0x42;
+}
+
+fn address_of(buf: u8[80]) -> u16 {
+    u16 addr = &buf;
+    return addr;
+}
+
+fn mem_addressing_modes() {
+    u8 a = [BX];
+    u8 b = [SI];
+    u8 c = [DI];
+    u8 d = [BP + 2];
+    u8 e = [BX + SI];
+    u8 f = [BX + DI + 4];
+    u8 g = [BP + SI + 8];
+    u16 h = [0x1234];
+    u8 i = [0xB800:0x0000];
+}

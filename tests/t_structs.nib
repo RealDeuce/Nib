@@ -1,0 +1,61 @@
+// Test: structs, field access, bit fields, nesting
+
+struct point {
+    u16 x;
+    u16 y;
+}
+
+struct rect {
+    point origin;
+    point size;
+}
+
+struct file_entry {
+    u8 type;
+    u16 size;
+    u8[8] name;
+}
+
+struct wide_entry {
+    u16 id;
+    u8 flags;
+    u16 value;
+}
+
+struct status_reg {
+    mode: bits(3);
+    enable: bits(1);
+    channel: bits(4);
+}
+
+struct mixed_fields {
+    u8 header;
+    readonly: bits(1);
+    hidden: bits(1);
+    _: bits(6);
+    u16 data;
+}
+
+fn read_point(p: point) -> u16 {
+    return p.x;
+}
+
+fn read_file(f: file_entry) -> u16 {
+    u16 sz = f.size;
+    u8 t = f.type;
+    return sz;
+}
+
+fn read_nested(r: rect) -> u16 {
+    return r.origin.x;
+}
+
+fn bitfield_read(s: status_reg) -> u8 {
+    u8 m = s.mode;
+    u8 ch = s.channel;
+    return m;
+}
+
+fn toggle_bit(m: mixed_fields) {
+    m.hidden ~= 1;
+}

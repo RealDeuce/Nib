@@ -1,0 +1,18 @@
+// Test: interrupt handlers — basic, reentrant, chaining
+
+fn interrupt(0xF8) basic_isr() {
+    u8 AL = port_in(0x00B0);
+    port_out(0x90, 0x01);
+}
+
+fn interrupt(0x1C) reentrant timer_isr() {
+    nop();
+}
+
+fn interrupt(0x09, chain prev_handler) keyboard_hook() {
+    u8 AL = port_in(0x60);
+    if (AL == 0x3B) {
+        return;
+    }
+    prev_handler();
+}

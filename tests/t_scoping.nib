@@ -1,0 +1,23 @@
+// Test: block scoping and variable shadowing
+
+fn shadow_test() -> u16 {
+    u16 x = 10;
+    if (x > 5) {
+        u16 x = 20;
+        u16 y = x + 1;
+    }
+    // x should be the outer one (10) here
+    return x;
+}
+
+fn nested_scope() -> u16 {
+    u16 result = 0;
+    u16 i = 0;
+    while (i < 3) {
+        u16 tmp = i + 1;
+        result := result + tmp;
+        i := i + 1;
+    }
+    // tmp is not accessible here (block scoped)
+    return result;
+}

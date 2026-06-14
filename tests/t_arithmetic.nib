@@ -1,0 +1,57 @@
+// Test: arithmetic operators and type checking
+
+fn add_u16(a: u16, b: u16) -> u16 {
+    return a + b;
+}
+
+fn add_u8(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+fn all_unsigned_ops(a: u16, b: u16) -> u16 {
+    u16 r1 = a + b;
+    u16 r2 = a - b;
+    u32 r3 = a * b;
+    u16 r4 = a / b;
+    u16 r5 = a % b;
+    u16 r6 = a & b;
+    u16 r7 = a | b;
+    u16 r8 = a ^ b;
+    return r1;
+}
+
+fn all_signed_ops(a: u16, b: u16) -> u16 {
+    u32 r1 = a $* b;
+    u16 r2 = a $/ b;
+    u16 r3 = a $% b;
+    u16 r4 = a $>> 4;
+    return r2;
+}
+
+fn unary_ops(a: u16) -> u16 {
+    u16 r1 = -a;
+    u16 r2 = ~a;
+    return r1;
+}
+
+fn shift_rotate(val: u16, count: u8) -> u16 {
+    u16 r1 = val << 4;
+    u16 r2 = val >> 1;
+    u16 r3 = val <<< 3;
+    u16 r4 = val >>> 1;
+    u16 r5 = val <<<. 1;
+    u16 r6 = val >>>. 1;
+    return r1;
+}
+
+fn exchange(a: u16, b: u16) -> u16 {
+    a <=> b;
+    return a;
+}
+
+fn literal_promotion() {
+    u16 x = 42;
+    u16 y = x + 1;
+    u16 z = x - 100;
+    seg ES = 0xB800;
+}

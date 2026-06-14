@@ -1,0 +1,42 @@
+// Test: function features — params, returns, far, tailcall, preserves
+
+fn simple() {
+    nop();
+}
+
+fn with_return() -> u16 {
+    return 42;
+}
+
+fn multi_params(a: u16, b: u16, c: u16) -> u16 {
+    return a + b;
+}
+
+fn byte_params(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+fn value_param(value buf: u8[80]) {
+    buf[0] := 0x41;
+}
+
+fn far remote() -> u16 {
+    return 0x1234;
+}
+
+fn callee_saved(a: u16, b: u16) -> u16 preserves(BX, SI, DI) {
+    u16 tmp = a + b;
+    return tmp;
+}
+
+fn tail_example(n: u16) -> u16 {
+    if (n == 0) {
+        return 1;
+    }
+    tailcall tail_example(n - 1);
+}
+
+fn caller_of_callee_saved() -> u16 {
+    u16 x = callee_saved(10, 20);
+    return x;
+}

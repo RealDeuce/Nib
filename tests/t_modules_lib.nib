@@ -1,0 +1,15 @@
+// Test: module system — library side
+
+fn lib_add(a: u16, b: u16) -> u16 {
+    return a + b;
+}
+
+fn lib_fill(dest: u16, val: u8, count: u16) {
+    u16 DI = dest;
+    u8 AL = val;
+    u16 CX = count;
+    seg ES = 0xB800;
+    asm clobbers(DI, CX, FLAGS) {
+        rep stosb
+    }
+}

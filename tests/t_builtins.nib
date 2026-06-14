@@ -1,0 +1,30 @@
+// Test: builtin functions
+
+fn test_string_ops(dst: u8[80], src: u8[80]) {
+    memcopy(dst, src);
+    memset(dst, 0x20);
+}
+
+fn test_port_io() {
+    u8 val = port_in(0x60);
+    port_out(0x90, val);
+    u16 DX = 0x03F8;
+    u8 data = port_in(DX);
+    port_out(DX, data);
+}
+
+fn test_widening(narrow: u8) -> u16 {
+    u16 wide = sign_extend(narrow);
+    return wide;
+}
+
+fn test_misc() {
+    halt();
+    nop();
+}
+
+fn test_divmod(a: u16, b: u16) {
+    u16 q;
+    u16 r;
+    divmod(a, b, q, r);
+}

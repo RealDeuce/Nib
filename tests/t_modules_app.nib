@@ -1,0 +1,8 @@
+// Test: module system — app side (imports lib)
+
+use "t_modules_lib.nif";
+
+fn main() {
+    u16 result = lib_add(10, 20);
+    lib_fill(0, 0x20, 80);
+}

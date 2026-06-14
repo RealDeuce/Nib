@@ -1153,7 +1153,7 @@ static void emit_stmt(stmt_t *s) {
 
 static void compile_fn(decl_t *d) {
     C.next_vreg = 0;
-    C.next_label = 0;
+    /* Don't reset next_label — keep it global so labels are unique across functions */
     C.loop_depth = 0;
     C.cur_fn_name = d->u.fn.name;
     C.cur_fn_params = d->u.fn.params;

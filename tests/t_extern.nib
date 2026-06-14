@@ -1,0 +1,17 @@
+// Test: extern function declarations
+
+extern fn far rom_read(port: u16 in DX) -> u16 in AX
+    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+
+extern fn far [0xF000:0x0100] rom_init()
+    preserves(BP, DS, ES, SS);
+
+extern fn interrupt(0x21) dos_putchar(
+    svc: u8 in AH,
+    char: u8 in DL
+) preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+
+fn test_extern() {
+    u16 DX = 0x03F8;
+    u16 val = rom_read(DX);
+}

@@ -1,0 +1,31 @@
+// Test: inline assembly blocks
+
+fn asm_bare() {
+    asm {
+        nop
+        hlt
+    }
+}
+
+fn asm_with_clobbers() {
+    asm clobbers(AX, FLAGS) {
+        mov ax, 0x1234
+    }
+}
+
+fn asm_with_preserves() {
+    asm preserves(BX, CX, DX, SI, DI, BP, DS, ES, SS) {
+        mov ax, 0
+        out 0x50, al
+    }
+}
+
+fn asm_string_op() {
+    seg ES = 0xB800;
+    u16 DI = 0;
+    u8 AL = 0x20;
+    u16 CX = 80;
+    asm clobbers(DI, CX, FLAGS) {
+        rep stosb
+    }
+}

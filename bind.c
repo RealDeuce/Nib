@@ -992,11 +992,31 @@ static void emit_function(func_t *fn) {
                 break;
             }
 
+            /* Special ops that need specific lowering */
+            if (strcmp(op, "mul") == 0 || strcmp(op, "imul") == 0) {
+                /* MUL/IMUL: AX * src -> DX:AX */
+                fprintf(out_asm, "    %s %s\n", op, vreg_asm(fn, ins->src2));
+                break;
+            }
+            if (strcmp(op, "div") == 0 || strcmp(op, "mod") == 0) {
+                /* DIV: DX:AX / src -> AX=quot, DX=rem */
+                fprintf(out_asm, "    div %s\n", vreg_asm(fn, ins->src2));
+                break;
+            }
+            if (strcmp(op, "idiv") == 0 || strcmp(op, "imod") == 0) {
+                fprintf(out_asm, "    idiv %s\n", vreg_asm(fn, ins->src2));
+                break;
+            }
+            if (strcmp(op, "xchg") == 0) {
+                fprintf(out_asm, "    xchg %s, %s\n",
+                        vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2));
+                break;
+            }
+
             /* Map IR op names to asm mnemonics */
             const char *mnem = op;
             if (strcmp(op, "add") == 0) mnem = "add";
             else if (strcmp(op, "sub") == 0) mnem = "sub";
-            else if (strcmp(op, "mul") == 0) mnem = "mul";
             else if (strcmp(op, "and") == 0) mnem = "and";
             else if (strcmp(op, "or") == 0) mnem = "or";
             else if (strcmp(op, "xor") == 0) mnem = "xor";
@@ -1022,9 +1042,27 @@ static void emit_function(func_t *fn) {
         case IR_UNARY: {
             const char *d = vreg_asm(fn, ins->dst);
             const char *s = vreg_asm(fn, ins->src1);
+            const char *mnem = ins->name;
+            /* Map IR unary names to V20 instructions */
+            if (strcmp(mnem, "lnot") == 0) mnem = "not";
+            if (strcmp(mnem, "cbw") == 0) {
+                /* CBW: sign-extend AL -> AX */
+                if (strcmp(d, s) != 0)
+                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+                fprintf(out_asm, "    cbw\n");
+                break;
+            }
+            if (strcmp(mnem, "zext") == 0) {
+                /* Zero-extend: clear upper byte */
+                if (strcmp(d, s) != 0)
+                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+                fprintf(out_asm, "    xor %s, %s\n", d, d);
+                fprintf(out_asm, "    mov %s, %s\n", d, s);
+                break;
+            }
             if (strcmp(d, s) != 0)
                 fprintf(out_asm, "    mov %s, %s\n", d, s);
-            fprintf(out_asm, "    %s %s\n", ins->name, d);
+            fprintf(out_asm, "    %s %s\n", mnem, d);
             break;
         }
 
