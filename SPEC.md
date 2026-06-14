@@ -120,6 +120,30 @@ tracks flag liveness — a flag set by an ADD is available for a subsequent
 Array size is part of the type. `u8[80]` and `u8[40]` are distinct types.
 Arrays do not decay to pointers. Struct arrays use `struct Name[N]` syntax.
 
+### Far type
+
+| Type  | Size    | Hardware mapping                          |
+|-------|---------|-------------------------------------------|
+| `far` | 4 bytes | Segment:offset pair (two word registers)  |
+
+A `far` value holds a 20-bit segmented address as a segment:offset pair.
+
+Far literals use colon syntax:
+
+```
+far entry = 0xF000:0x0100;
+```
+
+Component access uses the backtick operator:
+
+```
+u16 s = entry`seg;          // segment half
+u16 o = entry`off;          // offset half
+```
+
+Applying `&` to a function name returns `far` (see Address-of in
+Expressions).
+
 
 ## Declarations
 
@@ -201,6 +225,24 @@ u8  ch = 0x20;          // auto-allocated to any free byte register
 Pinning a variable to a register that conflicts with the current allocation
 state is a compile-time error.
 
+### Scoping
+
+Variables are scoped to the block `{}` where they are declared. Inner
+blocks can shadow outer variables. Variables are not accessible outside
+their declaring block.
+
+```
+fn example() {
+    u16 x = 10;
+    if (x > 5) {
+        u16 x = 20;         // shadows outer x
+        u16 y = x + 1;      // y = 21
+    }
+    // y is not accessible here
+    // x is 10 again
+}
+```
+
 
 ## Functions
 
@@ -265,6 +307,21 @@ fn api_memcopy(dst: u16 in DI, src: u16 in SI, len: u16 in CX)
 `clobbers()` and `preserves()` are mutually exclusive on a declaration.
 The compiler inverts `clobbers()` to `preserves` in the IR — the binder
 only ever sees `preserves`.
+
+### Function placement with `at()`
+
+`fn at(seg:off)` places a function at a specific far address. Used for
+reset vectors and fixed-address entry points.
+
+```
+fn at(0xF000:0xFFF0) reset_vector() {
+    // CPU begins execution here after reset
+    init_hardware();
+}
+```
+
+The binder emits the function body at the given address rather than
+auto-placing it.
 
 ### Parameter passing
 
@@ -959,6 +1016,37 @@ down to 0. This is the only for loop — general iteration uses `while`.
 `break` exits the innermost loop. `continue` jumps to the next iteration
 (the LOOP/condition check).
 
+### Labels and goto
+
+Labels mark positions within a function for `goto` jumps. Jumps are
+restricted to the same function — no cross-function goto.
+
+```
+retry:
+    u8 status = port_in(0x60);
+    if (status == 0) {
+        goto retry;             // JMP retry
+    }
+```
+
+### tailcall
+
+`tailcall` replaces the current stack frame and jumps to the target
+function. The callee reuses the caller's return address — no stack
+growth.
+
+```
+fn state_a(input: u8) {
+    if (input == 0x01) {
+        tailcall state_b(input);    // JMP, not CALL
+    }
+}
+```
+
+The target function must have a compatible signature (same parameter
+types and return type). The compiler emits a JMP after restoring any
+callee-saved registers.
+
 
 ## Inline Assembly
 
@@ -1337,6 +1425,37 @@ Single-bit fields support toggle via `~=`:
 attrs.hidden ~= 1;      // NOT1 [addr], bit_pos
 ```
 
+### Typed pointers in struct fields
+
+A `u16` field can carry a type annotation with `as`, giving it typed
+access as a pointer while remaining a raw 16-bit offset in memory.
+
+```
+struct Node {
+    u16 data;
+    u16 next as struct Node;    // offset to another Node
+}
+```
+
+Dot access through the typed field dereferences as the annotated type:
+
+```
+struct Node second = head.next;     // typed access: loads [BX+2], treats as Node
+u16 raw = head`next;                // raw u16 access: loads [BX+2] as plain offset
+```
+
+The backtick operator bypasses the type annotation and returns the raw
+`u16` value.
+
+Array typed pointers use the same syntax:
+
+```
+struct Buffer {
+    u16 len;
+    u16 data as u8[512];        // offset to a u8[512] region
+}
+```
+
 
 ## Globals
 
@@ -1566,6 +1685,45 @@ source.nib + deps.nif  →  [nib]      →  .nir + .nif
 all .nir files         →  [nibbind]  →  .asm
 .asm                   →  [nibasm]   →  .bin + .map + .dbg
 ```
+
+
+## Keywords Reference
+
+### Declarations
+
+`fn`, `struct`, `const`, `extern`, `pub`, `use`, `aligned`, `value`
+
+### Types
+
+`u8`, `u16`, `u32`, `seg`, `far`, `bool`, `bcd`, `bits`
+
+### Control flow
+
+`if`, `else`, `while`, `for`, `break`, `continue`, `return`, `goto`,
+`tailcall`, `trap`
+
+### Functions
+
+`clobbers`, `preserves`, `interrupt`, `reentrant`, `chain`, `at`, `in`,
+`far` (call convention)
+
+### Assembly
+
+`asm`
+
+### Registers (reserved as pin names)
+
+`AL`, `AH`, `BL`, `BH`, `CL`, `CH`, `DL`, `DH`,
+`AX`, `BX`, `CX`, `DX`, `SI`, `DI`, `BP`, `SP`,
+`DS`, `ES`, `SS`, `CS`
+
+### Flags (predefined bool variables)
+
+`CF`, `PF`, `AF`, `ZF`, `SF`, `TF`, `DF`, `OF`, `IF`
+
+### Struct field modifiers
+
+`as`
 
 
 ## Unresolved / Future
