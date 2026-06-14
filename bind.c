@@ -2410,9 +2410,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Emit data blocks (initialized globals) */
+    /* Emit data blocks — non-placed first, at()-placed last */
+    for (int pass2 = 0; pass2 < 2; pass2++) {
     for (int i = 0; i < ndata_blocks; i++) {
         data_block_t *db = &data_blocks[i];
+        if ((pass2 == 0) == db->has_at) continue; /* pass 0: no at(), pass 1: at() */
         fprintf(out_asm, "\n; === data: %s ===\n", db->label);
         if (db->has_at) {
             int linear = db->at_seg * 16 + db->at_off;
@@ -2430,6 +2432,7 @@ int main(int argc, char **argv) {
                 fprintf(out_asm, "%s\n", db->entries[j]);
             }
         }
+    }
     }
 
     /* Emit global variable storage */
