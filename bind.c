@@ -2042,13 +2042,23 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_LOADMEM:
-            fprintf(out_asm, "    mov %s, %s\n",
-                    vreg_asm(fn, ins->dst), ins->name);
+            if (is_spilled(fn, ins->dst)) {
+                fprintf(out_asm, "    mov AX, %s\n", ins->name);
+                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+            } else {
+                fprintf(out_asm, "    mov %s, %s\n",
+                        vreg_asm(fn, ins->dst), ins->name);
+            }
             break;
 
         case IR_STOREMEM:
-            fprintf(out_asm, "    mov %s, %s\n",
-                    ins->name, vreg_asm(fn, ins->src1));
+            if (is_spilled(fn, ins->src1)) {
+                fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src1));
+                fprintf(out_asm, "    mov %s, AX\n", ins->name);
+            } else {
+                fprintf(out_asm, "    mov %s, %s\n",
+                        ins->name, vreg_asm(fn, ins->src1));
+            }
             break;
 
         case IR_FIELD:
