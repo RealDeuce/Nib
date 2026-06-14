@@ -2,6 +2,7 @@
 nib
 nibasm
 nibdis
+nibbind
 nib.tab.c
 nib.tab.h
 lex.yy.c
@@ -16,6 +17,8 @@ tests/*.bin
 tests/*.map
 tests/*.nir
 tests/*.nif
+tests/*.asm
+tests/*.dbg
 
 # Editor
 *.swp
