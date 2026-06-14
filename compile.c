@@ -47,6 +47,8 @@ typedef struct {
     int         next_label;     /* label counter for branches */
     int         errors;
     int         loop_depth;     /* for break/continue validation */
+    int         loop_break_label;   /* label to jump to for break */
+    int         loop_continue_label; /* label to jump to for continue */
 
     /* Current function info for .nif emission */
     const char *cur_fn_name;
@@ -816,6 +818,10 @@ static void emit_stmt(stmt_t *s) {
     case STMT_WHILE: {
         int lbl_top = C.next_label++;
         int lbl_end = C.next_label++;
+        int save_break = C.loop_break_label;
+        int save_continue = C.loop_continue_label;
+        C.loop_break_label = lbl_end;
+        C.loop_continue_label = lbl_top;
         fprintf(C.nir, ".L%d:\n", lbl_top);
         typed_vreg_t cond_tv = emit_expr_typed(s->u.while_stmt.cond);
         int cond = cond_tv.vreg;
@@ -829,6 +835,8 @@ static void emit_stmt(stmt_t *s) {
         C.loop_depth--;
         fprintf(C.nir, "    jmp .L%d\n", lbl_top);
         fprintf(C.nir, ".L%d:\n", lbl_end);
+        C.loop_break_label = save_break;
+        C.loop_continue_label = save_continue;
         break;
     }
     case STMT_FOR: {
@@ -836,6 +844,10 @@ static void emit_stmt(stmt_t *s) {
         int start = emit_expr(s->u.for_stmt.start);
         int lbl_top = C.next_label++;
         int lbl_end = C.next_label++;
+        int save_break = C.loop_break_label;
+        int save_continue = C.loop_continue_label;
+        C.loop_break_label = lbl_end;
+        C.loop_continue_label = lbl_top;
         fprintf(C.nir, "    mov %%cx, %%%d\n", start);
         fprintf(C.nir, ".L%d:\n", lbl_top);
         C.loop_depth++;
@@ -845,6 +857,8 @@ static void emit_stmt(stmt_t *s) {
         C.loop_depth--;
         fprintf(C.nir, "    loop .L%d\n", lbl_top);
         fprintf(C.nir, ".L%d:\n", lbl_end);
+        C.loop_break_label = save_break;
+        C.loop_continue_label = save_continue;
         break;
     }
     case STMT_RETURN: {
@@ -872,13 +886,15 @@ static void emit_stmt(stmt_t *s) {
     case STMT_BREAK: {
         if (C.loop_depth == 0)
             cerr(s->line, "break outside loop");
-        fprintf(C.nir, "    break\n");
+        else
+            fprintf(C.nir, "    jmp .L%d\n", C.loop_break_label);
         break;
     }
     case STMT_CONTINUE: {
         if (C.loop_depth == 0)
             cerr(s->line, "continue outside loop");
-        fprintf(C.nir, "    continue\n");
+        else
+            fprintf(C.nir, "    jmp .L%d\n", C.loop_continue_label);
         break;
     }
     case STMT_GOTO: {
