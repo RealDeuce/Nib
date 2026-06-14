@@ -1127,9 +1127,49 @@ static void emit_stmt(stmt_t *s) {
         break;
     }
     case STMT_ASSIGN: {
-        typed_vreg_t val = emit_expr_typed(s->u.assign.value);
-        /* Target could be a variable, register, memory, or field */
+        /* Resolve constants in the value expression before evaluation */
+        expr_t *val_expr = s->u.assign.value;
+        if (val_expr->kind == EXPR_IDENT) {
+            int cv;
+            if (find_constant(val_expr->u.ident, &cv) >= 0) {
+                val_expr->kind = EXPR_LIT_INT;
+                val_expr->u.lit_int = cv;
+            }
+        }
+
+        /* For literal/const RHS assigned to a register, emit immediate directly */
         expr_t *t = s->u.assign.target;
+        if (val_expr->kind == EXPR_LIT_INT &&
+            (t->kind == EXPR_REG || t->kind == EXPR_SREG ||
+             t->kind == EXPR_IDENT)) {
+            /* Get target vreg */
+            symbol_t *sym = NULL;
+            if (t->kind == EXPR_IDENT) {
+                sym = sym_lookup(t->u.ident);
+            } else {
+                const char *name = (t->kind == EXPR_REG) ?
+                    reg_name_str(t->u.reg.id, t->u.reg.rclass) :
+                    sreg_name(t->u.reg.id);
+                sym = sym_lookup(name);
+                if (!sym) {
+                    if (t->kind == EXPR_SREG) {
+                        sym = sym_add_pinned(mk_type(TYPE_SEG), t->u.reg.id, REGCLASS_SEG);
+                    } else {
+                        type_t *rt = (t->u.reg.rclass == REGCLASS_BYTE) ?
+                                     mk_type(TYPE_U8) : mk_type(TYPE_U16);
+                        sym = sym_add_pinned(rt, t->u.reg.id, t->u.reg.rclass);
+                    }
+                    fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
+                    fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
+                }
+            }
+            if (sym) {
+                fprintf(C.nir, "    mov %%%d, %d\n", sym->vreg, val_expr->u.lit_int);
+                break;
+            }
+        }
+
+        typed_vreg_t val = emit_expr_typed(val_expr);
         if (t->kind == EXPR_IDENT) {
             symbol_t *sym = sym_lookup(t->u.ident);
             if (!sym) {
