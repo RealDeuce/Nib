@@ -11,7 +11,7 @@
 #include <cstring>
 
 /* Pull in the disassembler directly */
-#include "../dreamulator/src/dis86.cpp"
+#include "dis86.cpp"
 
 /* ---- Map file support ---- */
 

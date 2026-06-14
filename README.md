@@ -163,4 +163,4 @@ See `SPEC.md` for the full language specification.
 
 ## License
 
-TBD
+BSD 3-Clause. See [LICENSE](LICENSE).
