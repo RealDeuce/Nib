@@ -136,7 +136,9 @@ typedef struct {
     int     prefer;         /* preferred physical reg (PREG_*) or PREG_NONE */
     bool    is_byte;        /* true if this vreg is 8-bit */
     bool    is_seg;         /* true if segment register */
-    bool    needs_addressable; /* true if used as base/index in memory operand */
+    bool    needs_addressable; /* true if used in memory operand (any of base/index) */
+    bool    needs_base;        /* true if used as base: must be BX or BP */
+    bool    needs_index;       /* true if used as index: must be SI or DI */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
     /* Liveness */
@@ -1265,10 +1267,14 @@ static void scan_addressing_constraints(func_t *fn) {
         ir_insn_t *ins = &fn->insns[i];
         /* LOAD: %dst = %base[%idx] — base needs addressable reg */
         if (ins->op == IR_LOAD || ins->op == IR_STORE) {
-            if (ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+            if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
                 fn->vregs[ins->src1].needs_addressable = true;
-            if (ins->src2 >= 0 && ins->src2 < MAX_VREGS)
+                fn->vregs[ins->src1].needs_base = true;
+            }
+            if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
                 fn->vregs[ins->src2].needs_addressable = true;
+                fn->vregs[ins->src2].needs_index = true;
+            }
         }
     }
 }
@@ -1294,9 +1300,17 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         if (fn->vregs[i].prefer != PREG_NONE) {
             int preg = fn->vregs[i].prefer;
             /* Don't honor preference if it violates addressing constraints */
+            if (fn->vregs[i].needs_base &&
+                preg != PREG_BX && preg != PREG_BP) {
+                continue;
+            }
+            if (fn->vregs[i].needs_index &&
+                preg != PREG_SI && preg != PREG_DI) {
+                continue;
+            }
             if (fn->vregs[i].needs_addressable &&
                 (preg == PREG_AX || preg == PREG_CX || preg == PREG_DX)) {
-                continue; /* let the second pass assign an addressable reg */
+                continue;
             }
             fn->vregs[i].assigned = preg;
         }
@@ -1315,8 +1329,21 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         } else if (fn->vregs[i].is_byte) {
             pool = byte_pool;
             poolsz = nbyte;
+        } else if (fn->vregs[i].needs_base) {
+            /* Base register: must be BX or BP */
+            static int base_pool[2];
+            int nbase = 0;
+            base_pool[nbase++] = PREG_BX;
+            if (bp_available) base_pool[nbase++] = PREG_BP;
+            pool = base_pool;
+            poolsz = nbase;
+        } else if (fn->vregs[i].needs_index) {
+            /* Index register: must be SI or DI */
+            static int idx_pool[] = { PREG_SI, PREG_DI };
+            pool = idx_pool;
+            poolsz = 2;
         } else if (fn->vregs[i].needs_addressable) {
-            /* Must be in BX, BP, SI, or DI for memory operands */
+            /* General addressable (single-reg memory operand) */
             static int addr_pool[4];
             int naddr = 0;
             addr_pool[naddr++] = PREG_BX;
