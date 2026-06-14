@@ -174,7 +174,8 @@ far[4] ivt = {&handler_a, &handler_b, &handler_c, &handler_d};
 ### Constants
 
 Named compile-time constants are declared with `const`. They inline as
-literals wherever used — no storage is allocated.
+literals wherever used — no storage is allocated. Like integer literals,
+constants auto-promote to the type required by context (u8, u16, etc.).
 
 ```
 const PORT_LCD = 0x60;
@@ -222,8 +223,16 @@ u8  AL = 0x20;          // pinned to AL
 u8  ch = 0x20;          // auto-allocated to any free byte register
 ```
 
-Pinning a variable to a register that conflicts with the current allocation
-state is a compile-time error.
+Registers can be used without explicit declaration — they are
+auto-declared on first use with the correct type and pin. This is
+essential for interrupt handlers that read caller-set registers:
+
+```
+fn interrupt(0x21) dispatch() {
+    u8 device = AH;     // AH auto-declared, reads caller's value
+    u8 version = AL;
+}
+```
 
 ### Scoping
 
