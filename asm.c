@@ -351,6 +351,7 @@ static int parse_primary(void) {
     }
     err("expected number or label in expression");
     errors++;
+    consume(); /* eat the bad token to avoid infinite loop */
     return 0;
 }
 

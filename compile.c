@@ -510,8 +510,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                      type_str(operand.type));
             break;
         case NIB_ADDR:
-            result_type = mk_type(TYPE_U16); /* address is always u16 */
-            break;
+            result_type = mk_type(TYPE_U16);
+            /* For reference params, &x is just the reference value — a mov, not LEA */
+            fprintf(C.nir, "    mov %%%d, %%%d\n", dst, operand.vreg);
+            return TV(dst, result_type);
         case NIB_LNOT:
             if (operand.type && operand.type->kind != TYPE_BOOL)
                 cerr(e->line, "logical NOT requires bool operand, got %s",

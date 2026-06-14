@@ -136,6 +136,7 @@ typedef struct {
     int     prefer;         /* preferred physical reg (PREG_*) or PREG_NONE */
     bool    is_byte;        /* true if this vreg is 8-bit */
     bool    is_seg;         /* true if segment register */
+    bool    needs_addressable; /* true if used as base/index in memory operand */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
     /* Liveness */
@@ -256,13 +257,19 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         else if (strncmp(word, "interrupt(", 10) == 0) {
             fn->is_interrupt = true;
             fn->int_vector = (int)strtol(word + 10, NULL, 0);
+            /* Skip the ) that read_word left behind */
+            p = skip_ws(p);
+            if (*p == ')') p++;
         }
         else if (strncmp(word, "chain(", 6) == 0) {
             fn->has_chain = true;
-            char *e = strchr(word + 6, ')');
-            int len = e ? (int)(e - word - 6) : (int)strlen(word + 6);
+            /* read_word stops at ), so the name is everything after "chain(" */
+            int len = strlen(word + 6);
             memcpy(fn->chain_name, word + 6, len);
             fn->chain_name[len] = '\0';
+            /* Skip the ) that read_word left behind */
+            p = skip_ws(p);
+            if (*p == ')') p++;
         }
     }
 
@@ -820,6 +827,19 @@ static bool vregs_interfere(func_t *fn, int a, int b) {
  * Register allocation — graph coloring
  * ================================================================ */
 
+/* Scan IR for vregs used in memory operands and mark them as needing
+ * addressable registers (BX, BP, SI, DI — not AX, CX, DX) */
+static void scan_addressing_constraints(func_t *fn) {
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        /* LOAD: %dst = %base[%idx] — base needs addressable reg */
+        if (ins->op == IR_LOAD || ins->op == IR_STORE) {
+            if (ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+                fn->vregs[ins->src1].needs_addressable = true;
+        }
+    }
+}
+
 static void allocate_registers(func_t *fn, bool bp_available) {
     /* Build list of allocatable word registers */
     int word_pool[8];
@@ -839,7 +859,13 @@ static void allocate_registers(func_t *fn, bool bp_available) {
     /* First pass: assign pre-colored (preferred) vregs */
     for (int i = 0; i < fn->nvregs; i++) {
         if (fn->vregs[i].prefer != PREG_NONE) {
-            fn->vregs[i].assigned = fn->vregs[i].prefer;
+            int preg = fn->vregs[i].prefer;
+            /* Don't honor preference if it violates addressing constraints */
+            if (fn->vregs[i].needs_addressable &&
+                (preg == PREG_AX || preg == PREG_CX || preg == PREG_DX)) {
+                continue; /* let the second pass assign an addressable reg */
+            }
+            fn->vregs[i].assigned = preg;
         }
     }
 
@@ -856,6 +882,16 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         } else if (fn->vregs[i].is_byte) {
             pool = byte_pool;
             poolsz = nbyte;
+        } else if (fn->vregs[i].needs_addressable) {
+            /* Must be in BX, BP, SI, or DI for memory operands */
+            static int addr_pool[4];
+            int naddr = 0;
+            addr_pool[naddr++] = PREG_BX;
+            if (bp_available) addr_pool[naddr++] = PREG_BP;
+            addr_pool[naddr++] = PREG_SI;
+            addr_pool[naddr++] = PREG_DI;
+            pool = addr_pool;
+            poolsz = naddr;
         } else {
             pool = word_pool;
             poolsz = nword;
@@ -1147,7 +1183,13 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_CALL:
-            fprintf(out_asm, "    call %s\n", ins->name);
+            /* Check if this is a chain call (interrupt handler chaining) */
+            if (fn->has_chain && strcmp(ins->name, fn->chain_name) == 0) {
+                fprintf(out_asm, "    pushf\n");
+                fprintf(out_asm, "    call far [%s_vec]\n", fn->chain_name);
+            } else {
+                fprintf(out_asm, "    call %s\n", ins->name);
+            }
             break;
 
         case IR_TAILCALL:
@@ -1287,6 +1329,12 @@ static void emit_function(func_t *fn) {
         } else {
             fprintf(out_asm, "    ret\n");
         }
+    }
+
+    /* Emit chain vector storage for interrupt handlers */
+    if (fn->has_chain) {
+        fprintf(out_asm, "%s_vec dw 0, 0 ; saved vector for chaining\n",
+                fn->chain_name);
     }
 }
 
@@ -1636,7 +1684,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nfunctions; i++) {
         func_t *fn = &functions[i];
 
-        /* Phase 1: liveness */
+        /* Phase 1: scan constraints and liveness */
+        scan_addressing_constraints(fn);
         compute_liveness(fn);
 
         /* Phase 2: try allocation with BP available */

@@ -90,8 +90,6 @@ for f in /tmp/t_*.asm; do
     # Skip tests that can't assemble standalone (extern references)
     case "$name" in
         t_extern) skip "$name (assemble)" "has unresolved externs"; continue ;;
-        t_interrupts) skip "$name (assemble)" "chain call needs indirect far call"; continue ;;
-        t_functions) skip "$name (assemble)" "needs register class constraints for memory ops"; continue ;;
     esac
     outbin="/tmp/${name}.bin"
     if ./nibasm "$f" -o "$outbin" >/dev/null 2>&1; then

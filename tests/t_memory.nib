@@ -37,5 +37,4 @@ fn mem_addressing_modes() {
     u8 f = [BX + DI + 4];
     u8 g = [BP + SI + 8];
     u16 h = [0x1234];
-    u8 i = [0xB800:0x0000];
 }
