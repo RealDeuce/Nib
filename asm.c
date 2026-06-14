@@ -52,16 +52,19 @@ static void fatal(const char *fmt, ...) {
 /* ---- Output buffer ---- */
 
 static uint8_t output[MAX_OUTPUT];
+static bool    written[MAX_OUTPUT];  /* which bytes have been emitted */
 static int out_pos = 0;
 static int org_base = 0;
 static int pass = 1;     /* 1 or 2 */
 static int errors = 0;
 
 static void emit(uint8_t b) {
+    int addr = org_base + out_pos;
     if (pass == 2) {
-        if (out_pos >= MAX_OUTPUT)
+        if (addr >= MAX_OUTPUT)
             fatal("output exceeds 64K");
-        output[out_pos] = b;
+        output[addr] = b;
+        written[addr] = true;
     }
     out_pos++;
 }
@@ -1521,7 +1524,7 @@ static void process_line(char *line) {
     if (strcasecmp(t.sval, "org") == 0) {
         operand_t op = parse_operand();
         org_base = op.imm;
-        out_pos = 0;
+        out_pos = 0;  /* reset relative position within this segment */
         return;
     }
 
@@ -1622,12 +1625,11 @@ int main(int argc, char **argv) {
     out_pos = 0;
     org_base = 0;
     errors = 0;
+    memset(written, 0, sizeof(written));
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
         process_line(lines[i]);
     }
-
-    int total_size = out_pos;
 
     /* Pass 2: emit code */
     pass = 2;
@@ -1643,39 +1645,64 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Find extent of written data */
+    int first_addr = -1, last_addr = -1;
+    int total_written = 0;
+    for (int i = 0; i < MAX_OUTPUT; i++) {
+        if (written[i]) {
+            if (first_addr < 0) first_addr = i;
+            last_addr = i;
+            total_written++;
+        }
+    }
+    if (first_addr < 0) first_addr = last_addr = 0;
+
     /* Write output */
     FILE *out = fopen(outfile, ihex ? "w" : "wb");
     if (!out) { perror(outfile); return 1; }
 
     if (ihex) {
-        /* Intel HEX format */
-        int addr = org_base;
-        int pos = 0;
-        while (pos < total_size) {
-            int chunk = total_size - pos;
-            if (chunk > 16) chunk = 16;
-            uint8_t cksum = 0;
-            cksum += chunk;
-            cksum += (addr >> 8) & 0xFF;
-            cksum += addr & 0xFF;
-            cksum += 0x00; /* record type: data */
-            fprintf(out, ":%02X%04X00", chunk, addr & 0xFFFF);
-            for (int i = 0; i < chunk; i++) {
-                fprintf(out, "%02X", output[pos + i]);
-                cksum += output[pos + i];
+        /* Intel HEX format — emit only written regions */
+        int addr = 0;
+        while (addr < MAX_OUTPUT) {
+            /* Skip unwritten regions */
+            while (addr < MAX_OUTPUT && !written[addr]) addr++;
+            if (addr >= MAX_OUTPUT) break;
+
+            /* Find contiguous run */
+            int run_start = addr;
+            while (addr < MAX_OUTPUT && written[addr] && (addr - run_start) < 65536)
+                addr++;
+
+            /* Emit records for this run */
+            int pos = run_start;
+            while (pos < addr) {
+                int chunk = addr - pos;
+                if (chunk > 16) chunk = 16;
+                uint8_t cksum = 0;
+                cksum += chunk;
+                cksum += (pos >> 8) & 0xFF;
+                cksum += pos & 0xFF;
+                cksum += 0x00; /* data record */
+                fprintf(out, ":%02X%04X00", chunk, pos & 0xFFFF);
+                for (int i = 0; i < chunk; i++) {
+                    fprintf(out, "%02X", output[pos + i]);
+                    cksum += output[pos + i];
+                }
+                fprintf(out, "%02X\n", (-cksum) & 0xFF);
+                pos += chunk;
             }
-            fprintf(out, "%02X\n", (-cksum) & 0xFF);
-            pos += chunk;
-            addr += chunk;
         }
         /* EOF record */
         fprintf(out, ":00000001FF\n");
     } else {
-        fwrite(output, 1, total_size, out);
+        /* Flat binary — from first to last written byte */
+        int size = last_addr - first_addr + 1;
+        fwrite(output + first_addr, 1, size, out);
     }
     fclose(out);
 
-    fprintf(stderr, "%s: %d bytes%s\n", outfile, total_size,
+    fprintf(stderr, "%s: %d bytes%s\n", outfile, total_written,
             ihex ? " (ihex)" : "");
 
     /* Write map file if requested */
