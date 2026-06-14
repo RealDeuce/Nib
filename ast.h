@@ -307,6 +307,9 @@ typedef struct {
     char *chain_name;
     bool has_preserves;
     reg_list_t *preserves;
+    bool has_at;
+    int  at_seg;
+    int  at_off;
 } fn_modifiers_t;
 
 struct decl_node {

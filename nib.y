@@ -94,7 +94,7 @@ static void mods_reset(void) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS
+%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -244,6 +244,8 @@ fn_modifiers
 fn_modifier
     : KW_FAR                    { current_mods.is_far = true; }
     | KW_REENTRANT              { current_mods.is_reentrant = true; }
+    | KW_AT '(' LIT_INT ':' LIT_INT ')'
+        { current_mods.has_at = true; current_mods.at_seg = $3; current_mods.at_off = $5; }
     | interrupt_clause
     ;
 

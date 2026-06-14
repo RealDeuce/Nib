@@ -165,6 +165,9 @@ typedef struct {
     bool        is_reentrant;
     bool        has_chain;
     char        chain_name[64];
+    bool        has_at;
+    int         at_seg;
+    int         at_off;
 
     ir_insn_t   insns[MAX_INSNS];
     int         ninsns;
@@ -285,6 +288,17 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             fn->is_interrupt = true;
             fn->int_vector = (int)strtol(word + 10, NULL, 0);
             /* Skip the ) that read_word left behind */
+            p = skip_ws(p);
+            if (*p == ')') p++;
+        }
+        else if (strncmp(word, "at(", 3) == 0) {
+            fn->has_at = true;
+            /* word is "at(0xSEG:0xOFF" — colon inside the word */
+            char *colon = strchr(word + 3, ':');
+            if (colon) {
+                fn->at_seg = (int)strtol(word + 3, NULL, 0);
+                fn->at_off = (int)strtol(colon + 1, NULL, 0);
+            }
             p = skip_ws(p);
             if (*p == ')') p++;
         }
@@ -1116,6 +1130,12 @@ static const char *vreg_asm(func_t *fn, int v) {
 
 static void emit_function(func_t *fn) {
     fprintf(out_asm, "\n; === %s ===\n", fn->name);
+
+    if (fn->has_at) {
+        int linear = fn->at_seg * 16 + fn->at_off;
+        fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+                linear, fn->at_seg, fn->at_off);
+    }
 
     /* Determine which callee-saved registers need saving.
      * A register needs saving if it's in the preserves list AND

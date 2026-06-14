@@ -22,7 +22,7 @@
 
 #define MAX_LABELS   4096
 #define MAX_LINE     1024
-#define MAX_OUTPUT   65536
+#define MAX_OUTPUT   1048576  /* 1MB — full V20 address space */
 #define MAX_FIXUPS   4096
 
 /* ---- Error handling ---- */
@@ -51,8 +51,8 @@ static void fatal(const char *fmt, ...) {
 
 /* ---- Output buffer ---- */
 
-static uint8_t output[MAX_OUTPUT];
-static bool    written[MAX_OUTPUT];  /* which bytes have been emitted */
+static uint8_t *output;
+static bool    *written;
 static int out_pos = 0;
 static int org_base = 0;
 static int pass = 1;     /* 1 or 2 */
@@ -1620,13 +1620,17 @@ int main(int argc, char **argv) {
     }
     if (fp != stdin) fclose(fp);
 
+    /* Allocate output buffers */
+    output = malloc(MAX_OUTPUT);
+    written = calloc(MAX_OUTPUT, sizeof(bool));
+    if (!output || !written) { fprintf(stderr, "out of memory\n"); return 1; }
+    memset(output, 0xFF, MAX_OUTPUT);
+
     /* Pass 1: collect labels and sizes */
     pass = 1;
     out_pos = 0;
     org_base = 0;
     errors = 0;
-    memset(output, 0xFF, sizeof(output));
-    memset(written, 0, sizeof(written));
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
         process_line(lines[i]);
@@ -1664,28 +1668,48 @@ int main(int argc, char **argv) {
 
     if (ihex) {
         /* Intel HEX format — emit only written regions */
+        int cur_ext_addr = -1; /* current extended address, -1 = none */
         int addr = 0;
         while (addr < MAX_OUTPUT) {
             /* Skip unwritten regions */
             while (addr < MAX_OUTPUT && !written[addr]) addr++;
             if (addr >= MAX_OUTPUT) break;
 
+            /* Emit extended segment address record (type 02) if needed.
+             * Segment base = addr >> 4, rounded down to paragraph.
+             * Data record offset = addr - (segment << 4). */
+            int seg_base = addr >> 4;
+            if (seg_base != cur_ext_addr) {
+                uint8_t cksum = 0;
+                cksum += 0x02;
+                cksum += 0x02; /* record type */
+                cksum += (seg_base >> 8) & 0xFF;
+                cksum += seg_base & 0xFF;
+                fprintf(out, ":02000002%04X%02X\n", seg_base,
+                        (-cksum) & 0xFF);
+                cur_ext_addr = seg_base;
+            }
+
             /* Find contiguous run */
             int run_start = addr;
-            while (addr < MAX_OUTPUT && written[addr] && (addr - run_start) < 65536)
+            int page_end = (seg_base << 4) + 0x10000; /* stay within segment reach */
+            if (page_end > MAX_OUTPUT) page_end = MAX_OUTPUT;
+            while (addr < MAX_OUTPUT && addr < page_end && written[addr])
                 addr++;
 
-            /* Emit records for this run */
+            /* Emit data records — offset relative to segment base */
             int pos = run_start;
+            int base_linear = cur_ext_addr << 4;
             while (pos < addr) {
                 int chunk = addr - pos;
                 if (chunk > 16) chunk = 16;
+                int offset = pos - base_linear;
                 uint8_t cksum = 0;
                 cksum += chunk;
-                cksum += (pos >> 8) & 0xFF;
-                cksum += pos & 0xFF;
+                cksum += (offset >> 8) & 0xFF;
+                cksum += offset & 0xFF;
                 cksum += 0x00; /* data record */
-                fprintf(out, ":%02X%04X00", chunk, pos & 0xFFFF);
+                fprintf(out, ":%02X%04X00", chunk, offset & 0xFFFF);
                 for (int i = 0; i < chunk; i++) {
                     fprintf(out, "%02X", output[pos + i]);
                     cksum += output[pos + i];

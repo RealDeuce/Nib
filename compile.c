@@ -1296,6 +1296,8 @@ static void compile_fn(decl_t *d) {
             fprintf(C.nir, ", chain(%s)", d->u.fn.mods.chain_name);
     }
     if (d->u.fn.mods.is_reentrant) fprintf(C.nir, ", reentrant");
+    if (d->u.fn.mods.has_at)
+        fprintf(C.nir, ", at(0x%04X:0x%04X)", d->u.fn.mods.at_seg, d->u.fn.mods.at_off);
     fprintf(C.nir, "\n");
 
     if (d->u.fn.mods.has_preserves) {
