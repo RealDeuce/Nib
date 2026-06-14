@@ -412,6 +412,89 @@ typedef struct { int vreg; type_t *type; } typed_vreg_t;
 
 static typed_vreg_t emit_expr_typed(expr_t *e);
 
+/* Recursively resolve all constant references to literals in an expression tree */
+static void resolve_constants_expr(expr_t *e) {
+    if (!e) return;
+    if (e->kind == EXPR_IDENT) {
+        int cv;
+        if (find_constant(e->u.ident, &cv) >= 0) {
+            e->kind = EXPR_LIT_INT;
+            e->u.lit_int = cv;
+        }
+        return;
+    }
+    switch (e->kind) {
+    case EXPR_BINOP:
+        resolve_constants_expr(e->u.binop.left);
+        resolve_constants_expr(e->u.binop.right);
+        break;
+    case EXPR_UNOP:
+        resolve_constants_expr(e->u.unop.operand);
+        break;
+    case EXPR_CALL:
+        resolve_constants_expr(e->u.call.func);
+        for (expr_t *a = e->u.call.args; a; a = a->next)
+            resolve_constants_expr(a);
+        break;
+    case EXPR_INDEX:
+        resolve_constants_expr(e->u.index.array);
+        resolve_constants_expr(e->u.index.index);
+        break;
+    case EXPR_FIELD:
+    case EXPR_RAW_FIELD:
+        resolve_constants_expr(e->u.field.object);
+        break;
+    case EXPR_CAST:
+        resolve_constants_expr(e->u.cast.operand);
+        break;
+    case EXPR_ARRAY_INIT:
+        for (expr_t *el = e->u.array_init.elements; el; el = el->next)
+            resolve_constants_expr(el);
+        break;
+    default:
+        break;
+    }
+}
+
+static void resolve_constants_stmt(stmt_t *s) {
+    for (; s; s = s->next) {
+        switch (s->kind) {
+        case STMT_VARDECL:
+            if (s->u.vardecl.init) resolve_constants_expr(s->u.vardecl.init);
+            break;
+        case STMT_ASSIGN:
+        case STMT_TOGGLE_ASSIGN:
+            resolve_constants_expr(s->u.assign.target);
+            resolve_constants_expr(s->u.assign.value);
+            break;
+        case STMT_EXPR:
+            resolve_constants_expr(s->u.expr);
+            break;
+        case STMT_IF:
+            resolve_constants_expr(s->u.if_stmt.cond);
+            resolve_constants_stmt(s->u.if_stmt.then_body);
+            resolve_constants_stmt(s->u.if_stmt.else_body);
+            break;
+        case STMT_WHILE:
+            resolve_constants_expr(s->u.while_stmt.cond);
+            resolve_constants_stmt(s->u.while_stmt.body);
+            break;
+        case STMT_FOR:
+            resolve_constants_expr(s->u.for_stmt.start);
+            resolve_constants_stmt(s->u.for_stmt.body);
+            break;
+        case STMT_RETURN:
+            resolve_constants_expr(s->u.expr);
+            break;
+        case STMT_TAILCALL:
+            resolve_constants_expr(s->u.tailcall_expr);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 /* Emit a vreg reference: %N or pinned register name */
 static int alloc_vreg(void) {
     return C.next_vreg++;
@@ -431,8 +514,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     if (!e) return TV(-1, NULL);
 
     switch (e->kind) {
-    case EXPR_LIT_INT:
-    case_lit_int: {
+    case EXPR_LIT_INT: {
         int r = alloc_vreg();
         /* Integer literals are untyped — they promote to whatever context needs.
            We use NULL type to signal "literal, promote me". */
@@ -462,15 +544,6 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(r, mk_type_array(TYPE_ARRAY_U8, slen));
     }
     case EXPR_IDENT: {
-        /* Check for named constant — rewrite to literal so all
-         * downstream consumers (immediate folding, port I/O, etc.)
-         * see it as an integer literal, not a variable */
-        int const_val;
-        if (find_constant(e->u.ident, &const_val) >= 0) {
-            e->kind = EXPR_LIT_INT;
-            e->u.lit_int = const_val;
-            goto case_lit_int;  /* fall through to literal handler */
-        }
         symbol_t *sym = sym_lookup(e->u.ident);
         if (!sym) {
             cerr(e->line, "undefined variable '%s'", e->u.ident);
@@ -509,15 +582,6 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_BINOP: {
         op_kind_t op = e->u.binop.op;
-
-        /* Resolve constants to literals before the immediate check */
-        if (e->u.binop.right->kind == EXPR_IDENT) {
-            int cv;
-            if (find_constant(e->u.binop.right->u.ident, &cv) >= 0) {
-                e->u.binop.right->kind = EXPR_LIT_INT;
-                e->u.binop.right->u.lit_int = cv;
-            }
-        }
 
         /* Check if right operand is an integer literal — emit as immediate */
         bool right_is_imm = (e->u.binop.right->kind == EXPR_LIT_INT);
@@ -1127,17 +1191,8 @@ static void emit_stmt(stmt_t *s) {
         break;
     }
     case STMT_ASSIGN: {
-        /* Resolve constants in the value expression before evaluation */
+        /* For literal RHS assigned to a register, emit immediate directly */
         expr_t *val_expr = s->u.assign.value;
-        if (val_expr->kind == EXPR_IDENT) {
-            int cv;
-            if (find_constant(val_expr->u.ident, &cv) >= 0) {
-                val_expr->kind = EXPR_LIT_INT;
-                val_expr->u.lit_int = cv;
-            }
-        }
-
-        /* For literal/const RHS assigned to a register, emit immediate directly */
         expr_t *t = s->u.assign.target;
         if (val_expr->kind == EXPR_LIT_INT &&
             (t->kind == EXPR_REG || t->kind == EXPR_SREG ||
@@ -1325,15 +1380,6 @@ static void emit_stmt(stmt_t *s) {
     }
     case STMT_FOR: {
         /* for (CX in start..0) — LOOP instruction */
-        /* Resolve constant start values */
-        expr_t *start_expr = s->u.for_stmt.start;
-        if (start_expr->kind == EXPR_IDENT) {
-            int cv;
-            if (find_constant(start_expr->u.ident, &cv) >= 0) {
-                start_expr->kind = EXPR_LIT_INT;
-                start_expr->u.lit_int = cv;
-            }
-        }
         int lbl_top = C.next_label++;
         int lbl_end = C.next_label++;
         int save_break = C.loop_break_label;
@@ -1342,10 +1388,10 @@ static void emit_stmt(stmt_t *s) {
         C.loop_continue_label = lbl_top;
         int cx_vreg = alloc_vreg();
         fprintf(C.nir, ".prefer %%%d, CX\n", cx_vreg);
-        if (start_expr->kind == EXPR_LIT_INT) {
-            fprintf(C.nir, "    mov %%%d, %d\n", cx_vreg, start_expr->u.lit_int);
+        if (s->u.for_stmt.start->kind == EXPR_LIT_INT) {
+            fprintf(C.nir, "    mov %%%d, %d\n", cx_vreg, s->u.for_stmt.start->u.lit_int);
         } else {
-            int start = emit_expr(start_expr);
+            int start = emit_expr(s->u.for_stmt.start);
             fprintf(C.nir, "    mov %%%d, %%%d\n", cx_vreg, start);
         }
         fprintf(C.nir, ".L%d:\n", lbl_top);
@@ -1607,6 +1653,9 @@ static void compile_fn(decl_t *d) {
     if (d->u.fn.mods.has_chain) {
         sym_add(d->u.fn.mods.chain_name, mk_type(TYPE_VOID), false);
     }
+
+    /* Resolve all constant references to literals before emission */
+    resolve_constants_stmt(d->u.fn.body);
 
     /* Emit body */
     emit_stmts(d->u.fn.body);
