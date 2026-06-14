@@ -204,9 +204,23 @@ static int run_cmd(const char *cmd) {
     return system(cmd);
 }
 
+/* Resolve tool path relative to nibbuild's directory */
+static char tool_dir[256] = ".";
+
+static void resolve_tool_dir(const char *argv0) {
+    strncpy(tool_dir, argv0, sizeof(tool_dir) - 1);
+    char *slash = strrchr(tool_dir, '/');
+    if (slash)
+        *slash = '\0';
+    else
+        strcpy(tool_dir, ".");
+}
+
 int main(int argc, char **argv) {
     const char *root = NULL;
     const char *outbin = NULL;
+
+    resolve_tool_dir(argv[0]);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
@@ -272,7 +286,7 @@ int main(int argc, char **argv) {
         }
 
         char cmd[512];
-        snprintf(cmd, sizeof(cmd), "./nib %s", m->nib_path);
+        snprintf(cmd, sizeof(cmd), "%s/nib %s", tool_dir, m->nib_path);
         if (run_cmd(cmd) != 0) {
             fprintf(stderr, "error: compilation failed for '%s'\n", m->nib_path);
             errors++;
@@ -282,7 +296,8 @@ int main(int argc, char **argv) {
     if (errors > 0) return 1;
 
     /* Phase 2: Bind all .nir files */
-    char bind_cmd[4096] = "./nibbind";
+    char bind_cmd[4096];
+    snprintf(bind_cmd, sizeof(bind_cmd), "%s/nibbind", tool_dir);
     char asm_path[256];
     replace_ext(root, ".asm", asm_path, sizeof(asm_path));
 
@@ -300,7 +315,7 @@ int main(int argc, char **argv) {
 
     /* Phase 3: Assemble */
     char asm_cmd[1024];
-    snprintf(asm_cmd, sizeof(asm_cmd), "./nibasm %s -o %s", asm_path, outbin);
+    snprintf(asm_cmd, sizeof(asm_cmd), "%s/nibasm %s -o %s", tool_dir, asm_path, outbin);
     if (run_cmd(asm_cmd) != 0) {
         fprintf(stderr, "error: assembly failed\n");
         return 1;
