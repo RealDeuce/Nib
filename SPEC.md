@@ -214,7 +214,7 @@ Pinnable names:
 - Word: `AX`, `BX`, `CX`, `DX`, `SI`, `DI`, `BP`
 - Segment: `DS`, `ES`, `SS`, `CS`
 
-`SP` is not directly assignable.
+`SP` is assignable (needed for stack setup in reset handlers).
 
 ```
 u16 CX = 256;           // pinned to CX register

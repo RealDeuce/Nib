@@ -1137,23 +1137,33 @@ static void emit_stmt(stmt_t *s) {
                 fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
             }
         } else if (t->kind == EXPR_REG || t->kind == EXPR_SREG) {
-            const char *name = reg_name_str(t->u.reg.id, t->u.reg.rclass);
+            const char *name = (t->kind == EXPR_REG) ?
+                reg_name_str(t->u.reg.id, t->u.reg.rclass) :
+                sreg_name(t->u.reg.id);
             symbol_t *sym = sym_lookup(name);
-            if (sym) {
-                if (val.type && sym->type && !types_equal(sym->type, val.type)) {
-                    bool ok = false;
-                    if (type_is_integer(sym->type) && type_is_integer(val.type) &&
-                        type_size(val.type) <= type_size(sym->type))
-                        ok = true;
-                    if (val.type->kind == TYPE_VOID) ok = true;
-                    if (!ok)
-                        cerr(s->line, "assignment type mismatch: '%s' is %s, got %s",
-                             name, type_str(sym->type), type_str(val.type));
+            if (!sym) {
+                /* Auto-declare register on first use */
+                if (t->kind == EXPR_SREG) {
+                    sym = sym_add_pinned(mk_type(TYPE_SEG), t->u.reg.id, REGCLASS_SEG);
+                } else {
+                    type_t *rt = (t->u.reg.rclass == REGCLASS_BYTE) ?
+                                 mk_type(TYPE_U8) : mk_type(TYPE_U16);
+                    sym = sym_add_pinned(rt, t->u.reg.id, t->u.reg.rclass);
                 }
-                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
-            } else {
-                cerr(s->line, "undeclared register variable '%s'", name);
+                fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
+                fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
             }
+            if (val.type && sym->type && !types_equal(sym->type, val.type)) {
+                bool ok = false;
+                if (type_is_integer(sym->type) && type_is_integer(val.type) &&
+                    type_size(val.type) <= type_size(sym->type))
+                    ok = true;
+                if (val.type->kind == TYPE_VOID) ok = true;
+                if (!ok)
+                    cerr(s->line, "assignment type mismatch: '%s' is %s, got %s",
+                         name, type_str(sym->type), type_str(val.type));
+            }
+            fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
         } else if (t->kind == EXPR_FLAG) {
             /* Flags accept any value — 0 or 1 */
             fprintf(C.nir, "    setflag %s, %%%d\n",
