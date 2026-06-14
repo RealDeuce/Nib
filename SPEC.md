@@ -317,20 +317,42 @@ fn api_memcopy(dst: u16 in DI, src: u16 in SI, len: u16 in CX)
 The compiler inverts `clobbers()` to `preserves` in the IR — the binder
 only ever sees `preserves`.
 
-### Function placement with `at()`
+### Placement with `at()`
 
-`fn at(seg:off)` places a function at a specific far address. Used for
-reset vectors and fixed-address entry points.
+`at(seg:off)` controls where code and data are placed in the output
+binary. It can be used three ways:
+
+**Standalone directive** — anchors everything that follows:
 
 ```
-fn at(0xF000:0xFFF0) reset_vector() {
-    // CPU begins execution here after reset
-    init_hardware();
+at(0xF000:0x0000);
+
+fn boot() { ... }           // placed at F000:0000
+fn init() { ... }           // follows boot sequentially
+u16 counter;                // follows init
+
+at(0xFFFF:0x0000);
+
+fn reset() { goto boot; }   // placed at FFFF:0000
+```
+
+**On a function** — places just that function:
+
+```
+fn at(0xFFFF:0x0000) reset() {
+    goto boot;
 }
 ```
 
-The binder emits the function body at the given address rather than
-auto-placing it.
+**On a global** — places data at a fixed address (see Globals section):
+
+```
+far[256] ivt at(0x0000:0x0000) = { ... };
+```
+
+Everything between two `at()` directives is placed sequentially
+starting from the first directive's address. The programmer controls
+layout — `at()` resyncs position.
 
 ### Parameter passing
 
@@ -1714,7 +1736,7 @@ all .nir files         →  [nibbind]  →  .asm
 
 ### Declarations
 
-`fn`, `struct`, `const`, `extern`, `pub`, `use`, `aligned`, `value`
+`fn`, `struct`, `const`, `extern`, `pub`, `use`, `aligned`, `value`, `at`
 
 ### Types
 
