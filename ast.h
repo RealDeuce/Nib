@@ -242,6 +242,10 @@ struct param_node {
     reg_class_t pin_class;
     bool        has_pin;
 
+    /* For far params: segment register pin */
+    int         pinned_seg;     /* segment register (SREG_*) */
+    bool        has_seg_pin;
+
     param_t *next;
 };
 
@@ -457,6 +461,8 @@ stmt_t     *mk_stmt_asm(const char *body, reg_list_t *annotation,
 param_t    *mk_param(const char *name, type_t *type, bool is_value);
 param_t    *mk_param_pinned(const char *name, type_t *type,
                              int pinned_reg, reg_class_t pin_class);
+param_t    *mk_param_far_pinned(const char *name,
+                                 int off_reg, int seg_reg);
 field_t    *mk_field(const char *name, type_t *type);
 field_t    *mk_field_typed_ptr(const char *name, type_t *storage, type_t *as_type);
 field_t    *mk_field_bits(const char *name, int nbits);

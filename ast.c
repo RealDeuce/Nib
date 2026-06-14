@@ -356,6 +356,17 @@ param_t *mk_param_pinned(const char *name, type_t *type,
     return p;
 }
 
+param_t *mk_param_far_pinned(const char *name,
+                              int off_reg, int seg_reg) {
+    param_t *p = mk_param(name, mk_type(TYPE_FAR), false);
+    p->pinned_reg = off_reg;
+    p->pin_class = REGCLASS_WORD;
+    p->has_pin = true;
+    p->pinned_seg = seg_reg;
+    p->has_seg_pin = true;
+    return p;
+}
+
 /* ---- Fields ---- */
 
 field_t *mk_field(const char *name, type_t *type) {

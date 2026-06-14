@@ -24,6 +24,7 @@ typedef struct symbol {
     char        name[64];
     type_t     *type;
     int         vreg;           /* virtual register ID (%0, %1, ...) */
+    int         vreg_seg;       /* segment vreg for far params (-1 = none) */
     bool        is_pinned;      /* variable name matches a register */
     int         pinned_reg;
     reg_class_t pin_class;
@@ -67,8 +68,10 @@ typedef struct {
     /* Known functions (for call checking) */
     struct {
         char    name[64];
-        int     nparams;
+        int     nparams;        /* source-level param count */
+        int     nparams_ir;     /* IR param count (far splits add 1) */
         type_t *return_type;
+        bool    param_is_far[16]; /* which params are far type */
     } functions[512];
     int nfunctions;
 
@@ -134,6 +137,7 @@ static symbol_t *sym_add(const char *name, type_t *type, bool is_global) {
     sym->name[63] = '\0';
     sym->type = type;
     sym->vreg = C.next_vreg++;
+    sym->vreg_seg = -1;
     sym->is_global = is_global;
     sym->is_pinned = false;
     sym->pinned_reg = REG_NONE;
@@ -193,12 +197,22 @@ static int find_function(const char *name) {
     return -1;
 }
 
-static void register_function(const char *name, int nparams, type_t *ret) {
+static void register_function(const char *name, int nparams, type_t *ret,
+                              param_t *params) {
     if (C.nfunctions >= 512) return;
-    strncpy(C.functions[C.nfunctions].name, name, 63);
-    C.functions[C.nfunctions].nparams = nparams;
-    C.functions[C.nfunctions].return_type = ret;
-    C.nfunctions++;
+    int fi = C.nfunctions++;
+    strncpy(C.functions[fi].name, name, 63);
+    C.functions[fi].nparams = nparams;
+    C.functions[fi].return_type = ret;
+    /* Track which params are far (for call-site splitting) */
+    int ir_count = 0;
+    int pi = 0;
+    for (param_t *p = params; p && pi < 16; p = p->next, pi++) {
+        C.functions[fi].param_is_far[pi] = (p->type && p->type->kind == TYPE_FAR);
+        ir_count++;
+        if (C.functions[fi].param_is_far[pi]) ir_count++; /* far splits into 2 */
+    }
+    C.functions[fi].nparams_ir = ir_count;
 }
 
 /* ---- Register name helpers ---- */
@@ -892,8 +906,9 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
 
         /* Not a builtin — regular function call */
+        int fi = -1;
         if (e->u.call.func->kind == EXPR_IDENT) {
-            int fi = find_function(fn_name);
+            fi = find_function(fn_name);
             if (fi >= 0) {
                 if (C.functions[fi].nparams != argc)
                     cerr(e->line, "'%s' expects %d arguments, got %d",
@@ -901,9 +916,39 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 ret_type = C.functions[fi].return_type;
             }
         }
+        /* Build IR arg list, splitting far params into off+seg vregs.
+         * Pre-extract far components before emitting the call. */
+        int ir_args[32];
+        int nir_args = 0;
+        {
+            expr_t *arg_expr = e->u.call.args;
+            for (int i = 0; i < argc && i < 16; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+                if (fi >= 0 && C.functions[fi].param_is_far[i]) {
+                    /* Far param — split into offset + segment vregs */
+                    symbol_t *asym = NULL;
+                    if (arg_expr && arg_expr->kind == EXPR_IDENT)
+                        asym = sym_lookup(arg_expr->u.ident);
+                    if (asym && asym->vreg_seg >= 0) {
+                        /* Register-split far — pass both directly */
+                        ir_args[nir_args++] = asym->vreg;
+                        ir_args[nir_args++] = asym->vreg_seg;
+                    } else {
+                        /* Memory-based far — extract via far.off/far.seg */
+                        int off_v = alloc_vreg();
+                        int seg_v = alloc_vreg();
+                        fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, arg_vregs[i]);
+                        fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, arg_vregs[i]);
+                        ir_args[nir_args++] = off_v;
+                        ir_args[nir_args++] = seg_v;
+                    }
+                } else {
+                    ir_args[nir_args++] = arg_vregs[i];
+                }
+            }
+        }
         fprintf(C.nir, "    call %%%d, %s", dst, fn_name);
-        for (int i = 0; i < argc && i < 16; i++)
-            fprintf(C.nir, ", %%%d", arg_vregs[i]);
+        for (int i = 0; i < nir_args; i++)
+            fprintf(C.nir, ", %%%d", ir_args[i]);
         fprintf(C.nir, "\n");
         return TV(dst, ret_type);
     }
@@ -1028,6 +1073,20 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
 
         /* far type: `seg and `off */
         if (obj.type && obj.type->kind == TYPE_FAR) {
+            /* Check if this is a far param with register-split vregs */
+            if (e->u.field.object->kind == EXPR_IDENT) {
+                symbol_t *sym = sym_lookup(e->u.field.object->u.ident);
+                if (sym && sym->vreg_seg >= 0) {
+                    if (strcmp(e->u.field.field_name, "off") == 0)
+                        return TV(sym->vreg, mk_type(TYPE_U16));
+                    else if (strcmp(e->u.field.field_name, "seg") == 0)
+                        return TV(sym->vreg_seg, mk_type(TYPE_SEG));
+                    else
+                        cerr(e->line, "far type only has `seg and `off");
+                    return TV(sym->vreg, mk_type(TYPE_U16));
+                }
+            }
+            /* Memory-based far value — load from [ptr] or [ptr+2] */
             int dst = alloc_vreg();
             if (strcmp(e->u.field.field_name, "off") == 0) {
                 fprintf(C.nir, "    far.off %%%d, %%%d\n", dst, obj.vreg);
@@ -1614,7 +1673,8 @@ static void compile_fn(decl_t *d) {
     for (param_t *p = d->u.fn.params; p; p = p->next) nparams++;
 
     /* Register this function */
-    register_function(d->u.fn.name, nparams, d->u.fn.return_type);
+    register_function(d->u.fn.name, nparams, d->u.fn.return_type,
+                       d->u.fn.params);
 
     /* Emit .nir function header */
     fprintf(C.nir, "\n.fn %s", d->u.fn.name);
@@ -1650,6 +1710,32 @@ static void compile_fn(decl_t *d) {
 
     for (param_t *p = d->u.fn.params; p; p = p->next) {
         symbol_t *sym = sym_add(p->name, p->type, false);
+
+        /* Far params split into two vregs: offset (word) + segment */
+        if (p->type && p->type->kind == TYPE_FAR) {
+            /* Offset vreg (sym->vreg) */
+            fprintf(C.nir, ".param %%%d, u16, \"%s_off\"", sym->vreg, p->name);
+            if (p->has_pin)
+                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+            fprintf(C.nir, "\n");
+            /* Segment vreg */
+            sym->vreg_seg = C.next_vreg++;
+            fprintf(C.nir, ".param %%%d, seg, \"%s_seg\"", sym->vreg_seg, p->name);
+            if (p->has_seg_pin)
+                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
+            fprintf(C.nir, "\n");
+            /* .nif: emit as far with pin */
+            if (nif) {
+                fprintf(C.nif, ".param %%%d, far, \"%s\"", sym->vreg, p->name);
+                if (p->has_pin && p->has_seg_pin)
+                    fprintf(C.nif, ", in %s:%s",
+                            reg_name_str(p->pinned_seg, REGCLASS_SEG),
+                            reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(C.nif, "\n");
+            }
+            continue;
+        }
+
         /* In the IR, aggregate params are references — the vreg holds
          * a u16 address, not the aggregate itself. The full type goes
          * in the .nif for type checking, but the .nir type reflects
@@ -1848,7 +1934,8 @@ static void compile_global(decl_t *d) {
 static void compile_extern_fn(decl_t *d) {
     int nparams = 0;
     for (param_t *p = d->u.extern_fn.params; p; p = p->next) nparams++;
-    register_function(d->u.extern_fn.name, nparams, d->u.extern_fn.return_type);
+    register_function(d->u.extern_fn.name, nparams, d->u.extern_fn.return_type,
+                       d->u.extern_fn.params);
 
     /* Emit to .nir so the binder knows how to call it */
     fprintf(C.nir, "\n.extern %s", d->u.extern_fn.name);
@@ -1862,10 +1949,22 @@ static void compile_extern_fn(decl_t *d) {
         fprintf(C.nir, " ; WARNING: no address — unbindable");
     fprintf(C.nir, "\n");
     for (param_t *p = d->u.extern_fn.params; p; p = p->next) {
-        fprintf(C.nir, ".eparam %s, \"%s\"", type_str(p->type), p->name);
-        if (p->has_pin)
-            fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
-        fprintf(C.nir, "\n");
+        if (p->type && p->type->kind == TYPE_FAR) {
+            /* Far param splits into offset + segment */
+            fprintf(C.nir, ".eparam u16, \"%s_off\"", p->name);
+            if (p->has_pin)
+                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+            fprintf(C.nir, "\n");
+            fprintf(C.nir, ".eparam seg, \"%s_seg\"", p->name);
+            if (p->has_seg_pin)
+                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
+            fprintf(C.nir, "\n");
+        } else {
+            fprintf(C.nir, ".eparam %s, \"%s\"", type_str(p->type), p->name);
+            if (p->has_pin)
+                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+            fprintf(C.nir, "\n");
+        }
     }
     fprintf(C.nir, ".endextern\n");
 
@@ -2007,7 +2106,7 @@ static void import_nif(const char *path, int use_line) {
         /* .endfn / .endextern — register the function */
         if (strncmp(p, ".endfn", 6) == 0 || strncmp(p, ".endextern", 10) == 0) {
             if (cur_fn[0]) {
-                register_function(cur_fn, cur_nparams, cur_ret);
+                register_function(cur_fn, cur_nparams, cur_ret, NULL);
             }
             cur_fn[0] = '\0';
             continue;

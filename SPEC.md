@@ -295,6 +295,29 @@ fn api_read(port: u16 in DX) -> u8 in AL {
 }
 ```
 
+For `far` parameters, the pin specifies both the segment register and
+the offset register with `in SEG:REG`:
+
+```
+fn blit(src: far in ES:SI, x: u16, y: u8) {
+    seg ES = src`seg;       // direct register access, no load
+    u16 SI = src`off;
+    // ...
+}
+```
+
+A `far` parameter is split into two registers internally — one segment
+and one word. The binder treats them as independent register assignments
+that propagate through the call graph like any other parameter. Without
+a pin, the binder picks the pair automatically:
+
+```
+fn internal(ptr: far) {     // binder chooses seg + word regs
+    seg ES = ptr`seg;
+    u16 BX = ptr`off;
+}
+```
+
 ### clobbers()
 
 `clobbers()` is the inverse of `preserves()` — it lists registers the

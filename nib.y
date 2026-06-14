@@ -438,6 +438,8 @@ param
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
     | KW_VALUE IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($2, $4, $6.reg, $6.rclass); $$->is_value = true; }
+    | IDENT ':' KW_FAR KW_IN seg_reg ':' word_reg
+        { $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     ;
 
 extern_param_list
@@ -448,6 +450,8 @@ extern_param_list
 extern_param
     : IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
+    | IDENT ':' KW_FAR KW_IN seg_reg ':' word_reg
+        { $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     ;
 
 /* ==== Statements ==== */
