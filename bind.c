@@ -213,6 +213,16 @@ typedef struct {
 static extern_fn_t externs[MAX_EXTERNS];
 static int nexterns = 0;
 
+/* Constant pool */
+#define MAX_CONSTS 256
+typedef struct {
+    char label[32];
+    char data[256];     /* raw text to emit as db/dw */
+} const_entry_t;
+
+static const_entry_t consts[MAX_CONSTS];
+static int nconsts = 0;
+
 /* Global binder state */
 static func_t functions[MAX_FNS];
 static int nfunctions = 0;
@@ -341,6 +351,52 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             continue;
         }
 
+        if (strncmp(p, ".const ", 7) == 0) {
+            /* .const _C0, "Hello" or .const _C1, far 0xF000:0x0100 */
+            p += 7;
+            if (nconsts < MAX_CONSTS) {
+                const_entry_t *c = &consts[nconsts++];
+                p = read_word(p, c->label, sizeof(c->label));
+                /* skip comma */
+                p = skip_ws(p);
+                if (*p == ',') p++;
+                p = skip_ws(p);
+                /* Parse the data */
+                if (*p == '"') {
+                    /* String constant */
+                    p++;
+                    char *end = strrchr(p, '"');
+                    int dlen = end ? (int)(end - p) : (int)strlen(p);
+                    /* Build db line */
+                    int pos = 0;
+                    pos += snprintf(c->data + pos, sizeof(c->data) - pos,
+                                    "%s db ", c->label);
+                    for (int i = 0; i < dlen && pos < (int)sizeof(c->data) - 10; i++) {
+                        if (i > 0) pos += snprintf(c->data + pos, sizeof(c->data) - pos, ", ");
+                        if (p[i] == '\\' && i + 3 < dlen && p[i+1] == 'x') {
+                            /* hex escape */
+                            char hex[3] = { p[i+2], p[i+3], 0 };
+                            pos += snprintf(c->data + pos, sizeof(c->data) - pos,
+                                            "0x%s", hex);
+                            i += 3;
+                        } else {
+                            pos += snprintf(c->data + pos, sizeof(c->data) - pos,
+                                            "'%c'", p[i]);
+                        }
+                    }
+                } else if (strncmp(p, "far ", 4) == 0) {
+                    /* Far constant: far 0xSEG:0xOFF */
+                    p += 4;
+                    int seg = (int)strtol(p, (char **)&p, 0);
+                    if (*p == ':') p++;
+                    int off = (int)strtol(p, (char **)&p, 0);
+                    snprintf(c->data, sizeof(c->data),
+                             "%s dw 0x%04X, 0x%04X", c->label, off, seg);
+                }
+            }
+            continue;
+        }
+
         if (strncmp(p, ".prefer", 7) == 0) {
             p += 7;
             int v = parse_vreg(p, &p);
@@ -437,13 +493,17 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_MOV;
             ins->dst = parse_vreg(p, &p);
             skip_comma(&p);
-            /* Could be vreg or immediate */
+            /* Could be vreg, immediate, or label */
             p = skip_ws(p);
             if (*p == '%') {
                 ins->src1 = parse_vreg(p, &p);
+            } else if (*p == '_' || isalpha(*p)) {
+                /* Label reference (e.g., _C0 for constant pool) */
+                ins->has_imm = false;
+                p = read_word(p, ins->name, sizeof(ins->name));
             } else {
                 ins->has_imm = true;
-                ins->imm = (int)strtol(p, &p, 0);
+                ins->imm = (int)strtol(p, (char **)&p, 0);
             }
         }
         else if (strcmp(opname, "ret") == 0) {
@@ -1115,6 +1175,10 @@ static void emit_function(func_t *fn) {
             if (ins->has_imm) {
                 fprintf(out_asm, "    mov %s, %d\n",
                         vreg_asm(fn, ins->dst), ins->imm);
+            } else if (ins->name[0]) {
+                /* Label reference — load address of constant */
+                fprintf(out_asm, "    mov %s, %s\n",
+                        vreg_asm(fn, ins->dst), ins->name);
             } else {
                 const char *d = vreg_asm(fn, ins->dst);
                 const char *s = vreg_asm(fn, ins->src1);
@@ -1866,6 +1930,13 @@ int main(int argc, char **argv) {
 
         /* Phase 4: emit */
         emit_function(fn);
+    }
+
+    /* Emit constant pool */
+    if (nconsts > 0) {
+        fprintf(out_asm, "\n; === constant pool ===\n");
+        for (int i = 0; i < nconsts; i++)
+            fprintf(out_asm, "%s\n", consts[i].data);
     }
 
     fclose(out_asm);

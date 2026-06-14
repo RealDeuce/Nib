@@ -50,6 +50,7 @@ typedef struct {
     int         loop_break_label;   /* label to jump to for break */
     int         loop_continue_label; /* label to jump to for continue */
     char        src_dir[256];       /* directory of source file for use resolution */
+    int         next_const;         /* constant pool counter */
 
     /* Current function info for .nif emission */
     const char *cur_fn_name;
@@ -412,10 +413,25 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_LIT_STR: {
         int r = alloc_vreg();
-        /* String literals are also context-dependent — NULL type signals promote.
-           Single chars can be u8, multi-char can be u8[N]. */
-        fprintf(C.nir, "    mov %%%d, \"%s\"\n", r, e->u.lit_str);
-        return TV(r, NULL);
+        int slen = strlen(e->u.lit_str);
+        if (slen == 1) {
+            /* Single character — just a u8 immediate */
+            fprintf(C.nir, "    mov %%%d, %d\n", r, (unsigned char)e->u.lit_str[0]);
+            return TV(r, NULL);
+        }
+        /* Multi-char string — emit as constant and load address */
+        int cid = C.next_const++;
+        fprintf(C.nir, ".const _C%d, \"", cid);
+        for (int i = 0; i < slen; i++) {
+            unsigned char ch = e->u.lit_str[i];
+            if (ch >= 0x20 && ch < 0x7F && ch != '"' && ch != '\\')
+                fprintf(C.nir, "%c", ch);
+            else
+                fprintf(C.nir, "\\x%02X", ch);
+        }
+        fprintf(C.nir, "\"\n");
+        fprintf(C.nir, "    mov %%%d, _C%d\n", r, cid);
+        return TV(r, mk_type_array(TYPE_ARRAY_U8, slen));
     }
     case EXPR_IDENT: {
         symbol_t *sym = sym_lookup(e->u.ident);
@@ -779,16 +795,13 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, mk_type(TYPE_U8));
     }
     case EXPR_FAR_LIT: {
-        /* Far literals are stored as two separate values.
-         * The vardecl handler will store them into the far variable's memory.
-         * Emit as two immediates that get combined at the assignment. */
-        int r_off = alloc_vreg();
-        int r_seg = alloc_vreg();
-        fprintf(C.nir, "    mov %%%d, 0x%04X ; far offset\n", r_off, e->u.far_lit.off);
-        fprintf(C.nir, "    mov %%%d, 0x%04X ; far segment\n", r_seg, e->u.far_lit.seg);
-        /* Return the offset vreg — the assignment handler needs to
-         * store both components. For now this is incomplete. */
-        return TV(r_off, mk_type(TYPE_FAR));
+        /* Far literal — emit as constant pool entry (off, seg in LDS format) */
+        int cid = C.next_const++;
+        int r = alloc_vreg();
+        fprintf(C.nir, ".const _C%d, far 0x%04X:0x%04X\n",
+                cid, e->u.far_lit.seg, e->u.far_lit.off);
+        fprintf(C.nir, "    mov %%%d, _C%d\n", r, cid);
+        return TV(r, mk_type(TYPE_FAR));
     }
     case EXPR_RAW_FIELD: {
         /* Same as EXPR_FIELD but returns storage type, ignoring as annotation.
