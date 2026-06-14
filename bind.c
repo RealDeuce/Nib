@@ -1561,6 +1561,27 @@ static void propagate_preferences(void) {
             fn_assigns[i].param_regs[j] = PREG_NONE;
     }
 
+    /* Pre-propagate: extern functions have fixed param registers.
+     * Set preferences on caller vregs for calls to externs. */
+    for (int e = 0; e < nedges; e++) {
+        if (call_edges[e].callee_fn >= 0) continue; /* not an extern */
+        /* Find the extern declaration */
+        for (int x = 0; x < nexterns; x++) {
+            if (strcmp(externs[x].name, call_edges[e].callee_name) != 0) continue;
+            int caller_fi = call_edges[e].caller_fn;
+            func_t *caller = &functions[caller_fi];
+            for (int a = 0; a < call_edges[e].nargs && a < externs[x].nparams; a++) {
+                int caller_vreg = call_edges[e].arg_vregs[a];
+                int callee_reg = externs[x].param_pins[a].preg;
+                if (caller_vreg >= 0 && callee_reg != PREG_NONE) {
+                    if (caller->vregs[caller_vreg].prefer == PREG_NONE)
+                        caller->vregs[caller_vreg].prefer = callee_reg;
+                }
+            }
+            break;
+        }
+    }
+
     /* Process in topological order (leaves first) */
     for (int ti = 0; ti < ntopo; ti++) {
         int fi = topo_order[ti];

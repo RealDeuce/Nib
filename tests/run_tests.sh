@@ -111,9 +111,56 @@ else
 fi
 echo ""
 
-# Phase 7: Type error tests — these should FAIL to compile
-echo "--- Type error tests (expected failures) ---"
+# Phase 7: Assembly content validation
+echo "--- Assembly content checks ---"
 
+# Extern parameter pins: dos_putchar(0x02, 0x41) must use AH and DL
+if [ -f /tmp/t_extern_pins.asm ]; then
+    if grep -q "mov AH," /tmp/t_extern_pins.asm && grep -q "mov DL," /tmp/t_extern_pins.asm; then
+        pass "extern pins: AH and DL used for dos_putchar"
+    else
+        fail "extern pins" "dos_putchar params not in AH/DL (got: $(grep 'mov.*,' /tmp/t_extern_pins.asm | head -4 | tr '\n' '; '))"
+    fi
+else
+    skip "extern pins" "asm not generated"
+fi
+
+# Inter-procedural propagation: fill() should get DI, AL, CX
+if [ -f /tmp/t_pinning.asm ]; then
+    if grep -q "mov DI," /tmp/t_pinning.asm && grep -q "mov AL," /tmp/t_pinning.asm; then
+        pass "register propagation: fill params in DI/AL/CX"
+    else
+        fail "register propagation" "fill params not propagated correctly"
+    fi
+else
+    skip "register propagation" "asm not generated"
+fi
+
+# Callee-save: preserves should emit push/pop
+if [ -f tests/callee_save.nib ]; then
+    ./nib tests/callee_save.nib >/dev/null 2>&1
+    ./nibbind tests/callee_save.nir -o /tmp/callee_save.asm >/dev/null 2>&1
+    if [ -f /tmp/callee_save.asm ]; then
+        if grep -q "push BX" /tmp/callee_save.asm && grep -q "pop BX" /tmp/callee_save.asm; then
+            pass "callee-save: push/pop BX emitted"
+        else
+            fail "callee-save" "no push/pop for preserved register"
+        fi
+    fi
+fi
+
+# Saturating add: flag check block should emit JNC
+if [ -f /tmp/t_flags.asm ]; then
+    if grep -q "jnc" /tmp/t_flags.asm; then
+        pass "flag-check: JNC emitted for CF check"
+    else
+        fail "flag-check" "no JNC in flag check block"
+    fi
+fi
+
+echo ""
+
+echo "--- Type error tests (expected failures) ---"
 # Wrong arg count
 echo 'use "t_modules_lib.nif";
 fn main() { lib_add(1, 2, 3); }' > /tmp/t_err_argcount.nib

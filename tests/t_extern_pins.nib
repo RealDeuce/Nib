@@ -1,0 +1,22 @@
+// Test: extern parameter register pins must be honored
+// dos_putchar pins svc to AH and char to DL — the binder must
+// put values in those specific registers, not arbitrary ones.
+
+extern fn interrupt(0x21) dos_putchar(
+    svc: u8 in AH,
+    char: u8 in DL
+) preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+
+extern fn far [0xF000:0x0050] rom_read(port: u16 in DX) -> u16 in AX
+    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+
+fn test_pinned_params() {
+    dos_putchar(0x02, 0x41);
+    // Output must contain: mov AH, 2 (not mov AX, 2)
+    // Output must contain: mov DL, 65 (not mov BX, 65)
+
+    u16 DX = 0x03F8;
+    u16 val = rom_read(DX);
+    // DX should already be set — zero-cost handoff
+    // Return value must be in AX
+}
