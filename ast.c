@@ -210,6 +210,62 @@ stmt_t *mk_stmt_return(expr_t *e, int line) {
     return s;
 }
 
+/* ---- Flag expressions ---- */
+
+flag_expr_t *mk_fexpr_flag(reg_id_t id) {
+    flag_expr_t *f = xalloc(sizeof(flag_expr_t));
+    f->kind = FEXPR_FLAG;
+    f->flag_id = id;
+    return f;
+}
+
+flag_expr_t *mk_fexpr_not(flag_expr_t *e) {
+    flag_expr_t *f = xalloc(sizeof(flag_expr_t));
+    f->kind = FEXPR_NOT;
+    f->left = e;
+    return f;
+}
+
+flag_expr_t *mk_fexpr_binop(flag_expr_kind_t kind, flag_expr_t *l, flag_expr_t *r) {
+    flag_expr_t *f = xalloc(sizeof(flag_expr_t));
+    f->kind = kind;
+    f->left = l;
+    f->right = r;
+    return f;
+}
+
+flag_case_t *mk_flag_case(flag_expr_t *cond, stmt_t *body) {
+    flag_case_t *c = xalloc(sizeof(flag_case_t));
+    c->condition = cond;
+    c->body = body;
+    return c;
+}
+
+flag_case_t *mk_flag_case_trap(flag_expr_t *cond) {
+    flag_case_t *c = xalloc(sizeof(flag_case_t));
+    c->condition = cond;
+    c->is_trap = true;
+    return c;
+}
+
+stmt_t *mk_stmt_assign_checked(expr_t *target, expr_t *value,
+                                flag_case_t *checks, int line) {
+    stmt_t *s = mk_stmt(STMT_ASSIGN, line);
+    s->u.assign.target = target;
+    s->u.assign.value = value;
+    s->u.assign.flag_checks = checks;
+    return s;
+}
+
+stmt_t *mk_stmt_toggle_checked(expr_t *target, expr_t *value,
+                                flag_case_t *checks, int line) {
+    stmt_t *s = mk_stmt(STMT_TOGGLE_ASSIGN, line);
+    s->u.assign.target = target;
+    s->u.assign.value = value;
+    s->u.assign.flag_checks = checks;
+    return s;
+}
+
 stmt_t *mk_stmt_break(int line) {
     return mk_stmt(STMT_BREAK, line);
 }

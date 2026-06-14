@@ -1,0 +1,26 @@
+// Test flag-check blocks
+
+fn saturating_add(a: u16, b: u16) -> u16 {
+    u16 result = a;
+    result := result + b {
+        CF: { result := 0xFFFF; }
+    }
+    return result;
+}
+
+fn checked_add(a: u16, b: u16) -> u16 {
+    u16 result = a;
+    result := result + b {
+        OF: trap;
+    }
+    return result;
+}
+
+fn multi_check(a: u16, b: u16) -> u16 {
+    u16 result = a;
+    result := result + b {
+        CF | OF: { result := 0xFFFF; }
+        ZF: { result := 0; }
+    }
+    return result;
+}

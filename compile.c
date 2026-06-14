@@ -748,6 +748,99 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
  * ================================================================ */
 
 static void emit_stmt(stmt_t *s);
+static void emit_stmts(stmt_t *list);
+
+/* Emit flag expression as conditional jumps.
+ * Emits code that jumps to skip_label if the condition is NOT met. */
+static const char *flag_id_to_name(reg_id_t id) {
+    static const char *names[] = {"CF","PF","AF","ZF","SF","TF","DF","OF","IF"};
+    return (id >= 0 && id < 9) ? names[id] : "??";
+}
+
+static const char *flag_id_to_jcc(reg_id_t id) {
+    /* Jump if flag IS set */
+    static const char *jcc[] = {"jc","jp","???","jz","js","???","???","jo","???"};
+    return (id >= 0 && id < 9) ? jcc[id] : "???";
+}
+
+static const char *flag_id_to_jncc(reg_id_t id) {
+    /* Jump if flag is NOT set */
+    static const char *jncc[] = {"jnc","jnp","???","jnz","jns","???","???","jno","???"};
+    return (id >= 0 && id < 9) ? jncc[id] : "???";
+}
+
+static void emit_flag_checks(flag_case_t *cases) {
+    if (!cases) return;
+
+    for (flag_case_t *c = cases; c; c = c->next) {
+        int lbl_skip = C.next_label++;
+
+        /* Emit condition check — jump to skip if NOT met */
+        flag_expr_t *fe = c->condition;
+
+        if (fe->kind == FEXPR_FLAG) {
+            /* Single flag: jump past if not set */
+            fprintf(C.nir, "    %s .L%d\n",
+                    flag_id_to_jncc(fe->flag_id), lbl_skip);
+        } else if (fe->kind == FEXPR_NOT && fe->left->kind == FEXPR_FLAG) {
+            /* !flag: jump past if set */
+            fprintf(C.nir, "    %s .L%d\n",
+                    flag_id_to_jcc(fe->left->flag_id), lbl_skip);
+        } else if (fe->kind == FEXPR_OR) {
+            /* a | b: enter if either set — skip only if BOTH clear */
+            int lbl_enter = C.next_label++;
+            if (fe->left->kind == FEXPR_FLAG)
+                fprintf(C.nir, "    %s .L%d\n",
+                        flag_id_to_jcc(fe->left->flag_id), lbl_enter);
+            if (fe->right->kind == FEXPR_FLAG)
+                fprintf(C.nir, "    %s .L%d\n",
+                        flag_id_to_jcc(fe->right->flag_id), lbl_enter);
+            fprintf(C.nir, "    jmp .L%d\n", lbl_skip);
+            fprintf(C.nir, ".L%d:\n", lbl_enter);
+        } else if (fe->kind == FEXPR_AND) {
+            /* a & b: enter only if both set — skip if either clear */
+            if (fe->left->kind == FEXPR_FLAG)
+                fprintf(C.nir, "    %s .L%d\n",
+                        flag_id_to_jncc(fe->left->flag_id), lbl_skip);
+            if (fe->right->kind == FEXPR_FLAG)
+                fprintf(C.nir, "    %s .L%d\n",
+                        flag_id_to_jncc(fe->right->flag_id), lbl_skip);
+        } else if (fe->kind == FEXPR_XOR) {
+            /* a ^ b: enter if exactly one set */
+            int lbl_a_set = C.next_label++;
+            if (fe->left->kind == FEXPR_FLAG) {
+                fprintf(C.nir, "    %s .L%d\n",
+                        flag_id_to_jcc(fe->left->flag_id), lbl_a_set);
+            }
+            /* A clear: enter if B set */
+            if (fe->right->kind == FEXPR_FLAG)
+                fprintf(C.nir, "    %s .L%d\n",
+                        flag_id_to_jncc(fe->right->flag_id), lbl_skip);
+            fprintf(C.nir, "    jmp .L%d\n", lbl_skip + 1);
+            fprintf(C.nir, ".L%d:\n", lbl_a_set);
+            /* A set: enter if B clear */
+            if (fe->right->kind == FEXPR_FLAG)
+                fprintf(C.nir, "    %s .L%d\n",
+                        flag_id_to_jcc(fe->right->flag_id), lbl_skip);
+            C.next_label++; /* consumed lbl_skip + 1 */
+        }
+
+        /* Emit body or trap */
+        if (c->is_trap) {
+            if (fe->kind == FEXPR_FLAG && fe->flag_id == FLG_OF) {
+                fprintf(C.nir, "    into\n");
+            } else {
+                fprintf(C.nir, "    int 4\n"); /* generic trap */
+            }
+        } else {
+            push_scope();
+            emit_stmts(c->body);
+            pop_scope();
+        }
+
+        fprintf(C.nir, ".L%d:\n", lbl_skip);
+    }
+}
 
 static void emit_stmts(stmt_t *list) {
     for (stmt_t *s = list; s; s = s->next)
@@ -869,6 +962,8 @@ static void emit_stmt(stmt_t *s) {
         } else {
             cerr(s->line, "invalid assignment target");
         }
+        /* Emit flag-check block if present */
+        emit_flag_checks(s->u.assign.flag_checks);
         break;
     }
     case STMT_TOGGLE_ASSIGN: {
@@ -884,6 +979,7 @@ static void emit_stmt(stmt_t *s) {
         } else {
             cerr(s->line, "toggle-assign only valid for flags and bit fields");
         }
+        emit_flag_checks(s->u.assign.flag_checks);
         break;
     }
     case STMT_EXPR: {

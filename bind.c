@@ -541,9 +541,16 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_CONTINUE;
         }
         else if (strcmp(opname, "hlt") == 0 || strcmp(opname, "nop") == 0 ||
-                 strcmp(opname, "salc") == 0 ||
+                 strcmp(opname, "salc") == 0 || strcmp(opname, "into") == 0 ||
                  strcmp(opname, "rep") == 0 || strcmp(opname, "repe") == 0 ||
-                 strcmp(opname, "repne") == 0) {
+                 strcmp(opname, "repne") == 0 ||
+                 /* Conditional jumps from flag-check blocks */
+                 strcmp(opname, "jc") == 0 || strcmp(opname, "jnc") == 0 ||
+                 strcmp(opname, "jo") == 0 || strcmp(opname, "jno") == 0 ||
+                 strcmp(opname, "jz") == 0 || strcmp(opname, "jnz") == 0 ||
+                 strcmp(opname, "js") == 0 || strcmp(opname, "jns") == 0 ||
+                 strcmp(opname, "jp") == 0 || strcmp(opname, "jnp") == 0 ||
+                 strcmp(opname, "int") == 0) {
             /* Pass-through: emit as literal assembly */
             ins->op = IR_ASM;
             /* Combine opname with rest of line */
@@ -1122,7 +1129,8 @@ static void emit_function(func_t *fn) {
         }
 
         case IR_ASM:
-            fprintf(out_asm, "    ; asm %s\n", ins->asm_ann);
+            if (ins->asm_ann[0])
+                fprintf(out_asm, "    ; asm %s\n", ins->asm_ann);
             fprintf(out_asm, "%s\n", ins->asm_body);
             break;
 

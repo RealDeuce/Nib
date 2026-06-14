@@ -19,6 +19,8 @@ typedef struct decl_node    decl_t;
 typedef struct param_node   param_t;
 typedef struct field_node   field_t;
 typedef struct reg_list_node reg_list_t;
+typedef struct flag_expr_node flag_expr_t;
+typedef struct flag_case_node flag_case_t;
 
 /* ---- Register / flag IDs ---- */
 
@@ -174,7 +176,7 @@ struct stmt_node {
         } vardecl;
 
         /* ASSIGN / TOGGLE_ASSIGN */
-        struct { expr_t *target; expr_t *value; } assign;
+        struct { expr_t *target; expr_t *value; flag_case_t *flag_checks; } assign;
 
         /* EXPR (expression statement — function calls, builtins) */
         expr_t *expr;
@@ -237,6 +239,32 @@ struct field_node {
     bool    is_bits;
 
     field_t *next;
+};
+
+/* ---- Flag expressions (for flag-check blocks) ---- */
+
+typedef enum {
+    FEXPR_FLAG,     /* single flag */
+    FEXPR_NOT,      /* !expr */
+    FEXPR_OR,       /* expr | expr */
+    FEXPR_AND,      /* expr & expr */
+    FEXPR_XOR,      /* expr ^ expr */
+} flag_expr_kind_t;
+
+typedef struct flag_expr_node flag_expr_t;
+struct flag_expr_node {
+    flag_expr_kind_t kind;
+    reg_id_t         flag_id;    /* for FEXPR_FLAG */
+    flag_expr_t     *left;       /* for binary ops and NOT */
+    flag_expr_t     *right;      /* for binary ops */
+};
+
+typedef struct flag_case_node flag_case_t;
+struct flag_case_node {
+    flag_expr_t  *condition;
+    stmt_t       *body;          /* NULL for trap */
+    bool          is_trap;
+    flag_case_t  *next;
 };
 
 /* ---- Register/flag list (for preserves/clobbers) ---- */
@@ -359,6 +387,17 @@ stmt_t     *mk_stmt_if(expr_t *cond, stmt_t *then_b, stmt_t *else_b, int line);
 stmt_t     *mk_stmt_while(expr_t *cond, stmt_t *body, int line);
 stmt_t     *mk_stmt_for(expr_t *start, int end_val, stmt_t *body, int line);
 stmt_t     *mk_stmt_return(expr_t *e, int line);
+flag_expr_t *mk_fexpr_flag(reg_id_t id);
+flag_expr_t *mk_fexpr_not(flag_expr_t *e);
+flag_expr_t *mk_fexpr_binop(flag_expr_kind_t kind, flag_expr_t *l, flag_expr_t *r);
+flag_case_t *mk_flag_case(flag_expr_t *cond, stmt_t *body);
+flag_case_t *mk_flag_case_trap(flag_expr_t *cond);
+
+stmt_t     *mk_stmt_assign_checked(expr_t *target, expr_t *value,
+                                    flag_case_t *checks, int line);
+stmt_t     *mk_stmt_toggle_checked(expr_t *target, expr_t *value,
+                                    flag_case_t *checks, int line);
+
 stmt_t     *mk_stmt_break(int line);
 stmt_t     *mk_stmt_continue(int line);
 stmt_t     *mk_stmt_goto(const char *label, int line);

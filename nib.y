@@ -77,6 +77,8 @@ static void mods_reset(void) {
     reg_list_t    *rlist;
     fn_modifiers_t mods;
     struct { int reg; int rclass; } regval;
+    flag_expr_t   *fexpr;
+    flag_case_t   *fcase;
 }
 
 /* ---- Literals and identifiers ---- */
@@ -119,7 +121,7 @@ static void mods_reset(void) {
 /* ---- Nonterminal types ---- */
 %type <type>   type return_clause
 %type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list
-%type <stmt>   stmt stmt_list var_decl assignment if_stmt while_stmt for_stmt asm_block
+%type <stmt>   stmt stmt_list var_decl assignment checked_assignment if_stmt while_stmt for_stmt asm_block
 %type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl
 %type <param>  param param_list extern_param extern_param_list
 %type <field>  struct_field struct_fields
@@ -127,6 +129,8 @@ static void mods_reset(void) {
 %type <regval> reg_name word_reg byte_reg seg_reg flag mem_base
 %type <type>   return_clause_extern_type
 %type <regval> return_clause_extern_pin
+%type <fcase>  flag_block flag_cases flag_case
+%type <fexpr>  flag_expr flag_atom
 
 /* ---- Precedence (low to high) ---- */
 %left OP_XCHG
@@ -329,6 +333,7 @@ stmt_list
 stmt
     : var_decl ';'                  { $$ = $1; }
     | assignment ';'                { $$ = $1; }
+    | checked_assignment            { $$ = $1; }
     | expr ';'                      { $$ = mk_stmt_expr($1, yyline); }
     | if_stmt                       { $$ = $1; }
     | while_stmt                    { $$ = $1; }
@@ -365,41 +370,49 @@ var_decl
 assignment
     : expr OP_ASSIGN expr
         { $$ = mk_stmt_assign($1, $3, yyline); }
-    | expr OP_ASSIGN expr flag_block
-        { $$ = mk_stmt_assign($1, $3, yyline); /* TODO: attach flag_block */ }
     | expr OP_TOGGLEASSIGN expr
         { $$ = mk_stmt_toggle($1, $3, yyline); }
+    ;
+
+checked_assignment
+    : expr OP_ASSIGN expr flag_block
+        { $$ = mk_stmt_assign_checked($1, $3, $4, yyline); }
     | expr OP_TOGGLEASSIGN expr flag_block
-        { $$ = mk_stmt_toggle($1, $3, yyline); /* TODO: attach flag_block */ }
+        { $$ = mk_stmt_toggle_checked($1, $3, $4, yyline); }
     ;
 
 /* ---- Flag-check blocks ---- */
 
 flag_block
-    : '{' flag_cases '}'
+    : '{' flag_cases '}'               { $$ = $2; }
     ;
 
 flag_cases
-    : flag_case
-    | flag_cases flag_case
+    : flag_case                         { $$ = $1; }
+    | flag_cases flag_case              {
+        flag_case_t *p = $1;
+        while (p->next) p = p->next;
+        p->next = $2;
+        $$ = $1;
+    }
     ;
 
 flag_case
-    : flag_expr ':' '{' stmt_list '}'
-    | flag_expr ':' KW_TRAP ';'
+    : flag_expr ':' '{' stmt_list '}'   { $$ = mk_flag_case($1, $4); }
+    | flag_expr ':' KW_TRAP ';'         { $$ = mk_flag_case_trap($1); }
     ;
 
 flag_expr
-    : flag_atom
-    | flag_expr '|' flag_atom
-    | flag_expr '&' flag_atom
-    | flag_expr '^' flag_atom
+    : flag_atom                         { $$ = $1; }
+    | flag_expr '|' flag_atom           { $$ = mk_fexpr_binop(FEXPR_OR, $1, $3); }
+    | flag_expr '&' flag_atom           { $$ = mk_fexpr_binop(FEXPR_AND, $1, $3); }
+    | flag_expr '^' flag_atom           { $$ = mk_fexpr_binop(FEXPR_XOR, $1, $3); }
     ;
 
 flag_atom
-    : flag
-    | '!' flag_atom
-    | '(' flag_expr ')'
+    : flag                              { $$ = mk_fexpr_flag($1.reg); }
+    | '!' flag_atom                     { $$ = mk_fexpr_not($2); }
+    | '(' flag_expr ')'                 { $$ = $2; }
     ;
 
 /* ---- Control flow ---- */
