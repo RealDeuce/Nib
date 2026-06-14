@@ -320,39 +320,36 @@ only ever sees `preserves`.
 ### Placement with `at()`
 
 `at(seg:off)` controls where code and data are placed in the output
-binary. It can be used three ways:
-
-**Standalone directive** — anchors everything that follows:
-
-```
-at(0xF000:0x0000);
-
-fn boot() { ... }           // placed at F000:0000
-fn init() { ... }           // follows boot sequentially
-u16 counter;                // follows init
-
-at(0xFFFF:0x0000);
-
-fn reset() { goto boot; }   // placed at FFFF:0000
-```
-
-**On a function** — places just that function:
+binary. Every `at()` pushes the current output position onto a stack
+and sets a new position. `end at;` pops back to the previous position.
 
 ```
-fn at(0xFFFF:0x0000) reset() {
-    goto boot;
-}
+at(0xE000:0x0000);              // push: output at E000:0000
+fn boot() { ... }               // placed at E000:0000
+fn init() { ... }               // follows boot sequentially
+
+at(0x0000:0x0000);              // push: detour to 0000:0000
+far[256] ivt;                   // placed at 0000:0000
+u16 next_vector;                // follows ivt at 0000:0400
+end at;                         // pop: back to E000:xxxx
+
+fn main() { ... }               // continues from where E000 left off
+
+at(0xFFFF:0x0000);              // push: reset vector
+fn reset() { goto boot; }       // placed at FFFF:0000
 ```
 
-**On a global** — places data at a fixed address (see Globals section):
+`at()` can appear as a standalone directive, on a function
+(`fn at(seg:off) name()`), or on a global (`u16 x at(seg:off)`).
+All three forms push the position stack.
 
-```
-far[256] ivt at(0x0000:0x0000) = { ... };
-```
+**No auto-pop.** Only explicit `end at;` or the end of a module
+(via `use` expansion) pops the stack. Items after an `at()` continue
+at the new address until `end at;` is issued.
 
-Everything between two `at()` directives is placed sequentially
-starting from the first directive's address. The programmer controls
-layout — `at()` resyncs position.
+**Module isolation.** When the binder expands a `use` directive,
+any `at()` the used module leaves on the stack is automatically
+unwound. A used module cannot move the parent's output position.
 
 ### Parameter passing
 
@@ -1736,7 +1733,7 @@ all .nir files         →  [nibbind]  →  .asm
 
 ### Declarations
 
-`fn`, `struct`, `const`, `extern`, `pub`, `use`, `aligned`, `value`, `at`
+`fn`, `struct`, `const`, `extern`, `pub`, `use`, `aligned`, `value`, `at`, `end`
 
 ### Types
 
