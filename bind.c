@@ -248,6 +248,17 @@ typedef struct {
 static data_block_t data_blocks[MAX_DATA_BLOCKS];
 static int ndata_blocks = 0;
 
+/* Global variable declarations */
+#define MAX_GLOBALS 256
+typedef struct {
+    char name[64];
+    char type[32];
+    int  size;          /* bytes of storage */
+} global_var_t;
+
+static global_var_t globals[MAX_GLOBALS];
+static int nglobals = 0;
+
 /* Global binder state */
 static func_t functions[MAX_FNS];
 static int nfunctions = 0;
@@ -1147,7 +1158,40 @@ static void parse_nir(const char *path) {
             }
             continue;
         }
-        /* Skip .global and other top-level directives */
+        if (strncmp(p, ".global ", 8) == 0 && nglobals < MAX_GLOBALS) {
+            p += 8;
+            global_var_t *g = &globals[nglobals];
+            p = read_word(p, g->name, sizeof(g->name));
+            /* strip trailing comma */
+            int nlen = strlen(g->name);
+            if (nlen > 0 && g->name[nlen-1] == ',') g->name[nlen-1] = '\0';
+            p = skip_ws(p);
+            if (*p == ',') p++;
+            p = skip_ws(p);
+            read_word(p, g->type, sizeof(g->type));
+            /* Compute size from type */
+            g->size = 2; /* default u16 */
+            if (strcmp(g->type, "u8") == 0) g->size = 1;
+            else if (strcmp(g->type, "u16") == 0) g->size = 2;
+            else if (strcmp(g->type, "u32") == 0) g->size = 4;
+            else if (strcmp(g->type, "seg") == 0) g->size = 2;
+            else if (strcmp(g->type, "far") == 0) g->size = 4;
+            else {
+                /* Array type like u8[80] or far[256] */
+                char *bracket = strchr(g->type, '[');
+                if (bracket) {
+                    int count = atoi(bracket + 1);
+                    int elem = 1;
+                    if (strncmp(g->type, "u16", 3) == 0) elem = 2;
+                    else if (strncmp(g->type, "u32", 3) == 0) elem = 4;
+                    else if (strncmp(g->type, "far", 3) == 0) elem = 4;
+                    g->size = elem * count;
+                }
+            }
+            nglobals++;
+            continue;
+        }
+        /* Skip other top-level directives */
     }
 
     fclose(fp);
@@ -2350,6 +2394,21 @@ int main(int argc, char **argv) {
                 fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
             } else {
                 fprintf(out_asm, "%s\n", db->entries[j]);
+            }
+        }
+    }
+
+    /* Emit global variable storage */
+    if (nglobals > 0) {
+        fprintf(out_asm, "\n; === globals ===\n");
+        for (int i = 0; i < nglobals; i++) {
+            fprintf(out_asm, "%s:", globals[i].name);
+            if (globals[i].size <= 2)
+                fprintf(out_asm, " dw 0\n");
+            else {
+                fprintf(out_asm, "\n");
+                for (int b = 0; b < globals[i].size; b += 2)
+                    fprintf(out_asm, "    dw 0\n");
             }
         }
     }
