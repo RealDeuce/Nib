@@ -270,18 +270,26 @@ static int nglobals = 0;
 #define EMIT_DATA  1
 #define EMIT_GLOB  2
 #define EMIT_AT    3
+#define EMIT_USE   4
 #define MAX_AT_DIRECTIVES 64
 static struct { int seg; int off; } at_directives[MAX_AT_DIRECTIVES];
 static int nat_directives = 0;
 
+#define MAX_USE_DIRECTIVES 64
+static char use_modules[MAX_USE_DIRECTIVES][64]; /* module name from .use */
+static int nuse_directives = 0;
+
 #define MAX_EMIT_ORDER 1024
-static struct { int kind; int index; } emit_order[MAX_EMIT_ORDER];
+static struct { int kind; int index; char module[64]; } emit_order[MAX_EMIT_ORDER];
 static int nemit_order = 0;
+
+static char _cur_parse_module[64]; /* set during parse_nir */
 
 static void record_emit(int kind, int index) {
     if (nemit_order < MAX_EMIT_ORDER) {
         emit_order[nemit_order].kind = kind;
         emit_order[nemit_order].index = index;
+        strncpy(emit_order[nemit_order].module, _cur_parse_module, 63);
         nemit_order++;
     }
 }
@@ -1055,6 +1063,7 @@ static void parse_nir(const char *path) {
     strncpy(cur_module, base, 63);
     char *dot = strrchr(cur_module, '.');
     if (dot) *dot = '\0';
+    strncpy(_cur_parse_module, cur_module, 63);
 
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
@@ -1229,6 +1238,20 @@ static void parse_nir(const char *path) {
             strncpy(g->module, cur_module, 63);
             nglobals++;
             record_emit(EMIT_GLOB, nglobals - 1);
+            continue;
+        }
+        if (strncmp(p, ".use ", 5) == 0) {
+            p += 5;
+            if (*p == '"') p++;
+            if (nuse_directives < MAX_USE_DIRECTIVES) {
+                char *m = use_modules[nuse_directives];
+                int mi = 0;
+                while (*p && *p != '"' && *p != '.' && mi < 63)
+                    m[mi++] = *p++;
+                m[mi] = '\0';
+                record_emit(EMIT_USE, nuse_directives);
+                nuse_directives++;
+            }
             continue;
         }
         if (strncmp(p, ".at ", 4) == 0) {
@@ -2398,6 +2421,93 @@ static void propagate_preferences(void) {
  * Main
  * ================================================================ */
 
+/* ================================================================
+ * Source-order emission with depth-first use expansion
+ * ================================================================ */
+
+static void emit_item(int ei) {
+    int kind = emit_order[ei].kind;
+    int idx = emit_order[ei].index;
+
+    if (kind == EMIT_FN) {
+        emit_function(&functions[idx]);
+    } else if (kind == EMIT_DATA) {
+        data_block_t *db = &data_blocks[idx];
+        fprintf(out_asm, "\n; === data: %s ===\n", db->label);
+        if (db->has_at) {
+            int lin = db->at_seg * 16 + db->at_off;
+            fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
+            fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+                    lin, db->at_seg, db->at_off);
+        }
+        fprintf(out_asm, "%s:\n", db->label);
+        for (int j = 0; j < db->nentries; j++) {
+            if (db->entries[j][0] == '\x01') {
+                const char *r = resolve_fn_name(db->entries[j] + 1);
+                fprintf(out_asm, "    dw %s, SEG %s\n", r, r);
+            } else {
+                fprintf(out_asm, "%s\n", db->entries[j]);
+            }
+        }
+    } else if (kind == EMIT_GLOB) {
+        global_var_t *g = &globals[idx];
+        fprintf(out_asm, "%s:", g->name);
+        if (g->size <= 2)
+            fprintf(out_asm, " dw 0\n");
+        else {
+            fprintf(out_asm, "\n");
+            for (int b = 0; b < g->size; b += 2)
+                fprintf(out_asm, "    dw 0\n");
+        }
+    } else if (kind == EMIT_AT) {
+        int s = at_directives[idx].seg;
+        int o = at_directives[idx].off;
+        int lin = s * 16 + o;
+        fprintf(out_asm, "\n    seg 0x%04X\n", s);
+        fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n", lin, s, o);
+    }
+}
+
+static char done_modules[128][64];
+static int ndone_modules = 0;
+
+static void emit_module(const char *path) {
+    /* Extract module name from path */
+    char mod[64];
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    strncpy(mod, base, 63);
+    char *dot = strrchr(mod, '.');
+    if (dot) *dot = '\0';
+
+    /* Skip if already emitted */
+    for (int i = 0; i < ndone_modules; i++)
+        if (strcmp(done_modules[i], mod) == 0) return;
+    strncpy(done_modules[ndone_modules++], mod, 63);
+
+    /* Walk this module's items in emit_order, expanding .use recursively */
+    for (int ei = 0; ei < nemit_order; ei++) {
+        if (strcmp(emit_order[ei].module, mod) != 0) continue;
+        if (emit_order[ei].kind == EMIT_USE) {
+            /* Expand: emit the referenced module depth-first */
+            char use_path[128];
+            const char *use_mod = use_modules[emit_order[ei].index];
+            /* Reconstruct path relative to current module's path */
+            const char *slash = strrchr(path, '/');
+            if (slash) {
+                int dirlen = (int)(slash - path) + 1;
+                snprintf(use_path, sizeof(use_path), "%.*s%s.nir",
+                         dirlen, path, use_mod);
+            } else {
+                snprintf(use_path, sizeof(use_path), "%s.nir", use_mod);
+            }
+            emit_module(use_path);
+        } else {
+            emit_item(ei);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     const char *outpath = "out.asm";
     int ninputs = 0;
@@ -2475,53 +2585,9 @@ int main(int argc, char **argv) {
         /* Phase 4: deferred — emitted below in source order */
     }
 
-    /* Emit everything in source order */
-    for (int ei = 0; ei < nemit_order; ei++) {
-        int kind = emit_order[ei].kind;
-        int idx = emit_order[ei].index;
-
-        if (kind == EMIT_FN) {
-            emit_function(&functions[idx]);
-        }
-        else if (kind == EMIT_DATA) {
-            data_block_t *db = &data_blocks[idx];
-            fprintf(out_asm, "\n; === data: %s ===\n", db->label);
-            if (db->has_at) {
-                int linear = db->at_seg * 16 + db->at_off;
-                fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
-                fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
-                        linear, db->at_seg, db->at_off);
-            }
-            fprintf(out_asm, "%s:\n", db->label);
-            for (int j = 0; j < db->nentries; j++) {
-                if (db->entries[j][0] == '\x01') {
-                    const char *resolved = resolve_fn_name(db->entries[j] + 1);
-                    fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
-                } else {
-                    fprintf(out_asm, "%s\n", db->entries[j]);
-                }
-            }
-        }
-        else if (kind == EMIT_GLOB) {
-            global_var_t *g = &globals[idx];
-            fprintf(out_asm, "%s:", g->name);
-            if (g->size <= 2)
-                fprintf(out_asm, " dw 0\n");
-            else {
-                fprintf(out_asm, "\n");
-                for (int b = 0; b < g->size; b += 2)
-                    fprintf(out_asm, "    dw 0\n");
-            }
-        }
-        else if (kind == EMIT_AT) {
-            int seg = at_directives[idx].seg;
-            int off = at_directives[idx].off;
-            int linear = seg * 16 + off;
-            fprintf(out_asm, "\n    seg 0x%04X\n", seg);
-            fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
-                    linear, seg, off);
-        }
-    }
+    /* Emit in source order via depth-first walk of the use tree */
+    ndone_modules = 0;
+    emit_module(inputs[ninputs - 1]);
 
     fclose(out_asm);
     fprintf(stderr, "Wrote %s\n", outpath);

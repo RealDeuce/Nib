@@ -2085,7 +2085,7 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
             compile_extern_fn(d);
             break;
         case DECL_USE:
-            fprintf(C.nir, "; use \"%s\"\n", d->u.use_path);
+            fprintf(C.nir, ".use \"%s\"\n", d->u.use_path);
             import_nif(d->u.use_path, d->line);
             break;
         case DECL_CONST:
