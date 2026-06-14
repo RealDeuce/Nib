@@ -294,6 +294,8 @@ typedef struct {
     int  interrupt_vector;
     bool has_chain;
     char *chain_name;
+    bool has_preserves;
+    reg_list_t *preserves;
 } fn_modifiers_t;
 
 struct decl_node {

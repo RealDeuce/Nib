@@ -1178,6 +1178,18 @@ static void compile_fn(decl_t *d) {
     if (d->u.fn.mods.is_reentrant) fprintf(C.nir, ", reentrant");
     fprintf(C.nir, "\n");
 
+    if (d->u.fn.mods.has_preserves) {
+        fprintf(C.nir, ".preserves ");
+        for (reg_list_t *r = d->u.fn.mods.preserves; r; r = r->next) {
+            if (r->is_flags_all)
+                fprintf(C.nir, "FLAGS");
+            else
+                fprintf(C.nir, "%s", reg_name_str(r->id, r->rclass));
+            if (r->next) fprintf(C.nir, ", ");
+        }
+        fprintf(C.nir, "\n");
+    }
+
     /* Emit .nif function header */
     fprintf(C.nif, ".fn %s", d->u.fn.name);
     if (d->u.fn.mods.is_far) fprintf(C.nif, ", far");
@@ -1185,6 +1197,18 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nif, ", interrupt(0x%02X)", d->u.fn.mods.interrupt_vector);
     if (d->u.fn.mods.is_reentrant) fprintf(C.nif, ", reentrant");
     fprintf(C.nif, "\n");
+
+    if (d->u.fn.mods.has_preserves) {
+        fprintf(C.nif, ".preserves ");
+        for (reg_list_t *r = d->u.fn.mods.preserves; r; r = r->next) {
+            if (r->is_flags_all)
+                fprintf(C.nif, "FLAGS");
+            else
+                fprintf(C.nif, "%s", reg_name_str(r->id, r->rclass));
+            if (r->next) fprintf(C.nif, ", ");
+        }
+        fprintf(C.nif, "\n");
+    }
 
     /* Create function scope and add parameters */
     push_scope();

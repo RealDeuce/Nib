@@ -221,10 +221,16 @@ fn_start
     ;
 
 function_def
-    : fn_start fn_modifiers IDENT '(' param_list ')' return_clause '{' stmt_list '}'
-        { $$ = mk_decl_fn($3, current_mods, $5, $7, $9, yyline); }
-    | fn_start fn_modifiers IDENT '(' ')' return_clause '{' stmt_list '}'
-        { $$ = mk_decl_fn($3, current_mods, NULL, $6, $8, yyline); }
+    : fn_start fn_modifiers IDENT '(' param_list ')' return_clause fn_preserves '{' stmt_list '}'
+        { $$ = mk_decl_fn($3, current_mods, $5, $7, $10, yyline); }
+    | fn_start fn_modifiers IDENT '(' ')' return_clause fn_preserves '{' stmt_list '}'
+        { $$ = mk_decl_fn($3, current_mods, NULL, $6, $9, yyline); }
+    ;
+
+fn_preserves
+    : /* empty */
+    | KW_PRESERVES '(' reg_flag_list ')'
+        { current_mods.has_preserves = true; current_mods.preserves = $3; }
     ;
 
 fn_modifiers

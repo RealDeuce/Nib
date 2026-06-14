@@ -1,0 +1,11 @@
+// Test callee-saved registers
+
+fn compute(a: u16, b: u16) -> u16 preserves(BX, SI, DI) {
+    u16 tmp = a + b;
+    u16 result = tmp + a;
+    return result;
+}
+
+fn caller() {
+    u16 x = compute(10, 20);
+}

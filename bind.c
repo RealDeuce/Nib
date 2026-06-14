@@ -189,6 +189,10 @@ typedef struct {
     bool        needs_frame;    /* BP reserved for frame pointer */
     int         nspill_slots;
     int         frame_size;     /* total bytes for spills */
+
+    /* Callee-saved registers */
+    int         fn_preserves[NUM_PREGS]; /* list of PREG_* to save/restore */
+    int         nfn_preserves;
 } func_t;
 
 /* Global binder state */
@@ -331,6 +335,25 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->dst = v;
             ins->src1 = ins->src2 = -1;
             ins->imm = preg;
+            continue;
+        }
+
+        if (strncmp(p, ".preserves", 10) == 0) {
+            p += 10;
+            /* Parse comma-separated register list */
+            while (*p) {
+                char reg[16];
+                p = skip_ws(p);
+                if (!*p || *p == '\n') break;
+                p = read_word(p, reg, sizeof(reg));
+                if (!reg[0]) break;
+                int preg = parse_preg(reg);
+                if (preg != PREG_NONE && fn->nfn_preserves < NUM_PREGS) {
+                    fn->fn_preserves[fn->nfn_preserves++] = preg;
+                }
+                p = skip_ws(p);
+                if (*p == ',') p++;
+            }
             continue;
         }
 
@@ -880,17 +903,39 @@ static const char *vreg_asm(func_t *fn, int v) {
 static void emit_function(func_t *fn) {
     fprintf(out_asm, "\n; === %s ===\n", fn->name);
 
+    /* Determine which callee-saved registers need saving.
+     * A register needs saving if it's in the preserves list AND
+     * it's assigned to a vreg that the function body uses. */
+    int save_regs[NUM_PREGS];
+    int nsave = 0;
+
+    if (fn->nfn_preserves > 0) {
+        bool used[NUM_PREGS] = {0};
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (fn->vregs[v].assigned != PREG_NONE &&
+                fn->vregs[v].def_pos >= 0)
+                used[fn->vregs[v].assigned] = true;
+        }
+        for (int i = 0; i < fn->nfn_preserves; i++) {
+            int preg = fn->fn_preserves[i];
+            if (used[preg])
+                save_regs[nsave++] = preg;
+        }
+    }
+
     /* Prologue */
     if (fn->is_interrupt) {
-        /* Save all clobbered registers */
         fprintf(out_asm, "; interrupt handler vector 0x%02X\n", fn->int_vector);
-        /* For now, save everything used */
         fprintf(out_asm, "    pusha\n");
         if (fn->is_reentrant)
             fprintf(out_asm, "    sti\n");
     }
 
     fprintf(out_asm, "%s:\n", fn->name);
+
+    /* Callee-save pushes */
+    for (int i = 0; i < nsave; i++)
+        fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
 
     if (fn->needs_frame) {
         fprintf(out_asm, "    push bp\n");
@@ -1049,6 +1094,9 @@ static void emit_function(func_t *fn) {
                 fprintf(out_asm, "    mov sp, bp\n");
                 fprintf(out_asm, "    pop bp\n");
             }
+            /* Callee-save pops (reverse order) */
+            for (int j = nsave - 1; j >= 0; j--)
+                fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
             if (fn->is_interrupt) {
                 fprintf(out_asm, "    popa\n");
                 fprintf(out_asm, "    iret\n");
@@ -1155,6 +1203,8 @@ static void emit_function(func_t *fn) {
             fprintf(out_asm, "    mov sp, bp\n");
             fprintf(out_asm, "    pop bp\n");
         }
+        for (int j = nsave - 1; j >= 0; j--)
+            fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
         if (fn->is_interrupt) {
             fprintf(out_asm, "    popa\n");
             fprintf(out_asm, "    iret\n");
