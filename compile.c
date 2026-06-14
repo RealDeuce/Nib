@@ -478,19 +478,26 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     case EXPR_REG: {
         const char *name = reg_name_str(e->u.reg.id, e->u.reg.rclass);
         symbol_t *sym = sym_lookup(name);
-        if (sym) return TV(sym->vreg, sym->type);
-        cerr(e->line, "undeclared register variable '%s'", name);
-        int r = alloc_vreg();
-        type_t *t = (e->u.reg.rclass == REGCLASS_BYTE) ?
-                    mk_type(TYPE_U8) : mk_type(TYPE_U16);
-        return TV(r, t);
+        if (!sym) {
+            /* Auto-declare register variable on first use */
+            type_t *t = (e->u.reg.rclass == REGCLASS_BYTE) ?
+                        mk_type(TYPE_U8) : mk_type(TYPE_U16);
+            sym = sym_add_pinned(t, e->u.reg.id, e->u.reg.rclass);
+            fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
+            fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
+        }
+        return TV(sym->vreg, sym->type);
     }
     case EXPR_SREG: {
         const char *name = sreg_name(e->u.reg.id);
         symbol_t *sym = sym_lookup(name);
-        if (sym) return TV(sym->vreg, sym->type);
-        cerr(e->line, "undeclared segment register '%s'", name);
-        return TV(alloc_vreg(), mk_type(TYPE_SEG));
+        if (!sym) {
+            /* Auto-declare segment register on first use */
+            sym = sym_add_pinned(mk_type(TYPE_SEG), e->u.reg.id, REGCLASS_SEG);
+            fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
+            fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
+        }
+        return TV(sym->vreg, sym->type);
     }
     case EXPR_FLAG: {
         int r = alloc_vreg();
