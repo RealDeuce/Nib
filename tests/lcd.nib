@@ -1,6 +1,6 @@
 // lcd.nib — LCD driver module
 
-fn lcd_clear(fill_char: u8) preserves(BX, DX, SI, BP) {
+pub fn lcd_clear(fill_char: u8) preserves(BX, DX, SI, BP) {
     seg ES = 0xB800;
     u16 DI = 0;
     u8 AL = fill_char;
@@ -10,7 +10,7 @@ fn lcd_clear(fill_char: u8) preserves(BX, DX, SI, BP) {
     }
 }
 
-fn lcd_putchar(x: u16, char: u8) preserves(BX, CX, DX, SI, BP) {
+pub fn lcd_putchar(x: u16, char: u8) preserves(BX, CX, DX, SI, BP) {
     seg ES = 0xB800;
     u16 DI = x;
     u8 AL = char;

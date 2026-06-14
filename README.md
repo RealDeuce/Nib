@@ -24,6 +24,7 @@ allocator) is not yet implemented.
   - Virtual register allocation with register pinning preferences
   - Scope tracking with shadowing
   - `const` declarations, array initializers, `at()` placement, `&fn` addresses
+  - `pub` visibility control — only `pub` declarations exported to `.nif`
   - Identifiers allow uppercase (`[a-zA-Z_][a-zA-Z0-9_]*`); struct type prefix required
 - Two-pass V20 cross-assembler (`nibasm`)
   - Full 8086/80186 instruction set
@@ -118,6 +119,10 @@ u8[8] buf = {0x41, 0x42, 0x43};
 
 // Struct types require the struct keyword prefix
 fn read(p: struct Point) -> u16 { ... }
+
+// Visibility — only pub declarations exported to .nif
+pub fn lcd_clear(fill: u8) { ... }  // visible to importers
+fn helper() { ... }                  // module-private
 
 // Cross-module imports
 use "lcd.nif";

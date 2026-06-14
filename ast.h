@@ -322,6 +322,7 @@ typedef struct {
 struct decl_node {
     decl_kind_t kind;
     int         line;
+    bool        is_pub;     /* visible to other modules via .nif */
 
     union {
         /* FN */

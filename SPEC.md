@@ -157,6 +157,26 @@ const SCREEN_WIDTH = 480;
 port_out(PORT_LCD, data);           // same as port_out(0x60, data)
 ```
 
+### Visibility
+
+By default, declarations are module-private — not visible to other
+modules via `use`. The `pub` keyword exports a declaration to the `.nif`
+interface file.
+
+```
+pub fn lcd_clear(fill: u8) { ... }      // visible to importers
+fn helper() { ... }                      // module-private
+
+pub struct Point { u16 x; u16 y; }       // visible to importers
+struct InternalState { u16 flags; }      // module-private
+
+pub const PORT_LCD = 0x60;               // visible to importers
+const BUFFER_SIZE = 256;                 // module-private
+```
+
+`pub` can be applied to functions, structs, globals, and constants.
+Extern declarations are always exported.
+
 ### Register pinning
 
 A variable whose name matches a register (uppercase) is pinned to that
@@ -1032,8 +1052,8 @@ fn main() {
 
 ## Interface Files (.nif)
 
-The interface file is the contract between the compiler and the binder.
-It records, per function:
+The interface file contains only `pub` declarations — the public API of
+a module. It records, per exported function:
 
 - **Parameters**: name, type, size, preferred register assignment
 - **Preserves**: which registers the function guarantees not to modify

@@ -76,6 +76,7 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 "at"                    { return KW_AT; }
 "tailcall"              { return KW_TAILCALL; }
 "const"                 { return KW_CONST; }
+"pub"                   { return KW_PUB; }
 
  /* ---- Type keywords ---- */
 "u8"                    { return TY_U8; }

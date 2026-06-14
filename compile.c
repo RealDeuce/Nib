@@ -1366,24 +1366,27 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nir, "\n");
     }
 
-    /* Emit .nif function header */
-    fprintf(C.nif, ".fn %s", d->u.fn.name);
-    if (d->u.fn.mods.is_far) fprintf(C.nif, ", far");
-    if (d->u.fn.mods.is_interrupt)
-        fprintf(C.nif, ", interrupt(0x%02X)", d->u.fn.mods.interrupt_vector);
-    if (d->u.fn.mods.is_reentrant) fprintf(C.nif, ", reentrant");
-    fprintf(C.nif, "\n");
-
-    if (d->u.fn.mods.has_preserves) {
-        fprintf(C.nif, ".preserves ");
-        for (reg_list_t *r = d->u.fn.mods.preserves; r; r = r->next) {
-            if (r->is_flags_all)
-                fprintf(C.nif, "FLAGS");
-            else
-                fprintf(C.nif, "%s", reg_name_str(r->id, r->rclass));
-            if (r->next) fprintf(C.nif, ", ");
-        }
+    /* Emit .nif function header (only for pub declarations) */
+    bool nif = d->is_pub;
+    if (nif) {
+        fprintf(C.nif, ".fn %s", d->u.fn.name);
+        if (d->u.fn.mods.is_far) fprintf(C.nif, ", far");
+        if (d->u.fn.mods.is_interrupt)
+            fprintf(C.nif, ", interrupt(0x%02X)", d->u.fn.mods.interrupt_vector);
+        if (d->u.fn.mods.is_reentrant) fprintf(C.nif, ", reentrant");
         fprintf(C.nif, "\n");
+
+        if (d->u.fn.mods.has_preserves) {
+            fprintf(C.nif, ".preserves ");
+            for (reg_list_t *r = d->u.fn.mods.preserves; r; r = r->next) {
+                if (r->is_flags_all)
+                    fprintf(C.nif, "FLAGS");
+                else
+                    fprintf(C.nif, "%s", reg_name_str(r->id, r->rclass));
+                if (r->next) fprintf(C.nif, ", ");
+            }
+            fprintf(C.nif, "\n");
+        }
     }
 
     /* Create function scope and add parameters */
@@ -1409,14 +1412,16 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nir, "\n");
 
         /* .nif keeps the full type for cross-module type checking */
-        fprintf(C.nif, ".param %%%d, %s, \"%s\"", sym->vreg, type_str(p->type), p->name);
-        if (p->is_value) fprintf(C.nif, ", value");
-        fprintf(C.nif, "\n");
+        if (nif) {
+            fprintf(C.nif, ".param %%%d, %s, \"%s\"", sym->vreg, type_str(p->type), p->name);
+            if (p->is_value) fprintf(C.nif, ", value");
+            fprintf(C.nif, "\n");
+        }
     }
 
     if (d->u.fn.return_type) {
         fprintf(C.nir, ".returns %s\n", type_str(d->u.fn.return_type));
-        fprintf(C.nif, ".returns %s\n", type_str(d->u.fn.return_type));
+        if (nif) fprintf(C.nif, ".returns %s\n", type_str(d->u.fn.return_type));
     }
 
     /* Add chain variable if present */
@@ -1430,7 +1435,7 @@ static void compile_fn(decl_t *d) {
     pop_scope();
 
     fprintf(C.nir, ".endfn\n");
-    fprintf(C.nif, ".endfn\n\n");
+    if (nif) fprintf(C.nif, ".endfn\n\n");
 }
 
 static void compile_struct(decl_t *d) {
@@ -1441,22 +1446,24 @@ static void compile_struct(decl_t *d) {
     C.nstructs++;
 
     /* Emit to .nif so other modules know the struct layout */
-    fprintf(C.nif, ".struct %s", d->u.struc.name);
-    if (d->u.struc.aligned) fprintf(C.nif, ", aligned");
-    fprintf(C.nif, "\n");
-    for (field_t *f = d->u.struc.fields; f; f = f->next) {
-        if (f->is_bits) {
-            fprintf(C.nif, "    %s: bits(%d)\n",
-                    f->name ? f->name : "_", f->bits);
-        } else {
-            if (f->as_type)
-                fprintf(C.nif, "    %s: %s as %s\n", f->name,
-                        type_str(f->type), type_str(f->as_type));
-            else
-                fprintf(C.nif, "    %s: %s\n", f->name, type_str(f->type));
+    if (d->is_pub) {
+        fprintf(C.nif, ".struct %s", d->u.struc.name);
+        if (d->u.struc.aligned) fprintf(C.nif, ", aligned");
+        fprintf(C.nif, "\n");
+        for (field_t *f = d->u.struc.fields; f; f = f->next) {
+            if (f->is_bits) {
+                fprintf(C.nif, "    %s: bits(%d)\n",
+                        f->name ? f->name : "_", f->bits);
+            } else {
+                if (f->as_type)
+                    fprintf(C.nif, "    %s: %s as %s\n", f->name,
+                            type_str(f->type), type_str(f->as_type));
+                else
+                    fprintf(C.nif, "    %s: %s\n", f->name, type_str(f->type));
+            }
         }
+        fprintf(C.nif, ".endstruct\n\n");
     }
-    fprintf(C.nif, ".endstruct\n\n");
 }
 
 static void compile_global(decl_t *d) {
@@ -1467,7 +1474,8 @@ static void compile_global(decl_t *d) {
     sym_add(name, d->u.global.type, true);
 
     /* Emit .nif entry (always simple) */
-    fprintf(C.nif, ".global %s, %s\n", name, type_str(d->u.global.type));
+    if (d->is_pub)
+        fprintf(C.nif, ".global %s, %s\n", name, type_str(d->u.global.type));
 
     /* Check for array initializer */
     if (d->u.global.init && d->u.global.init->kind == EXPR_ARRAY_INIT) {
@@ -1774,6 +1782,19 @@ static void import_nif(const char *path, int use_line) {
             continue;
         }
 
+        /* .const name, value */
+        if (strncmp(p, ".const ", 7) == 0) {
+            p += 7;
+            char name[64];
+            p = nif_read_word(p, name, sizeof(name));
+            p = nif_skip_ws(p);
+            if (*p == ',') p++;
+            p = nif_skip_ws(p);
+            int value = (int)strtol(p, NULL, 0);
+            register_constant(name, value);
+            continue;
+        }
+
         /* .preserves — skip (used by binder, not compiler) */
         /* field declarations inside struct — skip for now */
     }
@@ -1826,6 +1847,8 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
             break;
         case DECL_CONST:
             register_constant(d->u.konst.name, d->u.konst.value);
+            if (d->is_pub)
+                fprintf(C.nif, ".const %s, %d\n", d->u.konst.name, d->u.konst.value);
             break;
         }
     }
