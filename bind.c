@@ -531,6 +531,9 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             int preg = parse_preg(reg);
             if (v >= 0 && v < MAX_VREGS) {
                 fn->vregs[v].prefer = preg;
+                /* Mark segment register vregs */
+                if (preg >= PREG_ES && preg <= PREG_DS)
+                    fn->vregs[v].is_seg = true;
             }
             if (v >= fn->nvregs) fn->nvregs = v + 1;
             /* Also add as IR_PREFER so we track it */
