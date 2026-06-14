@@ -7,6 +7,6 @@
 /* Compile a parsed program, emitting .nir and .nif files.
  * Returns 0 on success, nonzero on error. */
 int compile(program_t *prog, const char *nir_path, const char *nif_path,
-            const char *src_dir);
+            const char *src_dir, const char *src_file);
 
 #endif /* NIB_COMPILE_H */

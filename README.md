@@ -32,7 +32,8 @@ allocator) is not yet implemented.
   - V20 extensions (bit ops, BCD string ops, nibble rotate, 8080 emulation)
   - `SEG` operator for segment-relative label references
   - Map file output for symbol/data tracking
-- V20 disassembler (`nibdis`) with map file support
+  - Debug info output (`.dbg`) mapping binary addresses to source lines
+- V20 disassembler (`nibdis`) with map file and debug info support
 
 ### What's next
 

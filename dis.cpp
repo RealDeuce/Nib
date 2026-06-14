@@ -73,18 +73,57 @@ static bool in_data_region(uint16_t addr) {
     return covering && strcmp(covering->type, "data") == 0;
 }
 
+/* ---- Debug info support ---- */
+
+#define MAX_DBG_ENTRIES 8192
+
+struct dbg_entry {
+    uint32_t addr;
+    char     file[64];
+    int      line;
+};
+
+static dbg_entry dbg[MAX_DBG_ENTRIES];
+static int ndbg = 0;
+
+static void load_dbg(const char *path) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) { perror(path); return; }
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        if (ndbg >= MAX_DBG_ENTRIES) break;
+        dbg_entry *e = &dbg[ndbg];
+        unsigned int addr;
+        if (sscanf(line, "%x %63[^:]:%d", &addr, e->file, &e->line) >= 3) {
+            e->addr = addr;
+            ndbg++;
+        }
+    }
+    fclose(fp);
+}
+
+static const dbg_entry *find_dbg(uint32_t addr) {
+    for (int i = 0; i < ndbg; i++)
+        if (dbg[i].addr == addr)
+            return &dbg[i];
+    return NULL;
+}
+
 /* ---- Main ---- */
 
 static void usage(const char *argv0) {
-    fprintf(stderr, "usage: %s [-o org] [-b bytes] [-m mapfile] file.bin\n", argv0);
+    fprintf(stderr, "usage: %s [-o org] [-b bytes] [-m mapfile] [-d dbgfile] file.bin\n", argv0);
     fprintf(stderr, "  -o org      set origin address (default 0x0000)\n");
     fprintf(stderr, "  -b bytes    disassemble only first N bytes\n");
     fprintf(stderr, "  -m mapfile  load label/data map\n");
+    fprintf(stderr, "  -d dbgfile  load source debug info\n");
 }
 
 int main(int argc, char **argv) {
     const char *infile = NULL;
     const char *mappath = NULL;
+    const char *dbgpath = NULL;
     uint16_t org = 0;
     int max_bytes = -1;
 
@@ -95,6 +134,8 @@ int main(int argc, char **argv) {
             max_bytes = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             mappath = argv[++i];
+        } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
+            dbgpath = argv[++i];
         } else if (argv[i][0] == '-') {
             usage(argv[0]);
             return 1;
@@ -109,6 +150,7 @@ int main(int argc, char **argv) {
     }
 
     if (mappath) load_map(mappath);
+    if (dbgpath) load_dbg(dbgpath);
 
     FILE *fp = fopen(infile, "rb");
     if (!fp) { perror(infile); return 1; }
@@ -130,6 +172,12 @@ int main(int argc, char **argv) {
         const map_entry *me = find_map(ip);
         if (me) {
             printf("\n%s:\n", me->name);
+        }
+
+        /* Show source location if debug info available */
+        const dbg_entry *de = find_dbg(ip);
+        if (de) {
+            printf("                    ; %s:%d\n", de->file, de->line);
         }
 
         /* If we're in a data region, emit DB/DW instead of disassembling */

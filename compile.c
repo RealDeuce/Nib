@@ -50,6 +50,8 @@ typedef struct {
     int         loop_break_label;   /* label to jump to for break */
     int         loop_continue_label; /* label to jump to for continue */
     char        src_dir[256];       /* directory of source file for use resolution */
+    char        src_file[256];      /* source filename for debug info */
+    int         last_emitted_line;  /* avoid duplicate line comments */
     int         next_const;         /* constant pool counter */
 
     /* Current function info for .nif emission */
@@ -1025,6 +1027,12 @@ static void emit_stmts(stmt_t *list) {
 static void emit_stmt(stmt_t *s) {
     if (!s) return;
 
+    /* Emit source line comment for debug info */
+    if (s->line > 0 && s->line != C.last_emitted_line && C.src_file[0]) {
+        fprintf(C.nir, "; @%s:%d\n", C.src_file, s->line);
+        C.last_emitted_line = s->line;
+    }
+
     switch (s->kind) {
     case STMT_VARDECL: {
         symbol_t *sym;
@@ -1378,6 +1386,7 @@ static void compile_fn(decl_t *d) {
     C.next_vreg = 0;
     /* Don't reset next_label — keep it global so labels are unique across functions */
     C.loop_depth = 0;
+    C.last_emitted_line = 0;
     C.cur_fn_name = d->u.fn.name;
     C.cur_fn_params = d->u.fn.params;
     C.cur_fn_ret = d->u.fn.return_type;
@@ -1852,10 +1861,15 @@ static void import_nif(const char *path, int use_line) {
  * ================================================================ */
 
 int compile(program_t *prog, const char *nir_path, const char *nif_path,
-            const char *src_dir) {
+            const char *src_dir, const char *src_file) {
     memset(&C, 0, sizeof(C));
     if (src_dir)
         strncpy(C.src_dir, src_dir, sizeof(C.src_dir) - 1);
+    if (src_file) {
+        /* Store just the basename for debug info */
+        const char *slash = strrchr(src_file, '/');
+        strncpy(C.src_file, slash ? slash + 1 : src_file, sizeof(C.src_file) - 1);
+    }
 
     C.nir = fopen(nir_path, "w");
     if (!C.nir) { perror(nir_path); return 1; }

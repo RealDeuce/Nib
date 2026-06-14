@@ -1087,6 +1087,35 @@ fn main() {
 ```
 
 
+## Debug Info (.dbg)
+
+Source-level debug information flows through the pipeline as `; @file:line`
+comments. The compiler emits them in the `.nir`, the binder carries them
+through to the `.asm`, and the assembler captures them and writes a `.dbg`
+file mapping binary addresses to source locations.
+
+### .dbg format
+
+```
+# nib debug info
+XXXXX file.nib:NN
+XXXXX file.nib:NN
+```
+
+Where `XXXXX` is a 5-digit hex linear address. One entry per source
+statement boundary. The disassembler reads `.dbg` files via `-d` and
+interleaves source locations in its output.
+
+### Generating debug info
+
+```
+nib compile source.nib              # .nir includes ; @ comments
+nib bind source.nir -o source.asm   # carries comments through
+nibasm source.asm -o source.bin -d source.dbg   # writes .dbg
+nibdis source.bin -m source.map -d source.dbg   # shows source lines
+```
+
+
 ## Interface Files (.nif)
 
 The interface file contains only `pub` declarations — the public API of

@@ -129,6 +129,7 @@ typedef struct {
     char    asm_ann[128];   /* clobbers/preserves text */
     int     label_id;       /* resolved label index for jumps */
     int     line;           /* source line */
+    char    src_file[64];   /* source filename for debug */
 } ir_insn_t;
 
 /* Virtual register info */
@@ -335,6 +336,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
     }
 
     /* Read body lines until .endfn */
+    char cur_dbg_file[64] = "";
+    int cur_dbg_line = 0;
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
         /* Strip newline */
@@ -343,7 +346,21 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             line[--len] = '\0';
 
         p = skip_ws(line);
-        if (!*p || *p == ';') continue; /* blank or comment */
+        if (!*p) continue;
+        /* Capture ; @file:line debug comments */
+        if (strncmp(p, "; @", 3) == 0) {
+            /* Parse file:line — store for next instruction */
+            char *colon = strchr(p + 3, ':');
+            if (colon) {
+                int flen = (int)(colon - (p + 3));
+                if (flen > 63) flen = 63;
+                memcpy(cur_dbg_file, p + 3, flen);
+                cur_dbg_file[flen] = '\0';
+                cur_dbg_line = atoi(colon + 1);
+            }
+            continue;
+        }
+        if (*p == ';') continue; /* other comments */
 
         /* Directives */
         if (strncmp(p, ".endfn", 6) == 0) break;
@@ -900,6 +917,12 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             if (ins->extra_args[i] >= fn->nvregs)
                 fn->nvregs = ins->extra_args[i] + 1;
 
+        /* Attach debug info from last ; @ comment */
+        if (cur_dbg_line > 0) {
+            ins->line = cur_dbg_line;
+            strncpy(ins->src_file, cur_dbg_file, 63);
+        }
+
         fn->ninsns++;
         if (fn->ninsns >= MAX_INSNS) break;
     }
@@ -1294,8 +1317,15 @@ static void emit_function(func_t *fn) {
     }
 
     /* Body */
+    int last_dbg_line = 0;
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
+
+        /* Emit debug line comment when source line changes */
+        if (ins->line > 0 && ins->line != last_dbg_line && ins->src_file[0]) {
+            fprintf(out_asm, "; @%s:%d\n", ins->src_file, ins->line);
+            last_dbg_line = ins->line;
+        }
 
             switch (ins->op) {
         case IR_PREFER:

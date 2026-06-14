@@ -807,7 +807,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    result = compile(parsed_program, nir_path, nif_path, src_dir);
+    result = compile(parsed_program, nir_path, nif_path, src_dir, base);
 
     if (result == 0) {
         fprintf(stderr, "%s: %d declarations -> %s + %s\n",

@@ -24,6 +24,7 @@
 #define MAX_LINE     1024
 #define MAX_OUTPUT   1048576  /* 1MB — full V20 address space */
 #define MAX_FIXUPS   4096
+#define MAX_DBG      8192
 
 /* ---- Error handling ---- */
 
@@ -89,6 +90,18 @@ typedef struct {
 
 static label_t labels[MAX_LABELS];
 static int nlabels = 0;
+
+/* Debug info entries */
+typedef struct {
+    int  addr;          /* linear address */
+    char file[64];      /* source filename */
+    int  line;          /* source line number */
+} dbg_entry_t;
+
+static dbg_entry_t dbg_entries[MAX_DBG];
+static int ndbg_entries = 0;
+static char pending_dbg_file[64];  /* from last ; @ comment */
+static int  pending_dbg_line = 0;
 
 static label_t *find_label(const char *name) {
     for (int i = 0; i < nlabels; i++)
@@ -1503,6 +1516,32 @@ static void process_line(char *line) {
     char label_name[64];
     const char *rest = line;
 
+    /* Capture ; @ debug comments */
+    const char *lp = line;
+    while (*lp == ' ' || *lp == '\t') lp++;
+    if (strncmp(lp, "; @", 3) == 0) {
+        const char *colon = strchr(lp + 3, ':');
+        if (colon) {
+            int flen = (int)(colon - (lp + 3));
+            if (flen > 63) flen = 63;
+            memcpy(pending_dbg_file, lp + 3, flen);
+            pending_dbg_file[flen] = '\0';
+            pending_dbg_line = atoi(colon + 1);
+        }
+        return;
+    }
+    /* On pass 2, record debug entry at the current address
+     * when the next real instruction is encountered */
+    if (pass == 2 && pending_dbg_line > 0 && *lp && *lp != ';') {
+        if (ndbg_entries < MAX_DBG) {
+            dbg_entry_t *de = &dbg_entries[ndbg_entries++];
+            de->addr = org_base + out_pos;
+            strncpy(de->file, pending_dbg_file, 63);
+            de->line = pending_dbg_line;
+        }
+        pending_dbg_line = 0;
+    }
+
     /* Check for label before tokenizing */
     if (scan_label(line, label_name, &rest)) {
         /* Check if it's EQU */
@@ -1603,6 +1642,7 @@ int main(int argc, char **argv) {
     const char *infile = NULL;
     const char *outfile = "a.out";
     const char *mapfile = NULL;
+    const char *dbgfile = NULL;
     bool ihex = false;
 
     for (int i = 1; i < argc; i++) {
@@ -1610,6 +1650,8 @@ int main(int argc, char **argv) {
             outfile = argv[++i];
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             mapfile = argv[++i];
+        } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
+            dbgfile = argv[++i];
         } else if (strcmp(argv[i], "--ihex") == 0) {
             ihex = true;
         } else {
@@ -1661,6 +1703,7 @@ int main(int argc, char **argv) {
     out_pos = 0;
     org_base = 0;
     seg_base = 0;
+    pending_dbg_line = 0;
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
         process_line(lines[i]);
@@ -1773,6 +1816,21 @@ int main(int argc, char **argv) {
         }
         fclose(mf);
         fprintf(stderr, "%s: %d labels\n", mapfile, nlabels);
+    }
+
+    /* Write debug info file */
+    if (dbgfile && ndbg_entries > 0) {
+        FILE *df = fopen(dbgfile, "w");
+        if (!df) { perror(dbgfile); return 1; }
+        fprintf(df, "# nib debug info\n");
+        for (int i = 0; i < ndbg_entries; i++) {
+            fprintf(df, "%05X %s:%d\n",
+                    dbg_entries[i].addr,
+                    dbg_entries[i].file,
+                    dbg_entries[i].line);
+        }
+        fclose(df);
+        fprintf(stderr, "%s: %d entries\n", dbgfile, ndbg_entries);
     }
 
     /* Cleanup */
