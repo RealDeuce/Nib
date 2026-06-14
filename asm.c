@@ -26,6 +26,10 @@
 #define MAX_FIXUPS   4096
 #define MAX_DBG      8192
 
+/* Source-level debug tracking (for error messages and .dbg output) */
+static char pending_dbg_file[64];  /* from last ; @ comment */
+static int  pending_dbg_line = 0;
+
 /* ---- Error handling ---- */
 
 static const char *current_file = "<stdin>";
@@ -37,6 +41,8 @@ static void err(const char *fmt, ...) {
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+    if (pending_dbg_file[0])
+        fprintf(stderr, " [%s:%d]", pending_dbg_file, pending_dbg_line);
     fprintf(stderr, "\n");
 }
 
@@ -46,6 +52,8 @@ static void fatal(const char *fmt, ...) {
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+    if (pending_dbg_file[0])
+        fprintf(stderr, " [%s:%d]", pending_dbg_file, pending_dbg_line);
     fprintf(stderr, "\n");
     exit(1);
 }
@@ -100,8 +108,6 @@ typedef struct {
 
 static dbg_entry_t dbg_entries[MAX_DBG];
 static int ndbg_entries = 0;
-static char pending_dbg_file[64];  /* from last ; @ comment */
-static int  pending_dbg_line = 0;
 
 static label_t *find_label(const char *name) {
     for (int i = 0; i < nlabels; i++)
