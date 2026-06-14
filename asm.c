@@ -41,7 +41,7 @@ static void err(const char *fmt, ...) {
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
-    if (pending_dbg_file[0])
+    if (pending_dbg_file[0] && pending_dbg_line > 0)
         fprintf(stderr, " [%s:%d]", pending_dbg_file, pending_dbg_line);
     fprintf(stderr, "\n");
 }
@@ -52,7 +52,7 @@ static void fatal(const char *fmt, ...) {
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
-    if (pending_dbg_file[0])
+    if (pending_dbg_file[0] && pending_dbg_line > 0)
         fprintf(stderr, " [%s:%d]", pending_dbg_file, pending_dbg_line);
     fprintf(stderr, "\n");
     exit(1);
@@ -1545,7 +1545,7 @@ static void process_line(char *line) {
             strncpy(de->file, pending_dbg_file, 63);
             de->line = pending_dbg_line;
         }
-        pending_dbg_line = 0;
+        /* Don't reset — keep for error messages until next ; @ comment */
     }
 
     /* Check for label before tokenizing */
