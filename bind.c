@@ -542,21 +542,44 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         }
         else if (strcmp(opname, "asm") == 0) {
             ins->op = IR_ASM;
-            /* The rest of the line contains annotation and body */
             p = skip_ws(p);
-            /* Find the { ... } */
+            /* Find the { */
             char *brace = strchr(p, '{');
             if (brace) {
                 /* Annotation is everything before { */
                 int alen = (int)(brace - p);
                 memcpy(ins->asm_ann, p, alen);
                 ins->asm_ann[alen] = '\0';
-                /* Body is between { and } */
+                /* Body: check if } is on same line */
                 char *end = strrchr(brace, '}');
                 if (end) {
                     int blen = (int)(end - brace - 1);
                     memcpy(ins->asm_body, brace + 1, blen);
                     ins->asm_body[blen] = '\0';
+                } else {
+                    /* Multi-line asm: read until } */
+                    ins->asm_body[0] = '\0';
+                    /* Copy remainder of current line after { */
+                    strcat(ins->asm_body, brace + 1);
+                    char asmline[512];
+                    while (fgets(asmline, sizeof(asmline), fp)) {
+                        int alen2 = strlen(asmline);
+                        while (alen2 > 0 && (asmline[alen2-1] == '\n' || asmline[alen2-1] == '\r'))
+                            asmline[--alen2] = '\0';
+                        char *closing = strchr(asmline, '}');
+                        if (closing) {
+                            *closing = '\0';
+                            if (strlen(ins->asm_body) + strlen(asmline) < sizeof(ins->asm_body) - 2) {
+                                strcat(ins->asm_body, "\n");
+                                strcat(ins->asm_body, asmline);
+                            }
+                            break;
+                        }
+                        if (strlen(ins->asm_body) + strlen(asmline) < sizeof(ins->asm_body) - 2) {
+                            strcat(ins->asm_body, "\n");
+                            strcat(ins->asm_body, asmline);
+                        }
+                    }
                 }
             }
         }
@@ -816,7 +839,7 @@ static void emit_function(func_t *fn) {
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
 
-        switch (ins->op) {
+            switch (ins->op) {
         case IR_PREFER:
         case IR_NOP:
             break;
