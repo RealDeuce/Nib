@@ -70,38 +70,27 @@ static void mods_reset(void) {
 static struct {
     char name[64];
     char value[256];
-    bool has_value;
 } defines[MAX_DEFINES];
 static int ndefines = 0;
 
 static void add_define(const char *spec) {
     if (ndefines >= MAX_DEFINES) return;
     const char *eq = strchr(spec, '=');
-    if (eq) {
-        int nlen = (int)(eq - spec);
-        if (nlen > 63) nlen = 63;
-        memcpy(defines[ndefines].name, spec, nlen);
-        defines[ndefines].name[nlen] = '\0';
-        strncpy(defines[ndefines].value, eq + 1, 255);
-        defines[ndefines].has_value = true;
-    } else {
-        strncpy(defines[ndefines].name, spec, 63);
-        defines[ndefines].name[63] = '\0';
-        defines[ndefines].has_value = false;
+    if (!eq) {
+        fprintf(stderr, "error: -D requires NAME=VALUE (got '%s')\n", spec);
+        return;
     }
+    int nlen = (int)(eq - spec);
+    if (nlen > 63) nlen = 63;
+    memcpy(defines[ndefines].name, spec, nlen);
+    defines[ndefines].name[nlen] = '\0';
+    strncpy(defines[ndefines].value, eq + 1, 255);
     ndefines++;
-}
-
-static bool when_defined(const char *name) {
-    for (int i = 0; i < ndefines; i++)
-        if (strcmp(defines[i].name, name) == 0) return true;
-    return false;
 }
 
 static bool when_eq(const char *name, const char *value) {
     for (int i = 0; i < ndefines; i++)
         if (strcmp(defines[i].name, name) == 0 &&
-            defines[i].has_value &&
             strcmp(defines[i].value, value) == 0) return true;
     return false;
 }
@@ -231,11 +220,7 @@ when_body
     ;
 
 when_block
-    : KW_WHEN IDENT '{' when_body '}'
-        { $$ = when_defined($2) ? $4 : NULL; }
-    | KW_WHEN IDENT '{' when_body '}' KW_ELSE '{' when_body '}'
-        { $$ = when_defined($2) ? $4 : $8; }
-    | KW_WHEN IDENT OP_EQ LIT_STRING '{' when_body '}'
+    : KW_WHEN IDENT OP_EQ LIT_STRING '{' when_body '}'
         { $$ = when_eq($2, $4) ? $6 : NULL; }
     | KW_WHEN IDENT OP_EQ LIT_STRING '{' when_body '}' KW_ELSE '{' when_body '}'
         { $$ = when_eq($2, $4) ? $6 : $10; }
@@ -480,11 +465,7 @@ stmt
     ;
 
 when_stmt
-    : KW_WHEN IDENT '{' stmt_list '}'
-        { $$ = when_defined($2) ? $4 : NULL; }
-    | KW_WHEN IDENT '{' stmt_list '}' KW_ELSE '{' stmt_list '}'
-        { $$ = when_defined($2) ? $4 : $8; }
-    | KW_WHEN IDENT OP_EQ LIT_STRING '{' stmt_list '}'
+    : KW_WHEN IDENT OP_EQ LIT_STRING '{' stmt_list '}'
         { $$ = when_eq($2, $4) ? $6 : NULL; }
     | KW_WHEN IDENT OP_EQ LIT_STRING '{' stmt_list '}' KW_ELSE '{' stmt_list '}'
         { $$ = when_eq($2, $4) ? $6 : $10; }

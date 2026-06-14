@@ -1735,17 +1735,16 @@ language construct evaluated by the parser.
 ### Command line
 
 ```sh
-./nib -D DEBUG -D PLATFORM=dreamwriter source.nib
+./nib -D PLATFORM=dreamwriter -D DEBUG=1 source.nib
 ```
 
-`-D NAME` defines a name. `-D NAME=VALUE` defines a name with a value.
+All defines require a value: `-D NAME=VALUE`.
 
 ### Top-level (declarations)
 
 ```
 when PLATFORM == "dreamwriter" {
     const LCD_PORT = 0x60;
-    pub fn lcd_init() { ... }
 } else {
     const LCD_PORT = 0x80;
 }
@@ -1755,7 +1754,7 @@ when PLATFORM == "dreamwriter" {
 
 ```
 fn init() {
-    when DEBUG {
+    when DEBUG == "1" {
         port_out(0x90, 0xFF);   // debug LED
     }
 }
@@ -1765,7 +1764,6 @@ fn init() {
 
 | Form | True when |
 |------|-----------|
-| `when NAME` | NAME is defined (any value) |
 | `when NAME == "value"` | NAME is defined with that value |
 | `when NAME != "value"` | NAME is not defined or has different value |
 
