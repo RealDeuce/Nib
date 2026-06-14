@@ -206,6 +206,8 @@ struct_fields
 struct_field
     : type IDENT ';'
         { $$ = mk_field($2, $1); }
+    | type IDENT KW_AS type ';'
+        { $$ = mk_field_typed_ptr($2, $1, $4); }
     | IDENT ':' type ';'
         { $$ = mk_field($1, $3); }
     | IDENT ':' KW_BITS '(' LIT_INT ')' ';'

@@ -715,7 +715,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 for (field_t *f = C.structs[si].fields; f; f = f->next) {
                     if (f->name && strcmp(f->name, e->u.field.field_name) == 0) {
                         found = true;
-                        if (f->is_bits) {
+                        if (f->as_type) {
+                            /* Typed pointer field — return the as type */
+                            field_type = f->as_type;
+                        } else if (f->is_bits) {
                             field_type = (f->bits <= 8) ?
                                          mk_type(TYPE_U8) : mk_type(TYPE_U16);
                         } else {
@@ -1304,7 +1307,11 @@ static void compile_struct(decl_t *d) {
             fprintf(C.nif, "    %s: bits(%d)\n",
                     f->name ? f->name : "_", f->bits);
         } else {
-            fprintf(C.nif, "    %s: %s\n", f->name, type_str(f->type));
+            if (f->as_type)
+                fprintf(C.nif, "    %s: %s as %s\n", f->name,
+                        type_str(f->type), type_str(f->as_type));
+            else
+                fprintf(C.nif, "    %s: %s\n", f->name, type_str(f->type));
         }
     }
     fprintf(C.nif, ".endstruct\n\n");

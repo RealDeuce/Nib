@@ -1,0 +1,26 @@
+// Test: typed pointer fields in structs
+
+struct node {
+    u16 next as node;
+    u16 data;
+}
+
+struct string_buf {
+    u16 len;
+    u16 data as u8[64];
+}
+
+fn walk_list(head: node) -> u16 {
+    u16 count = 0;
+    node cur = head;
+    while (cur.data != 0) {
+        count := count + 1;
+        // cur.next is typed as node, so we can access .data on it
+        cur := cur.next;
+    }
+    return count;
+}
+
+fn get_string_len(s: string_buf) -> u16 {
+    return s.len;
+}

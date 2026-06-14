@@ -241,6 +241,7 @@ struct field_node {
     type_t *type;       /* NULL for bit fields */
     int     bits;       /* >0 for bit fields */
     bool    is_bits;
+    type_t *as_type;    /* typed pointer annotation, or NULL */
 
     field_t *next;
 };
@@ -417,6 +418,7 @@ param_t    *mk_param(const char *name, type_t *type, bool is_value);
 param_t    *mk_param_pinned(const char *name, type_t *type,
                              int pinned_reg, reg_class_t pin_class);
 field_t    *mk_field(const char *name, type_t *type);
+field_t    *mk_field_typed_ptr(const char *name, type_t *storage, type_t *as_type);
 field_t    *mk_field_bits(const char *name, int nbits);
 reg_list_t *mk_reg_list(reg_id_t id, reg_class_t rc);
 reg_list_t *mk_reg_list_flags_all(void);

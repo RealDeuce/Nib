@@ -345,6 +345,12 @@ field_t *mk_field(const char *name, type_t *type) {
     return f;
 }
 
+field_t *mk_field_typed_ptr(const char *name, type_t *storage, type_t *as_type) {
+    field_t *f = mk_field(name, storage);
+    f->as_type = as_type;
+    return f;
+}
+
 field_t *mk_field_bits(const char *name, int nbits) {
     field_t *f = xalloc(sizeof(field_t));
     f->name = name ? xstrdup(name) : NULL;
