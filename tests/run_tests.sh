@@ -89,7 +89,6 @@ for f in /tmp/t_*.asm; do
     name=$(basename "$f" .asm)
     # Skip tests that can't assemble standalone (extern references)
     case "$name" in
-        t_extern) skip "$name (assemble)" "has unresolved externs"; continue ;;
     esac
     outbin="/tmp/${name}.bin"
     if ./nibasm "$f" -o "$outbin" >/dev/null 2>&1; then

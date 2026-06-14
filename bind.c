@@ -196,6 +196,23 @@ typedef struct {
     int         nfn_preserves;
 } func_t;
 
+/* Extern function declarations */
+typedef struct {
+    char name[64];
+    bool is_far;
+    bool is_interrupt;
+    int  int_vector;
+    bool has_address;
+    int  addr_seg;
+    int  addr_off;
+    struct { int preg; } param_pins[16];
+    int  nparams;
+} extern_fn_t;
+
+#define MAX_EXTERNS 64
+static extern_fn_t externs[MAX_EXTERNS];
+static int nexterns = 0;
+
 /* Global binder state */
 static func_t functions[MAX_FNS];
 static int nfunctions = 0;
@@ -760,7 +777,58 @@ static void parse_nir(const char *path) {
             }
             parse_function(fp, fn, p);
         }
-        /* Skip .global and other top-level directives for now */
+        if (strncmp(p, ".extern ", 8) == 0) {
+            if (nexterns >= MAX_EXTERNS) continue;
+            extern_fn_t *ext = &externs[nexterns++];
+            memset(ext, 0, sizeof(*ext));
+            p += 8;
+            char word[64];
+            p = read_word(p, ext->name, sizeof(ext->name));
+            /* Parse modifiers */
+            while (*p) {
+                p = skip_ws(p);
+                if (*p == ',') p++;
+                p = skip_ws(p);
+                read_word(p, word, sizeof(word));
+                if (!word[0]) break;
+                p += strlen(word);
+                if (strcmp(word, "far") == 0) ext->is_far = true;
+                else if (strncmp(word, "interrupt(", 10) == 0) {
+                    ext->is_interrupt = true;
+                    ext->int_vector = (int)strtol(word + 10, NULL, 0);
+                    p = skip_ws(p); if (*p == ')') p++;
+                }
+                else if (strncmp(word, "addr(", 5) == 0) {
+                    ext->has_address = true;
+                    char *colon = strchr(word + 5, ':');
+                    if (colon) {
+                        ext->addr_seg = (int)strtol(word + 5, NULL, 0);
+                        ext->addr_off = (int)strtol(colon + 1, NULL, 0);
+                    }
+                    p = skip_ws(p); if (*p == ')') p++;
+                }
+            }
+            /* Skip .eparam lines until .endextern */
+            char eline[512];
+            int pi = 0;
+            while (fgets(eline, sizeof(eline), fp)) {
+                char *ep = eline;
+                while (*ep == ' ' || *ep == '\t') ep++;
+                if (strncmp(ep, ".endextern", 10) == 0) break;
+                if (strncmp(ep, ".eparam", 7) == 0) {
+                    /* Parse "in REG" if present */
+                    char *in_ptr = strstr(ep, " in ");
+                    if (in_ptr && pi < 16) {
+                        char reg[16];
+                        read_word(in_ptr + 4, reg, sizeof(reg));
+                        ext->param_pins[pi].preg = parse_preg(reg);
+                    }
+                    pi++;
+                }
+            }
+            ext->nparams = pi;
+        }
+        /* Skip .global and other top-level directives */
     }
 
     fclose(fp);
@@ -1182,15 +1250,34 @@ static void emit_function(func_t *fn) {
             fprintf(out_asm, "    jmp %s\n", ins->name);
             break;
 
-        case IR_CALL:
-            /* Check if this is a chain call (interrupt handler chaining) */
+        case IR_CALL: {
+            /* Check if this is a chain call */
             if (fn->has_chain && strcmp(ins->name, fn->chain_name) == 0) {
                 fprintf(out_asm, "    pushf\n");
                 fprintf(out_asm, "    call far [%s_vec]\n", fn->chain_name);
-            } else {
-                fprintf(out_asm, "    call %s\n", ins->name);
+                break;
             }
+            /* Check if calling an extern */
+            bool found_extern = false;
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    if (externs[e].is_interrupt) {
+                        fprintf(out_asm, "    int 0x%02X\n", externs[e].int_vector);
+                    } else if (externs[e].has_address) {
+                        fprintf(out_asm, "    call far 0x%04X:0x%04X\n",
+                                externs[e].addr_seg, externs[e].addr_off);
+                    } else {
+                        fprintf(out_asm, "    ; ERROR: extern '%s' has no address\n",
+                                ins->name);
+                    }
+                    found_extern = true;
+                    break;
+                }
+            }
+            if (!found_extern)
+                fprintf(out_asm, "    call %s\n", ins->name);
             break;
+        }
 
         case IR_TAILCALL:
             /* Tear down frame */

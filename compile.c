@@ -1328,7 +1328,26 @@ static void compile_extern_fn(decl_t *d) {
     for (param_t *p = d->u.extern_fn.params; p; p = p->next) nparams++;
     register_function(d->u.extern_fn.name, nparams, d->u.extern_fn.return_type);
 
-    /* Extern functions go directly to .nif — no .nir body */
+    /* Emit to .nir so the binder knows how to call it */
+    fprintf(C.nir, "\n.extern %s", d->u.extern_fn.name);
+    if (d->u.extern_fn.mods.is_far) fprintf(C.nir, ", far");
+    if (d->u.extern_fn.mods.is_interrupt)
+        fprintf(C.nir, ", interrupt(0x%02X)", d->u.extern_fn.mods.interrupt_vector);
+    if (d->u.extern_fn.has_address)
+        fprintf(C.nir, ", addr(0x%04X:0x%04X)",
+                d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
+    else
+        fprintf(C.nir, " ; WARNING: no address — unbindable");
+    fprintf(C.nir, "\n");
+    for (param_t *p = d->u.extern_fn.params; p; p = p->next) {
+        fprintf(C.nir, ".eparam %s, \"%s\"", type_str(p->type), p->name);
+        if (p->has_pin)
+            fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+        fprintf(C.nir, "\n");
+    }
+    fprintf(C.nir, ".endextern\n");
+
+    /* Also emit to .nif for cross-module type checking */
     fprintf(C.nif, ".extern %s", d->u.extern_fn.name);
     if (d->u.extern_fn.mods.is_far) fprintf(C.nif, ", far");
     if (d->u.extern_fn.mods.is_interrupt)
