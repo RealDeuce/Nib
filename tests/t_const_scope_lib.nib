@@ -1,0 +1,5 @@
+// Library module with its own string constants
+
+pub fn lib_func() {
+    u8[] msg = "lib module";
+}

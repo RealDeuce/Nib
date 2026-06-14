@@ -1,0 +1,9 @@
+// Test: constant pool labels must not collide across modules
+// Each module's _C0, _C1 etc. need module prefixes.
+
+use "t_const_scope_lib.nif";
+
+fn main() {
+    u8[] msg = "main module";
+    lib_func();
+}

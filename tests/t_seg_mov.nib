@@ -1,0 +1,6 @@
+// Test: segment-to-segment move must route through AX
+// mov ES, CS is invalid on x86; needs mov AX, CS; mov ES, AX
+
+fn copy_cs_to_es() {
+    seg ES = CS;
+}

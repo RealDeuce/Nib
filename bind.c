@@ -238,6 +238,9 @@ typedef struct {
 static extern_fn_t externs[MAX_EXTERNS];
 static int nexterns = 0;
 
+/* Forward declarations */
+static const char *fn_asm_name(func_t *fn);
+
 
 /* Data blocks (initialized globals with placement) */
 #define MAX_DATA_BLOCKS 64
@@ -482,12 +485,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             if (fn->nconsts < MAX_FN_CONSTS) {
                 fn_const_t *c = &fn->consts[fn->nconsts++];
                 memset(c, 0, sizeof(*c));
-                p = read_word(p, c->label, sizeof(c->label));
+                char raw_label[32];
+                p = read_word(p, raw_label, sizeof(raw_label));
+                /* Prefix with function's asm name to avoid cross-module collisions */
+                snprintf(c->label, sizeof(c->label), "%s_%s",
+                         fn_asm_name(fn), raw_label);
                 /* skip comma */
                 p = skip_ws(p);
                 if (*p == ',') p++;
                 p = skip_ws(p);
-                /* Copy label locally to avoid restrict overlap in snprintf */
                 char lbl[32];
                 memcpy(lbl, c->label, sizeof(lbl));
                 /* Parse the data */
@@ -1560,6 +1566,16 @@ static const char *fn_asm_name(func_t *fn) {
     return buf;
 }
 
+/* Look up a constant pool label in a function */
+static const char *resolve_const_label(func_t *fn, const char *name) {
+    if (name[0] == '_' && name[1] == 'C') {
+        static char buf[64];
+        snprintf(buf, sizeof(buf), "%s_%s", fn_asm_name(fn), name);
+        return buf;
+    }
+    return NULL;
+}
+
 /* Look up a function's assembly name by its Nib name */
 static const char *resolve_fn_name(const char *name) {
     for (int i = 0; i < nfunctions; i++)
@@ -1588,6 +1604,10 @@ static void emit_mov(func_t *fn, int dst, int src) {
     if (strcmp(d, s) == 0) return; /* skip self-moves */
     if (is_spilled(fn, dst) && is_spilled(fn, src)) {
         /* mem-to-mem: go through AX */
+        fprintf(out_asm, "    mov AX, %s\n", s);
+        fprintf(out_asm, "    mov %s, AX\n", d);
+    } else if (fn->vregs[dst].is_seg && fn->vregs[src].is_seg) {
+        /* seg-to-seg: go through AX */
         fprintf(out_asm, "    mov AX, %s\n", s);
         fprintf(out_asm, "    mov %s, AX\n", d);
     } else {
@@ -1681,7 +1701,8 @@ static void emit_function(func_t *fn) {
             } else if (ins->name[0]) {
                 /* Label reference — load address of constant or function */
                 const char *d = vreg_asm(fn, ins->dst);
-                const char *label = resolve_fn_name(ins->name);
+                const char *clbl = resolve_const_label(fn, ins->name);
+                const char *label = clbl ? clbl : resolve_fn_name(ins->name);
                 /* Segment registers can't take label refs either */
                 if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                     fn->vregs[ins->dst].is_seg) {

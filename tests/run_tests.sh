@@ -57,7 +57,7 @@ for f in tests/t_*.nir; do
     name=$(basename "$f" .nir)
     # Skip multi-module tests (they need special handling)
     case "$name" in
-        t_modules_app) continue ;;
+        t_modules_app|t_const_scope) continue ;;
     esac
     outasm="/tmp/${name}.asm"
     if ./nibbind "$f" -o "$outasm" >/dev/null 2>&1; then
@@ -80,6 +80,23 @@ if [ -f tests/t_modules_lib.nir ] && [ -f tests/t_modules_app.nir ]; then
 else
     skip "t_modules (bind)" "nir files not generated"
 fi
+
+# Multi-module constant pool scoping
+if [ -f tests/t_const_scope_lib.nir ] && [ -f tests/t_const_scope.nir ]; then
+    outasm="/tmp/t_const_scope_multi.asm"
+    if ./nibbind tests/t_const_scope_lib.nir tests/t_const_scope.nir -o "$outasm" >/dev/null 2>&1; then
+        outbin="/tmp/t_const_scope_multi.bin"
+        if ./nibasm "$outasm" -o "$outbin" >/dev/null 2>&1; then
+            pass "t_const_scope (multi-module assemble)"
+        else
+            fail "t_const_scope (multi-module assemble)" "$(./nibasm "$outasm" -o "$outbin" 2>&1 | head -1)"
+        fi
+    else
+        fail "t_const_scope (multi-module bind)" "$(./nibbind tests/t_const_scope_lib.nir tests/t_const_scope.nir -o "$outasm" 2>&1 | tail -1)"
+    fi
+else
+    skip "t_const_scope" "nir files not generated"
+fi
 echo ""
 
 # Phase 5: Assemble tests — bound .asm files should assemble
@@ -87,8 +104,9 @@ echo "--- Assemble tests ---"
 for f in /tmp/t_*.asm; do
     [ -f "$f" ] || continue
     name=$(basename "$f" .asm)
-    # Skip tests that can't assemble standalone (extern references)
+    # Skip tests that can't assemble standalone
     case "$name" in
+        t_const_scope|t_const_scope_multi) continue ;;
     esac
     outbin="/tmp/${name}.bin"
     if ./nibasm "$f" -o "$outbin" >/dev/null 2>&1; then
