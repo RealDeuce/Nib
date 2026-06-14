@@ -461,12 +461,12 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(r, mk_type_array(TYPE_ARRAY_U8, slen));
     }
     case EXPR_IDENT: {
-        /* Check for named constant first */
+        /* Check for named constant first — treat like a literal */
         int const_val;
         if (find_constant(e->u.ident, &const_val) >= 0) {
             int r = alloc_vreg();
             fprintf(C.nir, "    mov %%%d, %d\n", r, const_val);
-            return TV(r, mk_type(TYPE_U16));
+            return TV(r, NULL);  /* NULL type = auto-promote like literals */
         }
         symbol_t *sym = sym_lookup(e->u.ident);
         if (!sym) {
