@@ -1625,6 +1625,7 @@ int main(int argc, char **argv) {
     out_pos = 0;
     org_base = 0;
     errors = 0;
+    memset(output, 0xFF, sizeof(output));
     memset(written, 0, sizeof(written));
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
