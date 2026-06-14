@@ -1,0 +1,21 @@
+// Test: API boundary functions with pinned params/returns and clobbers
+
+// API function with explicit register assignments
+fn api_read(port: u16 in DX) -> u8 in AL clobbers(FLAGS) {
+    u8 AL = port_in(port);
+    return AL;
+}
+
+// API function with multiple pinned params
+fn api_memcopy(dst: u16 in DI, src: u16 in SI, len: u16 in CX) clobbers(SI, DI, CX, FLAGS) {
+    seg ES = 0xB800;
+    asm clobbers(SI, DI, CX, FLAGS) {
+        rep movsb
+    }
+}
+
+// Caller of API functions
+fn main() {
+    u8 ch = api_read(0x60);
+    api_memcopy(0, 80, 400);
+}

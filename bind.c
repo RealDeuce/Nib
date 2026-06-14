@@ -178,9 +178,11 @@ typedef struct {
     int         nparams;
     char        param_names[16][64];
     int         param_vregs[16];
+    struct { int preg; } param_pins[16]; /* pinned register for params */
 
     bool        has_return;
     char        return_type[32];
+    int         ret_pin;            /* PREG_NONE or pinned return register */
 
     bblock_t    blocks[MAX_BLOCKS];
     int         nblocks;
@@ -355,16 +357,28 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             skip_comma(&p);
             /* Parse quoted name */
             p = skip_ws(p);
+            int pidx = fn->nparams;
             if (*p == '"') {
                 p++;
                 char *e = strchr(p, '"');
                 int nlen = e ? (int)(e - p) : 0;
-                if (fn->nparams < 16) {
-                    memcpy(fn->param_names[fn->nparams], p, nlen);
-                    fn->param_names[fn->nparams][nlen] = '\0';
-                    fn->param_vregs[fn->nparams] = v;
+                if (pidx < 16) {
+                    memcpy(fn->param_names[pidx], p, nlen);
+                    fn->param_names[pidx][nlen] = '\0';
+                    fn->param_vregs[pidx] = v;
                     fn->nparams++;
                 }
+                if (e) p = e + 1;
+            }
+            /* Check for ", in REG" */
+            char *in_ptr = strstr(p, " in ");
+            if (in_ptr && pidx < 16) {
+                char reg[16];
+                read_word(in_ptr + 4, reg, sizeof(reg));
+                fn->param_pins[pidx].preg = parse_preg(reg);
+                /* Set as hard preference on the vreg */
+                if (v < MAX_VREGS && fn->param_pins[pidx].preg != PREG_NONE)
+                    fn->vregs[v].prefer = fn->param_pins[pidx].preg;
             }
             if (v >= fn->nvregs) fn->nvregs = v + 1;
             /* Set type info */
@@ -378,8 +392,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (strncmp(p, ".returns", 8) == 0) {
             p += 8;
             p = skip_ws(p);
-            read_word(p, fn->return_type, sizeof(fn->return_type));
+            p = read_word(p, fn->return_type, sizeof(fn->return_type));
             fn->has_return = true;
+            /* Check for ", in REG" */
+            char *in_ptr = strstr(p, "in ");
+            if (in_ptr) {
+                char reg[16];
+                read_word(in_ptr + 3, reg, sizeof(reg));
+                fn->ret_pin = parse_preg(reg);
+            }
             continue;
         }
 
@@ -901,6 +922,9 @@ static void parse_nir(const char *path) {
             if (nfunctions >= MAX_FNS) break;
             func_t *fn = &functions[nfunctions++];
             memset(fn, 0, sizeof(*fn));
+            fn->ret_pin = PREG_NONE;
+            for (int i = 0; i < 16; i++)
+                fn->param_pins[i].preg = PREG_NONE;
             for (int i = 0; i < MAX_VREGS; i++) {
                 fn->vregs[i].prefer = PREG_NONE;
                 fn->vregs[i].assigned = PREG_NONE;
@@ -1895,9 +1919,12 @@ static void propagate_preferences(void) {
 
         /* Assign return register */
         if (fn->has_return) {
-            /* Prefer AX for returns */
-            bool is_byte = (strcmp(fn->return_type, "u8") == 0);
-            fa->return_reg = is_byte ? PREG_AL : PREG_AX;
+            if (fn->ret_pin != PREG_NONE) {
+                fa->return_reg = fn->ret_pin;
+            } else {
+                bool is_byte = (strcmp(fn->return_type, "u8") == 0);
+                fa->return_reg = is_byte ? PREG_AL : PREG_AX;
+            }
         }
 
         fa->resolved = true;

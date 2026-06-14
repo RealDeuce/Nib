@@ -257,6 +257,9 @@ fn_preserves
     : /* empty */
     | KW_PRESERVES '(' reg_flag_list ')'
         { current_mods.has_preserves = true; current_mods.preserves = $3; }
+    | KW_CLOBBERS '(' reg_flag_list ')'
+        { current_mods.has_preserves = true; current_mods.is_clobbers = true;
+          current_mods.preserves = $3; }
     ;
 
 fn_modifiers
@@ -283,6 +286,11 @@ interrupt_clause
 return_clause
     : /* empty */               { $$ = NULL; }
     | OP_ARROW type             { $$ = $2; }
+    | OP_ARROW type KW_IN reg_name
+        { $$ = $2;
+          current_mods.has_ret_pin = true;
+          current_mods.ret_pinned_reg = $4.reg;
+          current_mods.ret_pin_class = $4.rclass; }
     ;
 
 /* ==== Extern declarations ==== */
@@ -345,6 +353,10 @@ param_list
 param
     : IDENT ':' type                { $$ = mk_param($1, $3, false); }
     | KW_VALUE IDENT ':' type       { $$ = mk_param($2, $4, true); }
+    | IDENT ':' type KW_IN reg_name
+        { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
+    | KW_VALUE IDENT ':' type KW_IN reg_name
+        { $$ = mk_param_pinned($2, $4, $6.reg, $6.rclass); $$->is_value = true; }
     ;
 
 extern_param_list

@@ -1325,6 +1325,55 @@ static void emit_stmt(stmt_t *s) {
  * Top-level declaration compilation
  * ================================================================ */
 
+/* Emit .preserves directive, inverting clobbers if needed */
+static void emit_preserves(FILE *f, fn_modifiers_t *mods) {
+    if (!mods->has_preserves) return;
+
+    if (mods->is_clobbers) {
+        static const struct { const char *name; int id; } all_regs[] = {
+            {"AX",0}, {"CX",1}, {"DX",2}, {"BX",3},
+            {"BP",5}, {"SI",6}, {"DI",7},
+        };
+        bool clobbered[8] = {0};
+        bool clobber_flags = false;
+        for (reg_list_t *r = mods->preserves; r; r = r->next) {
+            if (r->is_flags_all) clobber_flags = true;
+            else if (r->rclass == REGCLASS_WORD) clobbered[r->id] = true;
+            else if (r->rclass == REGCLASS_BYTE) {
+                static const int parent[] = {0,1,2,3,0,1,2,3};
+                clobbered[parent[r->id]] = true;
+            }
+        }
+        if (mods->has_ret_pin)
+            clobbered[mods->ret_pinned_reg] = true;
+
+        fprintf(f, ".preserves ");
+        bool first = true;
+        for (int i = 0; i < 7; i++) {
+            if (!clobbered[all_regs[i].id]) {
+                if (!first) fprintf(f, ", ");
+                fprintf(f, "%s", all_regs[i].name);
+                first = false;
+            }
+        }
+        if (!clobber_flags) {
+            if (!first) fprintf(f, ", ");
+            fprintf(f, "FLAGS");
+        }
+        fprintf(f, "\n");
+    } else {
+        fprintf(f, ".preserves ");
+        for (reg_list_t *r = mods->preserves; r; r = r->next) {
+            if (r->is_flags_all)
+                fprintf(f, "FLAGS");
+            else
+                fprintf(f, "%s", reg_name_str(r->id, r->rclass));
+            if (r->next) fprintf(f, ", ");
+        }
+        fprintf(f, "\n");
+    }
+}
+
 static void compile_fn(decl_t *d) {
     C.next_vreg = 0;
     /* Don't reset next_label — keep it global so labels are unique across functions */
@@ -1354,17 +1403,7 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nir, ", at(0x%04X:0x%04X)", d->u.fn.mods.at_seg, d->u.fn.mods.at_off);
     fprintf(C.nir, "\n");
 
-    if (d->u.fn.mods.has_preserves) {
-        fprintf(C.nir, ".preserves ");
-        for (reg_list_t *r = d->u.fn.mods.preserves; r; r = r->next) {
-            if (r->is_flags_all)
-                fprintf(C.nir, "FLAGS");
-            else
-                fprintf(C.nir, "%s", reg_name_str(r->id, r->rclass));
-            if (r->next) fprintf(C.nir, ", ");
-        }
-        fprintf(C.nir, "\n");
-    }
+    emit_preserves(C.nir, &d->u.fn.mods);
 
     /* Emit .nif function header (only for pub declarations) */
     bool nif = d->is_pub;
@@ -1376,17 +1415,7 @@ static void compile_fn(decl_t *d) {
         if (d->u.fn.mods.is_reentrant) fprintf(C.nif, ", reentrant");
         fprintf(C.nif, "\n");
 
-        if (d->u.fn.mods.has_preserves) {
-            fprintf(C.nif, ".preserves ");
-            for (reg_list_t *r = d->u.fn.mods.preserves; r; r = r->next) {
-                if (r->is_flags_all)
-                    fprintf(C.nif, "FLAGS");
-                else
-                    fprintf(C.nif, "%s", reg_name_str(r->id, r->rclass));
-                if (r->next) fprintf(C.nif, ", ");
-            }
-            fprintf(C.nif, "\n");
-        }
+        emit_preserves(C.nif, &d->u.fn.mods);
     }
 
     /* Create function scope and add parameters */
@@ -1407,6 +1436,8 @@ static void compile_fn(decl_t *d) {
         const char *ir_type = (is_ref && !p->is_value) ? "u16" : type_str(p->type);
         fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, ir_type, p->name);
         if (p->is_value) fprintf(C.nir, ", value");
+        if (p->has_pin)
+            fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
         if (is_ref && !p->is_value)
             fprintf(C.nir, " ; ref %s", type_str(p->type));
         fprintf(C.nir, "\n");
@@ -1415,13 +1446,27 @@ static void compile_fn(decl_t *d) {
         if (nif) {
             fprintf(C.nif, ".param %%%d, %s, \"%s\"", sym->vreg, type_str(p->type), p->name);
             if (p->is_value) fprintf(C.nif, ", value");
+            if (p->has_pin)
+                fprintf(C.nif, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
             fprintf(C.nif, "\n");
         }
     }
 
     if (d->u.fn.return_type) {
-        fprintf(C.nir, ".returns %s\n", type_str(d->u.fn.return_type));
-        if (nif) fprintf(C.nif, ".returns %s\n", type_str(d->u.fn.return_type));
+        fprintf(C.nir, ".returns %s", type_str(d->u.fn.return_type));
+        if (d->u.fn.mods.has_ret_pin)
+            fprintf(C.nir, ", in %s",
+                    reg_name_str(d->u.fn.mods.ret_pinned_reg,
+                                 d->u.fn.mods.ret_pin_class));
+        fprintf(C.nir, "\n");
+        if (nif) {
+            fprintf(C.nif, ".returns %s", type_str(d->u.fn.return_type));
+            if (d->u.fn.mods.has_ret_pin)
+                fprintf(C.nif, ", in %s",
+                        reg_name_str(d->u.fn.mods.ret_pinned_reg,
+                                     d->u.fn.mods.ret_pin_class));
+            fprintf(C.nif, "\n");
+        }
     }
 
     /* Add chain variable if present */

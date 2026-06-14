@@ -313,7 +313,11 @@ typedef struct {
     bool has_chain;
     char *chain_name;
     bool has_preserves;
+    bool is_clobbers;       /* true if clobbers() used instead of preserves() */
     reg_list_t *preserves;
+    bool has_ret_pin;
+    int  ret_pinned_reg;
+    reg_class_t ret_pin_class;
     bool has_at;
     int  at_seg;
     int  at_off;

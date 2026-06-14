@@ -227,6 +227,43 @@ fn read_point(p: struct Point) -> u16 {
 }
 ```
 
+### Parameter and return register pins
+
+For API boundary functions, parameters and return values can be pinned
+to specific registers with `in REG`. This locks the ABI so the binder
+treats the assignments as hard constraints rather than preferences.
+
+```
+fn api_read(port: u16 in DX) -> u8 in AL {
+    u8 AL = port_in(port);
+    return AL;
+}
+```
+
+### clobbers()
+
+`clobbers()` is the inverse of `preserves()` — it lists registers the
+function is allowed to trash, and everything else is callee-saved. The
+return register is implicitly clobbered. Intended for API boundary
+functions that preserve almost everything.
+
+```
+fn api_read(port: u16 in DX) -> u8 in AL clobbers(FLAGS) {
+    // preserves everything except AL (return reg) and FLAGS
+    ...
+}
+
+fn api_memcopy(dst: u16 in DI, src: u16 in SI, len: u16 in CX)
+    clobbers(SI, DI, CX, FLAGS) {
+    // preserves AX, BX, DX, BP
+    ...
+}
+```
+
+`clobbers()` and `preserves()` are mutually exclusive on a declaration.
+The compiler inverts `clobbers()` to `preserves` in the IR — the binder
+only ever sees `preserves`.
+
 ### Parameter passing
 
 There are no explicit parameter passing keywords. The binder determines

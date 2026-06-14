@@ -25,6 +25,7 @@ allocator) is not yet implemented.
   - Scope tracking with shadowing
   - `const` declarations, array initializers, `at()` placement, `&fn` addresses
   - `pub` visibility control — only `pub` declarations exported to `.nif`
+  - Parameter/return register pins (`in REG`) and `clobbers()` for API boundaries
   - Identifiers allow uppercase (`[a-zA-Z_][a-zA-Z0-9_]*`); struct type prefix required
 - Two-pass V20 cross-assembler (`nibasm`)
   - Full 8086/80186 instruction set
@@ -123,6 +124,12 @@ fn read(p: struct Point) -> u16 { ... }
 // Visibility — only pub declarations exported to .nif
 pub fn lcd_clear(fill: u8) { ... }  // visible to importers
 fn helper() { ... }                  // module-private
+
+// API boundaries with pinned registers and clobbers
+fn api_read(port: u16 in DX) -> u8 in AL clobbers(FLAGS) {
+    u8 AL = port_in(port);
+    return AL;
+}
 
 // Cross-module imports
 use "lcd.nif";
