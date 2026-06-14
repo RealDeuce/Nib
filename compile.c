@@ -552,11 +552,14 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             cerr(e->line, "undefined variable '%s'", e->u.ident);
             return TV(alloc_vreg(), mk_type(TYPE_U16));
         }
-        /* For globals with at() placement, load the address into a fresh vreg
-         * each time so the binder can allocate it properly */
-        if (sym->is_global && sym->has_at) {
+        /* Globals don't have function-scoped vregs — load address fresh */
+        if (sym->is_global) {
             int r = alloc_vreg();
-            fprintf(C.nir, "    mov %%%d, 0x%04X\n", r, sym->at_off);
+            if (sym->has_at) {
+                fprintf(C.nir, "    mov %%%d, 0x%04X\n", r, sym->at_off);
+            } else {
+                fprintf(C.nir, "    mov %%%d, %s\n", r, sym->name);
+            }
             return TV(r, sym->type);
         }
         return TV(sym->vreg, sym->type);
