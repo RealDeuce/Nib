@@ -1646,14 +1646,39 @@ static void emit_function(func_t *fn) {
             break;
         }
 
-        case IR_TAILCALL:
+        case IR_TAILCALL: {
             /* Tear down frame */
             if (fn->needs_frame) {
                 fprintf(out_asm, "    mov sp, bp\n");
                 fprintf(out_asm, "    pop bp\n");
             }
-            fprintf(out_asm, "    jmp %s\n", ins->name);
+            /* Check if target is far */
+            bool tc_far = false;
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, ins->name) == 0) {
+                    tc_far = functions[fi2].is_far;
+                    break;
+                }
+            }
+            if (!tc_far) {
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, ins->name) == 0) {
+                        tc_far = externs[e].is_far;
+                        if (externs[e].has_address) {
+                            fprintf(out_asm, "    jmp far 0x%04X:0x%04X\n",
+                                    externs[e].addr_seg, externs[e].addr_off);
+                            tc_far = false; /* already emitted */
+                        }
+                        break;
+                    }
+                }
+            }
+            if (tc_far)
+                fprintf(out_asm, "    jmp far %s\n", ins->name);
+            else
+                fprintf(out_asm, "    jmp %s\n", ins->name);
             break;
+        }
 
         case IR_RETVAL:
             /* Return value is in the assigned register — if it's not
