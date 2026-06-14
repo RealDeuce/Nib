@@ -158,6 +158,15 @@ typedef struct {
     uint64_t live_out;      /* bitset of live vregs at block exit */
 } bblock_t;
 
+/* Per-function constant pool entry */
+#define MAX_FN_CONSTS 64
+typedef struct {
+    char label[32];
+    char data[256];
+    bool is_far_ref;
+    char ref_name[64];
+} fn_const_t;
+
 /* Function */
 typedef struct {
     char        name[64];
@@ -203,6 +212,10 @@ typedef struct {
     /* Callee-saved registers */
     int         fn_preserves[NUM_PREGS]; /* list of PREG_* to save/restore */
     int         nfn_preserves;
+
+    /* Per-function constant pool */
+    fn_const_t consts[MAX_FN_CONSTS];
+    int nconsts;
 } func_t;
 
 /* Extern function declarations */
@@ -222,17 +235,6 @@ typedef struct {
 static extern_fn_t externs[MAX_EXTERNS];
 static int nexterns = 0;
 
-/* Constant pool */
-#define MAX_CONSTS 256
-typedef struct {
-    char label[32];
-    char data[256];     /* raw text to emit as db/dw */
-    bool is_far_ref;    /* true if this is a far.ref to a function */
-    char ref_name[64];  /* function name for far.ref resolution */
-} const_entry_t;
-
-static const_entry_t consts[MAX_CONSTS];
-static int nconsts = 0;
 
 /* Data blocks (initialized globals with placement) */
 #define MAX_DATA_BLOCKS 64
@@ -439,8 +441,9 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (strncmp(p, ".const ", 7) == 0) {
             /* .const _C0, "Hello" or .const _C1, far 0xF000:0x0100 */
             p += 7;
-            if (nconsts < MAX_CONSTS) {
-                const_entry_t *c = &consts[nconsts++];
+            if (fn->nconsts < MAX_FN_CONSTS) {
+                fn_const_t *c = &fn->consts[fn->nconsts++];
+                memset(c, 0, sizeof(*c));
                 p = read_word(p, c->label, sizeof(c->label));
                 /* skip comma */
                 p = skip_ws(p);
@@ -1980,6 +1983,17 @@ static void emit_function(func_t *fn) {
         fprintf(out_asm, "%s_vec dw 0, 0 ; saved vector for chaining\n",
                 fn->chain_name);
     }
+
+    /* Emit per-function constant pool (strings, far refs) */
+    for (int i = 0; i < fn->nconsts; i++) {
+        fn_const_t *c = &fn->consts[i];
+        if (c->is_far_ref) {
+            const char *resolved = resolve_fn_name(c->ref_name);
+            fprintf(out_asm, "%s dw %s, SEG %s\n", c->label, resolved, resolved);
+        } else {
+            fprintf(out_asm, "%s\n", c->data);
+        }
+    }
 }
 
 /* ================================================================
@@ -2388,21 +2402,7 @@ int main(int argc, char **argv) {
         emit_function(fn);
     }
 
-    /* Emit constant pool, non-placed data blocks, and globals
-     * BEFORE any at()-placed items so they don't end up after
-     * a high-address org directive */
-    if (nconsts > 0) {
-        fprintf(out_asm, "\n; === constant pool ===\n");
-        for (int i = 0; i < nconsts; i++) {
-            if (consts[i].is_far_ref) {
-                const char *resolved = resolve_fn_name(consts[i].ref_name);
-                fprintf(out_asm, "%s dw %s, SEG %s\n",
-                        consts[i].label, resolved, resolved);
-            } else {
-                fprintf(out_asm, "%s\n", consts[i].data);
-            }
-        }
-    }
+    /* Constant pool is now per-function (emitted in emit_function) */
 
     for (int i = 0; i < ndata_blocks; i++) {
         data_block_t *db = &data_blocks[i];
