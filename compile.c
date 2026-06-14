@@ -431,7 +431,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     if (!e) return TV(-1, NULL);
 
     switch (e->kind) {
-    case EXPR_LIT_INT: {
+    case EXPR_LIT_INT:
+    case_lit_int: {
         int r = alloc_vreg();
         /* Integer literals are untyped — they promote to whatever context needs.
            We use NULL type to signal "literal, promote me". */
@@ -461,12 +462,14 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(r, mk_type_array(TYPE_ARRAY_U8, slen));
     }
     case EXPR_IDENT: {
-        /* Check for named constant first — treat like a literal */
+        /* Check for named constant — rewrite to literal so all
+         * downstream consumers (immediate folding, port I/O, etc.)
+         * see it as an integer literal, not a variable */
         int const_val;
         if (find_constant(e->u.ident, &const_val) >= 0) {
-            int r = alloc_vreg();
-            fprintf(C.nir, "    mov %%%d, %d\n", r, const_val);
-            return TV(r, NULL);  /* NULL type = auto-promote like literals */
+            e->kind = EXPR_LIT_INT;
+            e->u.lit_int = const_val;
+            goto case_lit_int;  /* fall through to literal handler */
         }
         symbol_t *sym = sym_lookup(e->u.ident);
         if (!sym) {
@@ -506,6 +509,15 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_BINOP: {
         op_kind_t op = e->u.binop.op;
+
+        /* Resolve constants to literals before the immediate check */
+        if (e->u.binop.right->kind == EXPR_IDENT) {
+            int cv;
+            if (find_constant(e->u.binop.right->u.ident, &cv) >= 0) {
+                e->u.binop.right->kind = EXPR_LIT_INT;
+                e->u.binop.right->u.lit_int = cv;
+            }
+        }
 
         /* Check if right operand is an integer literal — emit as immediate */
         bool right_is_imm = (e->u.binop.right->kind == EXPR_LIT_INT);
