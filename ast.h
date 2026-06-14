@@ -87,6 +87,7 @@ typedef enum {
     EXPR_INDEX,
     EXPR_CHECKED_INDEX,
     EXPR_FIELD,
+    EXPR_RAW_FIELD,
     EXPR_MEM,
     EXPR_CAST,
     EXPR_PAREN
@@ -380,6 +381,7 @@ expr_t     *mk_expr_unop(op_kind_t op, expr_t *e, int line);
 expr_t     *mk_expr_call(expr_t *func, expr_t *args, int line);
 expr_t     *mk_expr_index(expr_t *arr, expr_t *idx, bool checked, int line);
 expr_t     *mk_expr_field(expr_t *obj, const char *field, int line);
+expr_t     *mk_expr_raw_field(expr_t *obj, const char *field, int line);
 expr_t     *mk_expr_mem(reg_id_t seg, reg_id_t base, reg_id_t idx,
                          int disp, bool has_disp, int line);
 expr_t     *mk_expr_mem_abs(int seg, int off, int line);

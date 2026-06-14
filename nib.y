@@ -143,7 +143,7 @@ static void mods_reset(void) {
 %left '+' '-'
 %left '*' '/' '%' OP_SMUL OP_SDIV OP_SMOD
 %right UNARY
-%left '.' '[' '('
+%left '.' '`' '[' '('
 
 /* ---- Dangling else ---- */
 %nonassoc LOWER_THAN_ELSE
@@ -543,6 +543,8 @@ postfix_expr
         { $$ = mk_expr_cast($1, $4, yyline); }
     | postfix_expr '.' IDENT
         { $$ = mk_expr_field($1, $3, yyline); }
+    | postfix_expr '`' IDENT
+        { $$ = mk_expr_raw_field($1, $3, yyline); }
     | postfix_expr '[' expr ']'
         { $$ = mk_expr_index($1, $3, false, yyline); }
     | postfix_expr '!' '[' expr ']'

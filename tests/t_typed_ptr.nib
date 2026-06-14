@@ -1,4 +1,4 @@
-// Test: typed pointer fields in structs
+// Test: typed pointer fields and raw access
 
 struct node {
     u16 next as node;
@@ -13,14 +13,27 @@ struct string_buf {
 fn walk_list(head: node) -> u16 {
     u16 count = 0;
     node cur = head;
-    while (cur.data != 0) {
+    while (cur`next != 0) {
+        // cur`next — raw u16 for null check
         count := count + 1;
-        // cur.next is typed as node, so we can access .data on it
+        // cur.next — typed as node for chained access
         cur := cur.next;
     }
     return count;
 }
 
-fn get_string_len(s: string_buf) -> u16 {
+fn get_raw_ptr(n: node) -> u16 {
+    // Backtick gives the raw u16 address
+    u16 addr = n`next;
+    return addr;
+}
+
+fn get_typed(n: node) -> node {
+    // Dot gives the typed node reference
+    return n.next;
+}
+
+fn string_test(s: string_buf) -> u16 {
+    u16 raw_ptr = s`data;    // raw u16 address of the char array
     return s.len;
 }

@@ -769,6 +769,39 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* Type inferred from declaration context — caller must check */
         return TV(dst, mk_type(TYPE_U8));
     }
+    case EXPR_RAW_FIELD: {
+        /* Same as EXPR_FIELD but returns storage type, ignoring as annotation */
+        typed_vreg_t obj = emit_expr_typed(e->u.field.object);
+        type_t *field_type = NULL;
+        if (obj.type && obj.type->kind == TYPE_STRUCT && obj.type->struct_name) {
+            int si = find_struct(obj.type->struct_name);
+            if (si >= 0) {
+                bool found = false;
+                for (field_t *f = C.structs[si].fields; f; f = f->next) {
+                    if (f->name && strcmp(f->name, e->u.field.field_name) == 0) {
+                        found = true;
+                        /* Raw access: always return the storage type, not as_type */
+                        if (f->is_bits)
+                            field_type = (f->bits <= 8) ? mk_type(TYPE_U8) : mk_type(TYPE_U16);
+                        else
+                            field_type = f->type;
+                        break;
+                    }
+                }
+                if (!found)
+                    cerr(e->line, "struct '%s' has no field '%s'",
+                         obj.type->struct_name, e->u.field.field_name);
+            } else {
+                cerr(e->line, "unknown struct type '%s'", obj.type->struct_name);
+            }
+        } else if (obj.type) {
+            cerr(e->line, "raw field access on non-struct type '%s'", type_str(obj.type));
+        }
+        if (!field_type) field_type = mk_type(TYPE_U16);
+        int dst = alloc_vreg();
+        fprintf(C.nir, "    field %%%d, %%%d, %s\n", dst, obj.vreg, e->u.field.field_name);
+        return TV(dst, field_type);
+    }
     case EXPR_CAST: {
         /* as — zero-instruction type reinterpretation */
         typed_vreg_t val = emit_expr_typed(e->u.cast.operand);

@@ -116,6 +116,13 @@ expr_t *mk_expr_field(expr_t *obj, const char *field, int line) {
     return e;
 }
 
+expr_t *mk_expr_raw_field(expr_t *obj, const char *field, int line) {
+    expr_t *e = mk_expr(EXPR_RAW_FIELD, line);
+    e->u.field.object = obj;
+    e->u.field.field_name = xstrdup(field);
+    return e;
+}
+
 expr_t *mk_expr_mem(reg_id_t seg, reg_id_t base, reg_id_t idx,
                      int disp, bool has_disp, int line) {
     expr_t *e = mk_expr(EXPR_MEM, line);
