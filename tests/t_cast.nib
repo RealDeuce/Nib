@@ -1,0 +1,29 @@
+// Test: as cast — zero-instruction type reinterpretation
+// Syntax: expr as (type)
+
+struct header {
+    u8 type;
+    u16 length;
+    u8[8] name;
+}
+
+fn alloc_header(size: u16) -> u16 {
+    return 0x1000;
+}
+
+fn test_struct_cast() {
+    header hdr = alloc_header(11) as (header);
+    u16 len = hdr.length;
+}
+
+fn test_array_cast(size: u16) -> u16 {
+    u16 ptr = alloc_header(size);
+    u8[80] buf = ptr as (u8[80]);
+    u8 first = buf[0];
+    return ptr;
+}
+
+fn test_scalar_cast() {
+    u16 addr = 0x1234;
+    u8 byte_val = addr as (u8);
+}

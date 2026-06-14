@@ -140,6 +140,13 @@ expr_t *mk_expr_mem_abs(int seg, int off, int line) {
     return e;
 }
 
+expr_t *mk_expr_cast(expr_t *operand, type_t *target, int line) {
+    expr_t *e = mk_expr(EXPR_CAST, line);
+    e->u.cast.operand = operand;
+    e->u.cast.target_type = target;
+    return e;
+}
+
 /* ---- Statements ---- */
 
 static stmt_t *mk_stmt(stmt_kind_t kind, int line) {

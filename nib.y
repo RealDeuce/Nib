@@ -94,7 +94,7 @@ static void mods_reset(void) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL
+%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -537,7 +537,9 @@ expr
     ;
 
 postfix_expr
-    : postfix_expr '.' IDENT
+    : postfix_expr KW_AS '(' type ')'
+        { $$ = mk_expr_cast($1, $4, yyline); }
+    | postfix_expr '.' IDENT
         { $$ = mk_expr_field($1, $3, yyline); }
     | postfix_expr '[' expr ']'
         { $$ = mk_expr_index($1, $3, false, yyline); }

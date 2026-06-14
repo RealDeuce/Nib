@@ -766,6 +766,11 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* Type inferred from declaration context — caller must check */
         return TV(dst, mk_type(TYPE_U8));
     }
+    case EXPR_CAST: {
+        /* as — zero-instruction type reinterpretation */
+        typed_vreg_t val = emit_expr_typed(e->u.cast.operand);
+        return TV(val.vreg, e->u.cast.target_type);
+    }
     case EXPR_PAREN:
         return TV(-1, NULL);
     }

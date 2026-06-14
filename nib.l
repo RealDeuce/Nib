@@ -70,6 +70,7 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 "preserves"             { return KW_PRESERVES; }
 "clobbers"              { return KW_CLOBBERS; }
 "bits"                  { return KW_BITS; }
+"as"                    { return KW_AS; }
 "trap"                  { return KW_TRAP; }
 "goto"                  { return KW_GOTO; }
 "tailcall"              { return KW_TAILCALL; }

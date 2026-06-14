@@ -88,6 +88,7 @@ typedef enum {
     EXPR_CHECKED_INDEX,
     EXPR_FIELD,
     EXPR_MEM,
+    EXPR_CAST,
     EXPR_PAREN
 } expr_kind_t;
 
@@ -126,6 +127,9 @@ struct expr_node {
 
         /* FIELD */
         struct { expr_t *object; char *field_name; } field;
+
+        /* CAST (as) — reinterpret type, no code */
+        struct { expr_t *operand; type_t *target_type; } cast;
 
         /* MEM — [seg:base+index+disp] */
         struct {
@@ -378,6 +382,7 @@ expr_t     *mk_expr_field(expr_t *obj, const char *field, int line);
 expr_t     *mk_expr_mem(reg_id_t seg, reg_id_t base, reg_id_t idx,
                          int disp, bool has_disp, int line);
 expr_t     *mk_expr_mem_abs(int seg, int off, int line);
+expr_t     *mk_expr_cast(expr_t *operand, type_t *target, int line);
 
 stmt_t     *mk_stmt_vardecl(type_t *type, const char *name,
                              int pinned_reg, reg_class_t pin_class,
