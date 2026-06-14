@@ -2384,17 +2384,17 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, " ]\n");
 
-        /* Phase 4: emit (defer at() functions) */
-        if (!fn->has_at)
-            emit_function(fn);
+        /* Phase 4: emit all functions in topo order */
+        emit_function(fn);
     }
 
-    /* Emit constant pool */
+    /* Emit constant pool, non-placed data blocks, and globals
+     * BEFORE any at()-placed items so they don't end up after
+     * a high-address org directive */
     if (nconsts > 0) {
         fprintf(out_asm, "\n; === constant pool ===\n");
         for (int i = 0; i < nconsts; i++) {
             if (consts[i].is_far_ref) {
-                /* Resolve function name to assembly label */
                 const char *resolved = resolve_fn_name(consts[i].ref_name);
                 fprintf(out_asm, "%s dw %s, SEG %s\n",
                         consts[i].label, resolved, resolved);
@@ -2404,7 +2404,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Emit non-placed data blocks (at()-placed ones go at the end) */
     for (int i = 0; i < ndata_blocks; i++) {
         data_block_t *db = &data_blocks[i];
         if (db->has_at) continue;
@@ -2420,7 +2419,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Emit global variable storage */
     if (nglobals > 0) {
         fprintf(out_asm, "\n; === globals ===\n");
         for (int i = 0; i < nglobals; i++) {
@@ -2435,11 +2433,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Emit at()-placed functions and data blocks truly last */
-    for (int fi = 0; fi < nfunctions; fi++) {
-        if (functions[fi].has_at)
-            emit_function(&functions[fi]);
-    }
+    /* at()-placed data blocks go after globals */
     for (int i = 0; i < ndata_blocks; i++) {
         data_block_t *db = &data_blocks[i];
         if (!db->has_at) continue;
