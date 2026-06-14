@@ -33,7 +33,7 @@ int yyline = 1;
 static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause */
 %}
 
-%option noyywrap
+%option noyywrap noinput nounput
 
 %x ASM
 

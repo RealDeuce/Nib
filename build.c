@@ -299,7 +299,7 @@ int main(int argc, char **argv) {
     }
 
     /* Phase 3: Assemble */
-    char asm_cmd[512];
+    char asm_cmd[1024];
     snprintf(asm_cmd, sizeof(asm_cmd), "./nibasm %s -o %s", asm_path, outbin);
     if (run_cmd(asm_cmd) != 0) {
         fprintf(stderr, "error: assembly failed\n");

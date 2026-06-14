@@ -71,9 +71,6 @@ static int parse_preg(const char *s) {
     return PREG_NONE;
 }
 
-static bool is_word_reg(int p) { return p >= PREG_AX && p <= PREG_DI; }
-static bool is_byte_reg(int p) { return p >= PREG_AL && p <= PREG_BH; }
-static bool is_seg_reg(int p)  { return p >= PREG_ES && p <= PREG_DS; }
 
 /* ================================================================
  * IR representation
@@ -240,7 +237,7 @@ typedef struct {
     int  at_seg;
     int  at_off;
     /* Entries: raw assembly lines to emit */
-    char entries[MAX_DATA_ENTRIES][128];
+    char entries[MAX_DATA_ENTRIES][512];
     int  nentries;
 } data_block_t;
 
@@ -431,6 +428,9 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 p = skip_ws(p);
                 if (*p == ',') p++;
                 p = skip_ws(p);
+                /* Copy label locally to avoid restrict overlap in snprintf */
+                char lbl[32];
+                memcpy(lbl, c->label, sizeof(lbl));
                 /* Parse the data */
                 if (*p == '"') {
                     /* String constant */
@@ -440,7 +440,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                     /* Build db line */
                     int pos = 0;
                     pos += snprintf(c->data + pos, sizeof(c->data) - pos,
-                                    "%s db ", c->label);
+                                    "%s db ", lbl);
                     for (int i = 0; i < dlen && pos < (int)sizeof(c->data) - 10; i++) {
                         if (i > 0) pos += snprintf(c->data + pos, sizeof(c->data) - pos, ", ");
                         if (p[i] == '\\' && i + 3 < dlen && p[i+1] == 'x') {
@@ -464,7 +464,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                     strncpy(c->ref_name, fname, 63);
                     c->ref_name[63] = '\0';
                     snprintf(c->data, sizeof(c->data),
-                             "%s dw %s, SEG %s", c->label, fname, fname);
+                             "%s dw %s, SEG %s", lbl, fname, fname);
                 } else if (strncmp(p, "far ", 4) == 0) {
                     /* Far constant: far 0xSEG:0xOFF */
                     p += 4;
@@ -472,7 +472,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                     if (*p == ':') p++;
                     int off = (int)strtol(p, (char **)&p, 0);
                     snprintf(c->data, sizeof(c->data),
-                             "%s dw 0x%04X, 0x%04X", c->label, off, seg);
+                             "%s dw 0x%04X, 0x%04X", lbl, off, seg);
                 }
             }
             continue;
@@ -1083,7 +1083,7 @@ static void parse_nir(const char *path) {
                 }
             }
             /* Read data entries until .enddata */
-            char dline[512];
+            char dline[256];
             while (fgets(dline, sizeof(dline), fp)) {
                 char *dp = dline;
                 while (*dp == ' ' || *dp == '\t') dp++;
@@ -1099,7 +1099,7 @@ static void parse_nir(const char *path) {
                     if (strncmp(dp, "far.ref ", 8) == 0) {
                         char fname[64];
                         read_word(dp + 8, fname, sizeof(fname));
-                        snprintf(db->entries[db->nentries++], 128,
+                        snprintf(db->entries[db->nentries++], 512,
                                  "    dw %s, SEG %s", fname, fname);
                     } else if (strncmp(dp, "far ", 4) == 0) {
                         int seg = 0, off = 0;
@@ -1107,16 +1107,16 @@ static void parse_nir(const char *path) {
                         seg = (int)strtol(fp2, &fp2, 0);
                         if (*fp2 == ':') fp2++;
                         off = (int)strtol(fp2, NULL, 0);
-                        snprintf(db->entries[db->nentries++], 128,
+                        snprintf(db->entries[db->nentries++], 512,
                                  "    dw 0x%04X, 0x%04X", off, seg);
                     } else if (strncmp(dp, "dw ", 3) == 0) {
-                        snprintf(db->entries[db->nentries++], 128,
+                        snprintf(db->entries[db->nentries++], 512,
                                  "    %s", dp);
                     } else if (strncmp(dp, "db ", 3) == 0) {
-                        snprintf(db->entries[db->nentries++], 128,
+                        snprintf(db->entries[db->nentries++], 512,
                                  "    %s", dp);
                     } else if (strncmp(dp, "dd ", 3) == 0) {
-                        snprintf(db->entries[db->nentries++], 128,
+                        snprintf(db->entries[db->nentries++], 512,
                                  "    %s", dp);
                     }
                 }

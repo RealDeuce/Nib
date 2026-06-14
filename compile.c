@@ -319,12 +319,6 @@ static bool types_equal(type_t *a, type_t *b) {
     return true;
 }
 
-static bool type_is_scalar(type_t *t) {
-    if (!t) return false;
-    return t->kind == TYPE_U8 || t->kind == TYPE_U16 ||
-           t->kind == TYPE_U32 || t->kind == TYPE_SEG;
-}
-
 static bool type_is_aggregate(type_t *t) {
     if (!t) return false;
     return t->kind == TYPE_ARRAY_U8 || t->kind == TYPE_ARRAY_U16 ||
@@ -419,10 +413,6 @@ typedef struct { int vreg; type_t *type; } typed_vreg_t;
 static typed_vreg_t emit_expr_typed(expr_t *e);
 
 /* Emit a vreg reference: %N or pinned register name */
-static void emit_vreg(int vreg) {
-    fprintf(C.nir, "%%%d", vreg);
-}
-
 static int alloc_vreg(void) {
     return C.next_vreg++;
 }
@@ -965,6 +955,9 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_PAREN:
         return TV(-1, NULL);
+    case EXPR_ARRAY_INIT:
+        cerr(e->line, "array initializer not valid in expression context");
+        return TV(alloc_vreg(), mk_type(TYPE_VOID));
     }
     return TV(-1, NULL);
 }
@@ -978,10 +971,6 @@ static void emit_stmts(stmt_t *list);
 
 /* Emit flag expression as conditional jumps.
  * Emits code that jumps to skip_label if the condition is NOT met. */
-static const char *flag_id_to_name(reg_id_t id) {
-    static const char *names[] = {"CF","PF","AF","ZF","SF","TF","DF","OF","IF"};
-    return (id >= 0 && id < 9) ? names[id] : "??";
-}
 
 static const char *flag_id_to_jcc(reg_id_t id) {
     /* Jump if flag IS set */
@@ -1786,10 +1775,6 @@ static void import_nif(const char *path, int use_line) {
     char cur_fn[64] = "";
     int cur_nparams = 0;
     type_t *cur_ret = NULL;
-    bool in_fn = false;
-    bool in_extern = false;
-    bool in_struct = false;
-
     while (fgets(line, sizeof(line), fp)) {
         int len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
@@ -1806,8 +1791,6 @@ static void import_nif(const char *path, int use_line) {
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
             cur_ret = NULL;
-            in_fn = true;
-            in_extern = false;
             continue;
         }
 
@@ -1819,8 +1802,6 @@ static void import_nif(const char *path, int use_line) {
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
             cur_ret = NULL;
-            in_extern = true;
-            in_fn = false;
             continue;
         }
 
@@ -1845,8 +1826,6 @@ static void import_nif(const char *path, int use_line) {
                 register_function(cur_fn, cur_nparams, cur_ret);
             }
             cur_fn[0] = '\0';
-            in_fn = false;
-            in_extern = false;
             continue;
         }
 
@@ -1862,11 +1841,9 @@ static void import_nif(const char *path, int use_line) {
                 C.structs[C.nstructs].aligned = false;
                 C.nstructs++;
             }
-            in_struct = true;
             continue;
         }
         if (strncmp(p, ".endstruct", 10) == 0) {
-            in_struct = false;
             continue;
         }
 
