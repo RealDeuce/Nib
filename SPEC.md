@@ -122,6 +122,16 @@ tracks flag liveness — a flag set by an ADD is available for a subsequent
 Array size is part of the type. `u8[80]` and `u8[40]` are distinct types.
 Arrays do not decay to pointers. Struct arrays use `struct Name[N]` syntax.
 
+When initialized, the size can be omitted and inferred from the
+initializer:
+
+```
+u8[] greeting = "Hello";        // u8[5], size inferred from string
+u16[] table = {1, 2, 3, 4};    // u16[4], size inferred from elements
+```
+
+Unsized arrays without an initializer are a compile error.
+
 ### Far type
 
 | Type  | Size    | Hardware mapping                          |

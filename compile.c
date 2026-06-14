@@ -1263,6 +1263,10 @@ static void emit_stmt(stmt_t *s) {
                                  s->u.vardecl.pinned_reg,
                                  s->u.vardecl.pin_class);
         }
+        if (s->u.vardecl.type && s->u.vardecl.type->kind == TYPE_ARRAY &&
+            s->u.vardecl.type->array_size == 0 && !s->u.vardecl.init) {
+            cerr(s->line, "unsized array requires an initializer");
+        }
         if (sym->is_pinned) {
             fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg,
                     reg_name_str(sym->pinned_reg, sym->pin_class));
@@ -1271,6 +1275,13 @@ static void emit_stmt(stmt_t *s) {
         }
         if (s->u.vardecl.init) {
             typed_vreg_t val = emit_expr_typed(s->u.vardecl.init);
+            /* Unsized array: infer size from initializer */
+            if (s->u.vardecl.type && s->u.vardecl.type->kind == TYPE_ARRAY &&
+                s->u.vardecl.type->array_size == 0 && val.type &&
+                val.type->kind == TYPE_ARRAY && val.type->array_size > 0) {
+                s->u.vardecl.type->array_size = val.type->array_size;
+                sym->type = s->u.vardecl.type;
+            }
             /* Type check initializer against declaration type.
              * NULL val.type means literal — always compatible. */
             if (val.type && s->u.vardecl.type) {

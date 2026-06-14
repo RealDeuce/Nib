@@ -825,7 +825,9 @@ type
     | TY_BOOL                   { $$ = mk_type(TYPE_BOOL); }
     | KW_FAR                    { $$ = mk_type(TYPE_FAR); }
     | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(mk_type(TYPE_U8), $3); }
+    | TY_U8 '[' ']'            { $$ = mk_type_array(mk_type(TYPE_U8), 0); }
     | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_U16), $3); }
+    | TY_U16 '[' ']'           { $$ = mk_type_array(mk_type(TYPE_U16), 0); }
     | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_BCD), $3); }
     | KW_FAR '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_FAR), $3); }
     | KW_STRUCT IDENT '[' LIT_INT ']' { $$ = mk_type_array(mk_type_struct($2), $4); }
