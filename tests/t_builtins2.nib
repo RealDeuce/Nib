@@ -1,0 +1,29 @@
+// Test: remaining builtins — load, store, extract, insert, nibble_rol/ror, swap_flags
+
+fn test_load_store(src: u8[80], dst: u8[80]) {
+    u8 ch = load(src);
+    store(dst, ch);
+}
+
+fn test_extract(data: u16, offset: u16, length: u16) -> u16 {
+    return extract(data, offset, length);
+}
+
+fn test_insert(dst: u16, offset: u16, length: u16, val: u16) {
+    insert(dst, offset, length, val);
+}
+
+fn test_nibble(mem: u8[10]) -> u8 {
+    u8 result = nibble_rol(mem);
+    return result;
+}
+
+fn test_nibble_ror(mem: u8[10]) -> u8 {
+    u8 result = nibble_ror(mem);
+    return result;
+}
+
+fn test_swap_flags(val: u8) -> u8 {
+    u8 result = swap_flags(val);
+    return result;
+}

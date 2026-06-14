@@ -825,6 +825,62 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             skip_comma(&p);
             ins->src2 = parse_vreg(p, &p);
         }
+        else if (strcmp(opname, "lods") == 0) {
+            /* LODSB/LODSW: load from [SI], advance SI */
+            ins->op = IR_UNARY;
+            strncpy(ins->name, "lods", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "stos") == 0) {
+            /* STOSB/STOSW: store to [DI], advance DI */
+            ins->op = IR_ALU;
+            strncpy(ins->name, "stos", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "bext") == 0) {
+            /* V20 EXT: extract bit field */
+            ins->op = IR_ALU;
+            strncpy(ins->name, "bext", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src2 = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->extra_args[0] = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "bins") == 0) {
+            /* V20 INS: insert bit field */
+            ins->op = IR_ALU;
+            strncpy(ins->name, "bins", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src2 = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->extra_args[0] = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "rol4") == 0 || strcmp(opname, "ror4") == 0) {
+            /* V20 ROL4/ROR4: nibble rotation */
+            ins->op = IR_UNARY;
+            strncpy(ins->name, opname, 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
+        else if (strcmp(opname, "swap_flags") == 0) {
+            /* LAHF/SAHF: exchange AH with flags */
+            ins->op = IR_UNARY;
+            strncpy(ins->name, "swap_flags", 63);
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
+        }
         else if (strcmp(opname, "brkem") == 0) {
             ins->op = IR_ASM;
             snprintf(ins->asm_body, sizeof(ins->asm_body), "    brkem %s", p);
@@ -1416,6 +1472,23 @@ static void emit_function(func_t *fn) {
                         vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2));
                 break;
             }
+            if (strcmp(op, "stos") == 0) {
+                /* STOSB/STOSW: value in AL/AX, dest in DI */
+                fprintf(out_asm, "    stosb\n");
+                break;
+            }
+            if (strcmp(op, "bext") == 0) {
+                /* V20 EXT: extract bit field from [src1] at CL:src2 */
+                fprintf(out_asm, "    bext %s, %s\n",
+                        vreg_asm(fn, ins->src1), vreg_asm(fn, ins->dst));
+                break;
+            }
+            if (strcmp(op, "bins") == 0) {
+                /* V20 INS: insert bit field into [dst] at CL:src2 */
+                fprintf(out_asm, "    bins %s, %s\n",
+                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                break;
+            }
 
             /* Map IR op names to asm mnemonics */
             const char *mnem = op;
@@ -1457,6 +1530,31 @@ static void emit_function(func_t *fn) {
                 if (strcmp(d, s) != 0)
                     fprintf(out_asm, "    mov %s, %s\n", d, s);
                 fprintf(out_asm, "    cbw\n");
+                break;
+            }
+            if (strcmp(mnem, "lods") == 0) {
+                /* LODSB/LODSW: load from [SI], result in AL/AX */
+                fprintf(out_asm, "    lodsb\n");
+                break;
+            }
+            if (strcmp(mnem, "rol4") == 0) {
+                /* V20 ROL4: nibble rotate left through AL on [mem] */
+                fprintf(out_asm, "    rol4 [%s]\n", s);
+                break;
+            }
+            if (strcmp(mnem, "ror4") == 0) {
+                /* V20 ROR4: nibble rotate right through AL on [mem] */
+                fprintf(out_asm, "    ror4 [%s]\n", s);
+                break;
+            }
+            if (strcmp(mnem, "swap_flags") == 0) {
+                /* LAHF: load flags into AH, then SAHF to restore from val */
+                if (strcmp(d, s) != 0)
+                    fprintf(out_asm, "    mov %s, %s\n", d, s);
+                fprintf(out_asm, "    lahf\n");
+                fprintf(out_asm, "    mov %s, AH\n", d);
+                fprintf(out_asm, "    mov AH, %s\n", s);
+                fprintf(out_asm, "    sahf\n");
                 break;
             }
             if (strcmp(mnem, "zext") == 0) {

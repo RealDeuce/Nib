@@ -729,6 +729,54 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             return TV(dst, mk_type(TYPE_VOID));
         }
 
+        if (strcmp(fn_name, "load") == 0) {
+            /* LODSB/LODSW — load from [SI], advance SI */
+            if (argc >= 1)
+                fprintf(C.nir, "    lods %%%d, %%%d\n", dst, arg_vregs[0]);
+            /* Return type matches the source type */
+            type_t *src_type = (argc >= 1) ? arg_types[0] : NULL;
+            type_t *elem = src_type ? type_of_element(src_type) : mk_type(TYPE_U8);
+            return TV(dst, elem ? elem : mk_type(TYPE_U8));
+        }
+        if (strcmp(fn_name, "store") == 0) {
+            /* STOSB/STOSW — store to [DI], advance DI */
+            if (argc >= 2)
+                fprintf(C.nir, "    stos %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "extract") == 0) {
+            /* V20 EXT — extract bit field */
+            if (argc >= 3)
+                fprintf(C.nir, "    bext %%%d, %%%d, %%%d, %%%d\n",
+                        dst, arg_vregs[0], arg_vregs[1], arg_vregs[2]);
+            return TV(dst, mk_type(TYPE_U16));
+        }
+        if (strcmp(fn_name, "insert") == 0) {
+            /* V20 INS — insert bit field */
+            if (argc >= 4)
+                fprintf(C.nir, "    bins %%%d, %%%d, %%%d, %%%d\n",
+                        arg_vregs[0], arg_vregs[1], arg_vregs[2], arg_vregs[3]);
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "nibble_rol") == 0) {
+            /* V20 ROL4 — rotate nibbles left through AL */
+            if (argc >= 1)
+                fprintf(C.nir, "    rol4 %%%d, %%%d\n", dst, arg_vregs[0]);
+            return TV(dst, mk_type(TYPE_U8));
+        }
+        if (strcmp(fn_name, "nibble_ror") == 0) {
+            /* V20 ROR4 — rotate nibbles right through AL */
+            if (argc >= 1)
+                fprintf(C.nir, "    ror4 %%%d, %%%d\n", dst, arg_vregs[0]);
+            return TV(dst, mk_type(TYPE_U8));
+        }
+        if (strcmp(fn_name, "swap_flags") == 0) {
+            /* LAHF/SAHF — exchange AH with flags */
+            if (argc >= 1)
+                fprintf(C.nir, "    swap_flags %%%d, %%%d\n", dst, arg_vregs[0]);
+            return TV(dst, mk_type(TYPE_U8));
+        }
+
         /* Not a builtin — regular function call */
         if (e->u.call.func->kind == EXPR_IDENT) {
             int fi = find_function(fn_name);

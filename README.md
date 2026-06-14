@@ -46,7 +46,6 @@ disassembler, and build driver are all working. 95 tests pass.
 ### What's next
 
 - Peephole optimizer (post-binder, on real assembly)
-- A few unimplemented builtins (extract/insert, nibble rotate, load/store)
 - First program running on DreamWriter hardware
 
 ## Toolchain pipeline

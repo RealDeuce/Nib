@@ -615,7 +615,7 @@ Scans `haystack` for `needle`. Returns the offset where found, or
 the array length if not found. Result derived from DI after REPNE.
 
 ```
-load(src) -> u8 / u16      // LODSB or LODSW  (not yet implemented)
+load(src) -> u8 / u16      // LODSB or LODSW
 ```
 
 Loads one element from `src` and advances the source pointer (SI).
@@ -623,7 +623,7 @@ Respects DF (direction flag). Useful in loops processing arrays
 element by element.
 
 ```
-store(dst, val)             // STOSB or STOSW  (not yet implemented)
+store(dst, val)             // STOSB or STOSW
 ```
 
 Stores one element to `dst` and advances the destination pointer (DI).
@@ -751,8 +751,8 @@ lengths (see Structs / Bit fields). These builtins expose the full
 dynamic capability — runtime bit offset and length via registers.
 
 ```
-extract(src, offset, length) -> u16     // EXT  (not yet implemented)
-insert(dst, offset, length, val)        // INS  (not yet implemented)
+extract(src, offset, length) -> u16     // EXT
+insert(dst, offset, length, val)        // INS
 ```
 
 - `src`/`dst` — memory reference (loaded into SI for EXT, DI for INS)
@@ -784,8 +784,8 @@ fn read_bits(stream: u8[512], pos: u16, width: u8) -> u16 {
 ### Nibble rotate (V20 extension)
 
 ```
-nibble_rol(mem, val) -> u8  // ROL4  (not yet implemented)
-nibble_ror(mem, val) -> u8  // ROR4  (not yet implemented)
+nibble_rol(mem, val) -> u8  // ROL4 — rotate nibbles left through AL
+nibble_ror(mem, val) -> u8  // ROR4 — rotate nibbles right through AL
 ```
 
 Rotates 4-bit nibbles between a memory byte and AL. Used for
@@ -812,7 +812,7 @@ access section) which generates the BOUND automatically.
 ### Exchange helpers
 
 ```
-swap_flags(val)             // LAHF/SAHF  (not yet implemented)
+swap_flags(val)             // LAHF/SAHF — exchange AH with flags
 ```
 
 LAHF loads SF, ZF, AF, PF, CF into AH. SAHF stores AH back to those
