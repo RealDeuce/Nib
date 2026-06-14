@@ -1019,12 +1019,10 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_CALL:
-            fprintf(out_asm, "    ; call %s\n", ins->name);
             fprintf(out_asm, "    call %s\n", ins->name);
             break;
 
         case IR_TAILCALL:
-            fprintf(out_asm, "    ; tailcall %s\n", ins->name);
             /* Tear down frame */
             if (fn->needs_frame) {
                 fprintf(out_asm, "    mov sp, bp\n");
@@ -1034,8 +1032,9 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_RETVAL:
-            /* Move return value to wherever the binder decided */
-            fprintf(out_asm, "    ; retval in %s\n", vreg_asm(fn, ins->src1));
+            /* Return value is in the assigned register — if it's not
+               already in the return register, the binder would insert
+               a mov. For now the allocator handles this via preferences. */
             break;
 
         case IR_RET:
