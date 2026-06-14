@@ -1682,7 +1682,13 @@ static void emit_function(func_t *fn) {
             /* Special ops that need specific lowering */
             if (strcmp(op, "mul") == 0 || strcmp(op, "imul") == 0) {
                 /* MUL/IMUL: AX * src -> DX:AX */
-                fprintf(out_asm, "    %s %s\n", op, vreg_asm(fn, ins->src2));
+                if (ins->has_imm) {
+                    /* IMUL reg, imm (186+ three-operand form) */
+                    fprintf(out_asm, "    imul %s, %d\n",
+                            vreg_asm(fn, ins->src1), ins->imm);
+                } else {
+                    fprintf(out_asm, "    %s %s\n", op, vreg_asm(fn, ins->src2));
+                }
                 break;
             }
             if (strcmp(op, "div") == 0 || strcmp(op, "mod") == 0) {
