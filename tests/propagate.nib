@@ -1,0 +1,28 @@
+// Test inter-procedural register propagation
+// fill() pins DI, AL, CX — those preferences should
+// propagate to main() so it sets up the right registers.
+
+fn fill(dest: u16, char: u8, count: u16) {
+    seg ES = 0xB800;
+    u16 DI = dest;
+    u8  AL = char;
+    u16 CX = count;
+    asm clobbers(DI, CX, FLAGS) {
+        rep stosb
+    }
+}
+
+fn scroll_line(src: u16, dst: u16, count: u16) {
+    u16 SI = src;
+    u16 DI = dst;
+    u16 CX = count;
+    seg ES = 0;
+    asm clobbers(SI, DI, CX, FLAGS) {
+        rep movsb
+    }
+}
+
+fn main() {
+    fill(0, 0x20, 80);
+    scroll_line(80, 0, 80);
+}

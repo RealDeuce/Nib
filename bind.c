@@ -281,8 +281,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             int v = parse_vreg(p, &p);
             skip_comma(&p);
             char type[32];
-            read_word(p, type, sizeof(type));
-            p += strlen(type);
+            p = read_word(p, type, sizeof(type));
             skip_comma(&p);
             /* Parse quoted name */
             p = skip_ws(p);
@@ -385,8 +384,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         for (int i = 0; i < 8; i++) ins->extra_args[i] = -1;
 
         char opname[64];
-        read_word(p, opname, sizeof(opname));
-        p += strlen(opname);
+        p = read_word(p, opname, sizeof(opname));
 
         if (strcmp(opname, "mov") == 0) {
             ins->op = IR_MOV;
@@ -422,8 +420,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_CALL;
             ins->dst = parse_vreg(p, &p);
             skip_comma(&p);
-            read_word(p, ins->name, sizeof(ins->name));
-            p += strlen(ins->name);
+            p = read_word(p, ins->name, sizeof(ins->name));
             /* Parse args */
             ins->nargs = 0;
             while (*p) {
@@ -439,8 +436,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         }
         else if (strcmp(opname, "tailcall") == 0) {
             ins->op = IR_TAILCALL;
-            read_word(p, ins->name, sizeof(ins->name));
-            p += strlen(ins->name);
+            p = read_word(p, ins->name, sizeof(ins->name));
             ins->nargs = 0;
             while (*p) {
                 skip_comma(&p);
@@ -508,8 +504,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_STOREFIELD;
             ins->src1 = parse_vreg(p, &p); /* obj */
             skip_comma(&p);
-            read_word(p, ins->name, sizeof(ins->name));
-            p += strlen(ins->name);
+            p = read_word(p, ins->name, sizeof(ins->name));
             skip_comma(&p);
             ins->src2 = parse_vreg(p, &p); /* val */
         }
@@ -521,8 +516,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         }
         else if (strcmp(opname, "setflag") == 0) {
             ins->op = IR_SETFLAG;
-            read_word(p, ins->name, sizeof(ins->name));
-            p += strlen(ins->name);
+            p = read_word(p, ins->name, sizeof(ins->name));
             skip_comma(&p);
             ins->src1 = parse_vreg(p, &p);
         }
@@ -1026,6 +1020,306 @@ static void emit_function(func_t *fn) {
 }
 
 /* ================================================================
+ * Inter-procedural register propagation
+ * ================================================================ */
+
+/* Call graph */
+typedef struct {
+    int caller_fn;          /* index into functions[] */
+    int callee_fn;          /* index into functions[], or -1 if external */
+    int insn_idx;           /* call instruction index in caller */
+    int arg_vregs[16];      /* caller's vregs for each argument */
+    int nargs;
+    int ret_vreg;           /* caller's vreg receiving return value */
+    char callee_name[64];
+} call_edge_t;
+
+#define MAX_EDGES 1024
+static call_edge_t call_edges[MAX_EDGES];
+static int nedges = 0;
+
+/* Resolved parameter register assignments per function */
+typedef struct {
+    int param_regs[16];     /* PREG_* for each parameter, or PREG_NONE */
+    int return_reg;         /* PREG_* for return value, or PREG_NONE */
+    bool resolved;
+} fn_assignment_t;
+
+static fn_assignment_t fn_assigns[MAX_FNS];
+
+static int find_fn(const char *name) {
+    for (int i = 0; i < nfunctions; i++)
+        if (strcmp(functions[i].name, name) == 0)
+            return i;
+    return -1;
+}
+
+/* Build call graph by scanning all functions for call instructions */
+static void build_call_graph(void) {
+    nedges = 0;
+    for (int fi = 0; fi < nfunctions; fi++) {
+        func_t *fn = &functions[fi];
+        for (int i = 0; i < fn->ninsns; i++) {
+            ir_insn_t *ins = &fn->insns[i];
+            if (ins->op != IR_CALL && ins->op != IR_TAILCALL) continue;
+
+            if (nedges >= MAX_EDGES) break;
+            call_edge_t *e = &call_edges[nedges++];
+            e->caller_fn = fi;
+            e->callee_fn = find_fn(ins->name);
+            e->insn_idx = i;
+            strncpy(e->callee_name, ins->name, 63);
+            e->ret_vreg = ins->dst;
+            e->nargs = 0;
+
+            /* Collect argument vregs */
+            if (ins->src1 >= 0) e->arg_vregs[e->nargs++] = ins->src1;
+            if (ins->src2 >= 0) e->arg_vregs[e->nargs++] = ins->src2;
+            for (int j = 0; j < 8 && ins->extra_args[j] >= 0; j++)
+                e->arg_vregs[e->nargs++] = ins->extra_args[j];
+        }
+    }
+    fprintf(stderr, "Call graph: %d edges\n", nedges);
+}
+
+/* Topological sort of functions — leaf functions first.
+ * A leaf is a function that makes no calls to other Nib functions. */
+static int topo_order[MAX_FNS];
+static int ntopo;
+
+static void topo_sort(void) {
+    /* Compute in-degree (how many Nib functions call this one) */
+    bool visited[MAX_FNS] = {0};
+    bool has_callee[MAX_FNS] = {0}; /* does this fn call other Nib fns? */
+
+    for (int i = 0; i < nedges; i++) {
+        if (call_edges[i].callee_fn >= 0)
+            has_callee[call_edges[i].caller_fn] = true;
+    }
+
+    ntopo = 0;
+    /* First pass: all leaf functions (no outgoing Nib calls) */
+    for (int i = 0; i < nfunctions; i++) {
+        if (!has_callee[i]) {
+            topo_order[ntopo++] = i;
+            visited[i] = true;
+        }
+    }
+
+    /* Iterative: add functions whose callees are all visited */
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 0; i < nfunctions; i++) {
+            if (visited[i]) continue;
+            bool all_callees_visited = true;
+            for (int e = 0; e < nedges; e++) {
+                if (call_edges[e].caller_fn != i) continue;
+                if (call_edges[e].callee_fn < 0) continue; /* external */
+                if (!visited[call_edges[e].callee_fn]) {
+                    all_callees_visited = false;
+                    break;
+                }
+            }
+            if (all_callees_visited) {
+                topo_order[ntopo++] = i;
+                visited[i] = true;
+                changed = true;
+            }
+        }
+    }
+
+    /* Any remaining (recursive) — add them anyway */
+    for (int i = 0; i < nfunctions; i++) {
+        if (!visited[i])
+            topo_order[ntopo++] = i;
+    }
+}
+
+/* Propagate register preferences bottom-up through the call graph.
+ *
+ * Starting from leaf functions, for each function:
+ * 1. Look at its .prefer directives — these are the function's own
+ *    desires (e.g., "I use rep movsb so I want param 0 in SI")
+ * 2. Assign parameter registers based on preferences
+ * 3. For each caller, propagate: "at this call site, arg vreg N
+ *    should be in register R" — this becomes a preference on the
+ *    caller's vreg
+ */
+static void propagate_preferences(void) {
+    /* Initialize */
+    for (int i = 0; i < nfunctions; i++) {
+        fn_assigns[i].resolved = false;
+        fn_assigns[i].return_reg = PREG_NONE;
+        for (int j = 0; j < 16; j++)
+            fn_assigns[i].param_regs[j] = PREG_NONE;
+    }
+
+    /* Process in topological order (leaves first) */
+    for (int ti = 0; ti < ntopo; ti++) {
+        int fi = topo_order[ti];
+        func_t *fn = &functions[fi];
+        fn_assignment_t *fa = &fn_assigns[fi];
+
+        /* Step 1: Assign parameter registers from this function's preferences.
+         * If a parameter's vreg has a .prefer, use that.
+         * Otherwise, pick a free register. */
+        bool reg_used[NUM_PREGS] = {0};
+
+        /* First pass: honor explicit preferences */
+        for (int p = 0; p < fn->nparams; p++) {
+            int v = fn->param_vregs[p];
+            if (v >= 0 && fn->vregs[v].prefer != PREG_NONE) {
+                int preg = fn->vregs[v].prefer;
+                if (!reg_used[preg]) {
+                    fa->param_regs[p] = preg;
+                    reg_used[preg] = true;
+                    /* Also mark aliases */
+                    if (preg < 4) {
+                        reg_used[preg_alias_lo[preg]] = true;
+                        reg_used[preg_alias_hi[preg]] = true;
+                    }
+                }
+            }
+        }
+
+        /* Check if any vreg used in the function body has a preference
+         * that traces back to a parameter (via mov chains).
+         * Simplified: scan for mov %pinned, %param patterns */
+        for (int i = 0; i < fn->ninsns; i++) {
+            ir_insn_t *ins = &fn->insns[i];
+            if (ins->op != IR_MOV || ins->has_imm) continue;
+            if (ins->dst < 0 || ins->src1 < 0) continue;
+
+            /* If dst has a preference and src is a parameter, propagate */
+            int dst_pref = fn->vregs[ins->dst].prefer;
+            if (dst_pref == PREG_NONE) continue;
+
+            for (int p = 0; p < fn->nparams; p++) {
+                if (fn->param_vregs[p] == ins->src1 &&
+                    fa->param_regs[p] == PREG_NONE) {
+                    if (!reg_used[dst_pref]) {
+                            fa->param_regs[p] = dst_pref;
+                        reg_used[dst_pref] = true;
+                        if (dst_pref < 4) {
+                            reg_used[preg_alias_lo[dst_pref]] = true;
+                            reg_used[preg_alias_hi[dst_pref]] = true;
+                        }
+                        /* The mov becomes a no-op since param arrives
+                         * in the right register already */
+                    }
+                }
+            }
+        }
+
+        /* Second pass: assign remaining parameters to free registers */
+        int word_order[] = { PREG_AX, PREG_BX, PREG_CX, PREG_DX,
+                             PREG_SI, PREG_DI, PREG_BP };
+        int byte_order[] = { PREG_AL, PREG_BL, PREG_CL, PREG_DL,
+                             PREG_AH, PREG_BH, PREG_CH, PREG_DH };
+
+        for (int p = 0; p < fn->nparams; p++) {
+            if (fa->param_regs[p] != PREG_NONE) continue;
+            int v = fn->param_vregs[p];
+            if (v < 0) continue;
+
+            bool is_byte = fn->vregs[v].is_byte;
+            int *order = is_byte ? byte_order : word_order;
+            int norder = is_byte ? 8 : 7;
+
+            for (int r = 0; r < norder; r++) {
+                int preg = order[r];
+                if (reg_used[preg]) continue;
+                /* Check alias */
+                bool alias_conflict = false;
+                if (preg < 4) {
+                    if (reg_used[preg_alias_lo[preg]] || reg_used[preg_alias_hi[preg]])
+                        alias_conflict = true;
+                } else if (preg >= PREG_AL && preg <= PREG_BH) {
+                    if (reg_used[preg_alias_parent[preg]])
+                        alias_conflict = true;
+                }
+                if (alias_conflict) continue;
+
+                fa->param_regs[p] = preg;
+                reg_used[preg] = true;
+                if (preg < 4) {
+                    reg_used[preg_alias_lo[preg]] = true;
+                    reg_used[preg_alias_hi[preg]] = true;
+                }
+                break;
+            }
+        }
+
+        /* Assign return register */
+        if (fn->has_return) {
+            /* Prefer AX for returns */
+            bool is_byte = (strcmp(fn->return_type, "u8") == 0);
+            fa->return_reg = is_byte ? PREG_AL : PREG_AX;
+        }
+
+        fa->resolved = true;
+
+        /* Step 2: Propagate to callers.
+         * For each call edge where we are the callee, set preferences
+         * on the caller's argument vregs. */
+        for (int e = 0; e < nedges; e++) {
+            if (call_edges[e].callee_fn != fi) continue;
+
+            int caller_fi = call_edges[e].caller_fn;
+            func_t *caller = &functions[caller_fi];
+
+            for (int a = 0; a < call_edges[e].nargs && a < fn->nparams; a++) {
+                int caller_vreg = call_edges[e].arg_vregs[a];
+                int callee_reg = fa->param_regs[a];
+
+                if (caller_vreg < 0 || callee_reg == PREG_NONE) continue;
+
+                /* Set preference on the caller's vreg — but don't
+                 * override an existing preference */
+                if (caller->vregs[caller_vreg].prefer == PREG_NONE) {
+                    caller->vregs[caller_vreg].prefer = callee_reg;
+                }
+            }
+
+            /* Return value: set preference on caller's dst vreg */
+            if (call_edges[e].ret_vreg >= 0 && fa->return_reg != PREG_NONE) {
+                int rv = call_edges[e].ret_vreg;
+                if (caller->vregs[rv].prefer == PREG_NONE)
+                    caller->vregs[rv].prefer = fa->return_reg;
+            }
+        }
+
+        fprintf(stderr, "  resolved %s: params=[", fn->name);
+        for (int p = 0; p < fn->nparams; p++) {
+            if (p > 0) fprintf(stderr, ", ");
+            if (fa->param_regs[p] != PREG_NONE)
+                fprintf(stderr, "%s", preg_name[fa->param_regs[p]]);
+            else
+                fprintf(stderr, "?");
+        }
+        fprintf(stderr, "]");
+        if (fa->return_reg != PREG_NONE)
+            fprintf(stderr, " -> %s", preg_name[fa->return_reg]);
+        fprintf(stderr, "\n");
+    }
+
+    /* Final step: for each function, set parameter vreg preferences
+     * to match the resolved assignments */
+    for (int fi = 0; fi < nfunctions; fi++) {
+        func_t *fn = &functions[fi];
+        fn_assignment_t *fa = &fn_assigns[fi];
+
+        for (int p = 0; p < fn->nparams; p++) {
+            int v = fn->param_vregs[p];
+            if (v >= 0 && fa->param_regs[p] != PREG_NONE) {
+                fn->vregs[v].prefer = fa->param_regs[p];
+            }
+        }
+    }
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -1052,6 +1346,15 @@ int main(int argc, char **argv) {
         parse_nir(inputs[i]);
 
     fprintf(stderr, "Loaded %d functions\n", nfunctions);
+
+    /* Inter-procedural register propagation */
+    build_call_graph();
+    topo_sort();
+    fprintf(stderr, "Topo order:");
+    for (int i = 0; i < ntopo; i++)
+        fprintf(stderr, " %s", functions[topo_order[i]].name);
+    fprintf(stderr, "\n");
+    propagate_preferences();
 
     /* For each function: liveness, allocation, emit */
     out_asm = fopen(outpath, "w");
@@ -1083,8 +1386,15 @@ int main(int argc, char **argv) {
             fn->frame_size = fn->nspill_slots * 2;
         }
 
-        fprintf(stderr, "  %s: %d vregs, %d spills\n",
-                fn->name, fn->nvregs, fn->nspill_slots);
+        /* Debug: show assignments */
+        fprintf(stderr, "  %s: %d vregs, %d spills [", fn->name, fn->nvregs, fn->nspill_slots);
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (fn->vregs[v].assigned != PREG_NONE)
+                fprintf(stderr, " %%%d=%s", v, preg_name[fn->vregs[v].assigned]);
+            else if (fn->vregs[v].spill_slot >= 0)
+                fprintf(stderr, " %%%d=spill%d", v, fn->vregs[v].spill_slot);
+        }
+        fprintf(stderr, " ]\n");
 
         /* Phase 4: emit */
         emit_function(fn);
