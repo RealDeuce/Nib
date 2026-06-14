@@ -72,7 +72,7 @@ static void emit(uint8_t b) {
     int addr = org_base + out_pos;
     if (pass == 2) {
         if (addr >= MAX_OUTPUT)
-            fatal("output exceeds 64K");
+            fatal("output exceeds 1MB address space");
         output[addr] = b;
         written[addr] = true;
     }

@@ -2384,8 +2384,15 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, " ]\n");
 
-        /* Phase 4: emit */
-        emit_function(fn);
+        /* Phase 4: emit (defer at() functions) */
+        if (!fn->has_at)
+            emit_function(fn);
+    }
+
+    /* Emit at()-placed functions last so they don't affect code position */
+    for (int fi = 0; fi < nfunctions; fi++) {
+        if (functions[fi].has_at)
+            emit_function(&functions[fi]);
     }
 
     /* Emit constant pool */
