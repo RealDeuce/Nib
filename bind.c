@@ -2389,12 +2389,6 @@ int main(int argc, char **argv) {
             emit_function(fn);
     }
 
-    /* Emit at()-placed functions last so they don't affect code position */
-    for (int fi = 0; fi < nfunctions; fi++) {
-        if (functions[fi].has_at)
-            emit_function(&functions[fi]);
-    }
-
     /* Emit constant pool */
     if (nconsts > 0) {
         fprintf(out_asm, "\n; === constant pool ===\n");
@@ -2410,29 +2404,20 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Emit data blocks — non-placed first, at()-placed last */
-    for (int pass2 = 0; pass2 < 2; pass2++) {
+    /* Emit non-placed data blocks (at()-placed ones go at the end) */
     for (int i = 0; i < ndata_blocks; i++) {
         data_block_t *db = &data_blocks[i];
-        if ((pass2 == 0) == db->has_at) continue; /* pass 0: no at(), pass 1: at() */
+        if (db->has_at) continue;
         fprintf(out_asm, "\n; === data: %s ===\n", db->label);
-        if (db->has_at) {
-            int linear = db->at_seg * 16 + db->at_off;
-            fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
-            fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
-                    linear, db->at_seg, db->at_off);
-        }
         fprintf(out_asm, "%s:\n", db->label);
         for (int j = 0; j < db->nentries; j++) {
             if (db->entries[j][0] == '\x01') {
-                /* Deferred far.ref — resolve function name */
                 const char *resolved = resolve_fn_name(db->entries[j] + 1);
                 fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
             } else {
                 fprintf(out_asm, "%s\n", db->entries[j]);
             }
         }
-    }
     }
 
     /* Emit global variable storage */
@@ -2446,6 +2431,30 @@ int main(int argc, char **argv) {
                 fprintf(out_asm, "\n");
                 for (int b = 0; b < globals[i].size; b += 2)
                     fprintf(out_asm, "    dw 0\n");
+            }
+        }
+    }
+
+    /* Emit at()-placed functions and data blocks truly last */
+    for (int fi = 0; fi < nfunctions; fi++) {
+        if (functions[fi].has_at)
+            emit_function(&functions[fi]);
+    }
+    for (int i = 0; i < ndata_blocks; i++) {
+        data_block_t *db = &data_blocks[i];
+        if (!db->has_at) continue;
+        fprintf(out_asm, "\n; === data: %s ===\n", db->label);
+        int linear = db->at_seg * 16 + db->at_off;
+        fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
+        fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
+                linear, db->at_seg, db->at_off);
+        fprintf(out_asm, "%s:\n", db->label);
+        for (int j = 0; j < db->nentries; j++) {
+            if (db->entries[j][0] == '\x01') {
+                const char *resolved = resolve_fn_name(db->entries[j] + 1);
+                fprintf(out_asm, "    dw %s, SEG %s\n", resolved, resolved);
+            } else {
+                fprintf(out_asm, "%s\n", db->entries[j]);
             }
         }
     }
