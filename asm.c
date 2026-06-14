@@ -1581,12 +1581,15 @@ int main(int argc, char **argv) {
     const char *infile = NULL;
     const char *outfile = "a.out";
     const char *mapfile = NULL;
+    bool ihex = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outfile = argv[++i];
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             mapfile = argv[++i];
+        } else if (strcmp(argv[i], "--ihex") == 0) {
+            ihex = true;
         } else {
             infile = argv[i];
         }
@@ -1641,12 +1644,39 @@ int main(int argc, char **argv) {
     }
 
     /* Write output */
-    FILE *out = fopen(outfile, "wb");
+    FILE *out = fopen(outfile, ihex ? "w" : "wb");
     if (!out) { perror(outfile); return 1; }
-    fwrite(output, 1, total_size, out);
+
+    if (ihex) {
+        /* Intel HEX format */
+        int addr = org_base;
+        int pos = 0;
+        while (pos < total_size) {
+            int chunk = total_size - pos;
+            if (chunk > 16) chunk = 16;
+            uint8_t cksum = 0;
+            cksum += chunk;
+            cksum += (addr >> 8) & 0xFF;
+            cksum += addr & 0xFF;
+            cksum += 0x00; /* record type: data */
+            fprintf(out, ":%02X%04X00", chunk, addr & 0xFFFF);
+            for (int i = 0; i < chunk; i++) {
+                fprintf(out, "%02X", output[pos + i]);
+                cksum += output[pos + i];
+            }
+            fprintf(out, "%02X\n", (-cksum) & 0xFF);
+            pos += chunk;
+            addr += chunk;
+        }
+        /* EOF record */
+        fprintf(out, ":00000001FF\n");
+    } else {
+        fwrite(output, 1, total_size, out);
+    }
     fclose(out);
 
-    fprintf(stderr, "%s: %d bytes\n", outfile, total_size);
+    fprintf(stderr, "%s: %d bytes%s\n", outfile, total_size,
+            ihex ? " (ihex)" : "");
 
     /* Write map file if requested */
     if (mapfile) {
