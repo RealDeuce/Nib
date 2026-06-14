@@ -20,29 +20,31 @@ and hardware names.
 ## Toolchain
 
 ```
-source.nib + deps.nif  --[nib compile]-->  .nir + .nif
-.nir files  --[nib bind]-->  assembly.asm
-.asm  --[nib asm]-->  binary
+source.nib + deps.nif  --[nib]-->      .nir + .nif
+*.nir files            --[nibbind]-->  .asm
+.asm                   --[nibasm]-->   .bin + .map + .dbg
 ```
 
-For convenience, `nib build` runs all three stages.
+For convenience, `nibbuild source.nib` runs all three stages, following
+`use` chains to discover and compile dependencies.
 
-- **nib compile**: Per-file compilation. Parses, type-checks, performs local
+- **nib**: Per-file compilation. Parses, type-checks, performs local
   register allocation, emits Nib IR (pseudo-assembly with virtual registers),
   and outputs an interface file consumed by other compilations via `use`.
 
-- **nib bind**: Whole-program pass. Builds the call graph, propagates register
+- **nibbind**: Whole-program pass. Builds the call graph, propagates register
   assignments across function boundaries, resolves conflicts by inserting
   minimal moves and saves. Outputs fully-resolved V20 assembly — real
   register names, explicit saves/restores, no pseudoregisters. Inline
   `asm` blocks are spliced through as-is. The output is human-readable:
   the programmer can inspect exactly what the binder decided.
 
-- **nib asm**: V20 assembler. Encodes the assembly output from the binder
+- **nibasm**: V20 assembler. Encodes the assembly output from the binder
   into machine code. Two-pass to resolve jump offsets and short/long
   encoding selection. Also usable standalone for hand-written assembly.
   Uses Intel syntax with `bext`/`bins` for the V20 bit field instructions
-  (see Inline Assembly for the full mnemonic table).
+  (see Inline Assembly for the full mnemonic table). Outputs flat binary,
+  Intel HEX (`--ihex`), map files (`-m`), and debug info (`-d`).
 
 
 ## Types
@@ -613,7 +615,7 @@ Scans `haystack` for `needle`. Returns the offset where found, or
 the array length if not found. Result derived from DI after REPNE.
 
 ```
-load(src) -> u8 / u16      // LODSB or LODSW
+load(src) -> u8 / u16      // LODSB or LODSW  (not yet implemented)
 ```
 
 Loads one element from `src` and advances the source pointer (SI).
@@ -621,7 +623,7 @@ Respects DF (direction flag). Useful in loops processing arrays
 element by element.
 
 ```
-store(dst, val)             // STOSB or STOSW
+store(dst, val)             // STOSB or STOSW  (not yet implemented)
 ```
 
 Stores one element to `dst` and advances the destination pointer (DI).
@@ -749,8 +751,8 @@ lengths (see Structs / Bit fields). These builtins expose the full
 dynamic capability — runtime bit offset and length via registers.
 
 ```
-extract(src, offset, length) -> u16     // EXT
-insert(dst, offset, length, val)        // INS
+extract(src, offset, length) -> u16     // EXT  (not yet implemented)
+insert(dst, offset, length, val)        // INS  (not yet implemented)
 ```
 
 - `src`/`dst` — memory reference (loaded into SI for EXT, DI for INS)
@@ -782,8 +784,8 @@ fn read_bits(stream: u8[512], pos: u16, width: u8) -> u16 {
 ### Nibble rotate (V20 extension)
 
 ```
-nibble_rol(mem, val) -> u8  // ROL4 — rotate nibbles left through AL
-nibble_ror(mem, val) -> u8  // ROR4 — rotate nibbles right through AL
+nibble_rol(mem, val) -> u8  // ROL4  (not yet implemented)
+nibble_ror(mem, val) -> u8  // ROR4  (not yet implemented)
 ```
 
 Rotates 4-bit nibbles between a memory byte and AL. Used for
@@ -810,7 +812,7 @@ access section) which generates the BOUND automatically.
 ### Exchange helpers
 
 ```
-swap_flags(val)             // LAHF/SAHF — exchange AH with flags
+swap_flags(val)             // LAHF/SAHF  (not yet implemented)
 ```
 
 LAHF loads SF, ZF, AF, PF, CF into AH. SAHF stores AH back to those
@@ -1109,10 +1111,10 @@ interleaves source locations in its output.
 ### Generating debug info
 
 ```
-nib compile source.nib              # .nir includes ; @ comments
-nib bind source.nir -o source.asm   # carries comments through
-nibasm source.asm -o source.bin -d source.dbg   # writes .dbg
-nibdis source.bin -m source.map -d source.dbg   # shows source lines
+./nib compile source.nib              # .nir includes ; @ comments
+./nibbind source.nir -o source.asm    # carries comments through
+./nibasm source.asm -o source.bin -d source.dbg   # writes .dbg
+./nibdis source.bin -m source.map -d source.dbg   # shows source lines
 ```
 
 
@@ -1121,30 +1123,34 @@ nibdis source.bin -m source.map -d source.dbg   # shows source lines
 The interface file contains only `pub` declarations — the public API of
 a module. It records, per exported function:
 
-- **Parameters**: name, type, size, preferred register assignment
+- **Parameters**: name, type, register pin (if specified)
 - **Preserves**: which registers the function guarantees not to modify
-- **Returns**: type, size, preferred register
-- **Calls**: which other functions this function calls (for call graph)
+- **Returns**: type, register pin (if specified)
 
-The binder reads all interfaces, builds the call graph, and resolves
-register assignments globally. Where two functions disagree on register
-use, the binder inserts the minimum moves and push/pop sequences at
-call sites.
+The `.nif` is consumed by other modules via `use` for cross-module type
+checking. The binder does not read `.nif` files — it reads `.nir` files
+which contain the full IR including function bodies.
 
-Example interface (format TBD, shown as JSON for clarity):
+Example `.nif`:
 
-```json
-{
-  "fn": "scroll_line",
-  "params": [
-    {"name": "src", "type": "u16", "preferred": "SI"},
-    {"name": "dst", "type": "u16", "preferred": "DI"},
-    {"name": "len", "type": "u16", "preferred": "CX"}
-  ],
-  "preserves": ["AX", "BX", "DX", "BP", "DS", "ES", "SS"],
-  "returns": null,
-  "calls": []
-}
+```
+; Nib interface — generated by nib compile
+
+.fn scroll_line
+.preserves AX, BX, DX, BP
+.param %0, u16, "src"
+.param %1, u16, "dst"
+.param %2, u16, "len"
+.endfn
+
+.struct Point
+    x: u16
+    y: u16
+.endstruct
+
+.const SCREEN_WIDTH, 480
+
+.global frame_count, u16
 ```
 
 
@@ -1549,16 +1555,16 @@ Each source file compiles to two files:
 - **`.nir`** (Nib IR): Pseudo-assembly with virtual registers and
   metadata directives (`.fn`, `.param`, `.prefer`, `.calls`, etc).
   Consumed by the binder.
-- **`.nif`** (Nib interface): Function signatures, parameter types,
-  preferred register assignments. Consumed by `use` in other source
-  files.
+- **`.nif`** (Nib interface): `pub` function signatures, struct layouts,
+  constants, and extern declarations. Consumed by `use` in other source
+  files for cross-module type checking.
 
 ### Pipeline
 
 ```
-source.nib + deps.nif  →  [nib compile]  →  .nir + .nif
-all .nir files         →  [nib bind]     →  .asm
-.asm                   →  [nib asm]      →  binary
+source.nib + deps.nif  →  [nib]      →  .nir + .nif
+all .nir files         →  [nibbind]  →  .asm
+.asm                   →  [nibasm]   →  .bin + .map + .dbg
 ```
 
 

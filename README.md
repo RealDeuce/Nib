@@ -10,10 +10,9 @@ and predictable. You can reason about what assembly gets emitted.
 
 ## Status
 
-**Early development.** The language spec is drafted, the compiler emits
-typed IR with virtual registers, and the assembler/disassembler roundtrip
-correctly for all V20 instructions. The binder (whole-program register
-allocator) is not yet implemented.
+**Active development.** The full toolchain compiles Nib source through to
+V20 machine code. The language spec, compiler, binder, assembler,
+disassembler, and build driver are all working. 95 tests pass.
 
 ### What works
 
@@ -26,33 +25,46 @@ allocator) is not yet implemented.
   - `const` declarations, array initializers, `at()` placement, `&fn` addresses
   - `pub` visibility control — only `pub` declarations exported to `.nif`
   - Parameter/return register pins (`in REG`) and `clobbers()` for API boundaries
-  - Identifiers allow uppercase (`[a-zA-Z_][a-zA-Z0-9_]*`); struct type prefix required
+  - Source-level debug info (`; @file:line` comments in IR)
+- Binder (`nibbind`) — whole-program register allocation
+  - Call graph construction and topological sorting
+  - Bottom-up register preference propagation from leaves
+  - Inter-procedural register assignment across function boundaries
+  - Callee-save push/pop generation from `preserves` lists
+  - Extern parameter pin pre-propagation
+  - Spill slot allocation with BP frame pointer
+  - Constant pool and placed data block emission
 - Two-pass V20 cross-assembler (`nibasm`)
   - Full 8086/80186 instruction set
   - V20 extensions (bit ops, BCD string ops, nibble rotate, 8080 emulation)
   - `SEG` operator for segment-relative label references
-  - Map file output for symbol/data tracking
-  - Debug info output (`.dbg`) mapping binary addresses to source lines
+  - Map file output (`-m`), debug info output (`-d`)
+  - Intel HEX output (`--ihex`) for 20-bit address space
 - V20 disassembler (`nibdis`) with map file and debug info support
+- Build driver (`nibbuild`) — follows `use` chains, recompiles changed modules
 
 ### What's next
 
-- Binder with whole-program register allocation (`nib bind`)
 - Peephole optimizer (post-binder, on real assembly)
-- First program running in the emulator
+- A few unimplemented builtins (extract/insert, nibble rotate, load/store)
+- First program running on DreamWriter hardware
 
 ## Toolchain pipeline
 
 ```
 source.nib + deps.nif  --[nib compile]-->  .nir + .nif
-.nir files             --[nib bind]-->     .asm          (not yet implemented)
-.asm                   --[nib asm]-->      binary
+*.nir files            --[nibbind]-->      .asm
+.asm                   --[nibasm]-->       .bin + .map + .dbg
 ```
 
+For convenience, `nibbuild source.nib` runs all three stages,
+following `use` chains to discover and compile dependencies.
+
 - **`.nir`** — Nib IR: pseudo-assembly with virtual registers (`%0`, `%1`, ...)
-  and metadata (`.fn`, `.param`, `.prefer`, `.returns`)
-- **`.nif`** — Nib interface: function signatures, struct layouts, extern
-  declarations. Imported via `use "path.nif";` for cross-module type checking.
+  and metadata (`.fn`, `.param`, `.prefer`, `.returns`, `.preserves`)
+- **`.nif`** — Nib interface: `pub` function signatures, struct layouts,
+  extern declarations, constants. Imported via `use "path.nif";`.
+- **`.dbg`** — Debug info: maps binary addresses to source file:line.
 
 ## Building
 
@@ -64,23 +76,24 @@ make
 
 ## Quick start
 
-Compile a Nib source file:
+Compile and bind a Nib program:
 
 ```sh
-./nib source.nib                    # produces source.nir + source.nif
-./nib source.nib --parse-only       # parse and validate only
+./nib compile source.nib            # produces source.nir + source.nif
+./nibbind source.nir -o source.asm  # whole-program register allocation
+./nibasm source.asm -o source.bin -m source.map -d source.dbg
 ```
 
-Assemble a V20 program:
+Or use the build driver:
 
 ```sh
-./nibasm program.asm -o program.bin -m program.map
+./nibbuild source.nib               # compile + bind + assemble
 ```
 
-Disassemble with labels:
+Disassemble with labels and source lines:
 
 ```sh
-./nibdis -m program.map program.bin
+./nibdis -m source.map -d source.dbg source.bin
 ```
 
 ## Language overview
@@ -113,14 +126,8 @@ port_out(PORT_LCD, data);
 // Function address as far pointer
 far addr = &my_handler;
 
-// Globals at fixed addresses
+// Globals at fixed addresses with initializers
 far[4] ivt at(0x0000:0x0000) = {&h0, &h1, &h2, &h3};
-
-// Array initializers (short = zero-filled)
-u8[8] buf = {0x41, 0x42, 0x43};
-
-// Struct types require the struct keyword prefix
-fn read(p: struct Point) -> u16 { ... }
 
 // Visibility — only pub declarations exported to .nif
 pub fn lcd_clear(fill: u8) { ... }  // visible to importers
