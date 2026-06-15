@@ -2984,6 +2984,8 @@ static void emit_function(func_t *fn) {
         }
     }
 
+    fprintf(out_asm, "%s:\n", asm_name);
+
     /* Prologue */
     if (fn->is_interrupt) {
         fprintf(out_asm, "; interrupt handler vector 0x%02X\n", fn->int_vector);
@@ -2991,8 +2993,6 @@ static void emit_function(func_t *fn) {
         if (fn->is_reentrant)
             fprintf(out_asm, "    sti\n");
     }
-
-    fprintf(out_asm, "%s:\n", asm_name);
 
     /* Callee-save pushes */
     for (int i = 0; i < nsave; i++)
