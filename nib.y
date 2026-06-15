@@ -61,6 +61,7 @@ static reg_list_t *reg_list_append(reg_list_t *list, reg_list_t *item) {
 
 /* Temporary storage for fn_modifiers accumulation */
 static fn_modifiers_t current_mods;
+static bool asm_is_clobbers;
 
 static void mods_reset(void) {
     memset(&current_mods, 0, sizeof(current_mods));
@@ -608,21 +609,14 @@ for_stmt
 
 asm_block
     : KW_ASM asm_annotation '{' ASM_BODY
-        { $$ = mk_stmt_asm($4, $2,
-              /* is_clobbers: determined by which keyword was used —
-                 the annotation rule sets the rlist, and we need to know
-                 which it was. We'll use a convention: if the first node
-                 has rclass == -1, it's a preserves sentinel. Simpler:
-                 just track it in a global. */
-              false, true, yyline);
-          /* Note: is_clobbers gets patched by asm_annotation */ }
+        { $$ = mk_stmt_asm($4, $2, asm_is_clobbers, true, yyline); }
     | KW_ASM '{' ASM_BODY
         { $$ = mk_stmt_asm($3, NULL, false, false, yyline); }
     ;
 
 asm_annotation
-    : KW_CLOBBERS '(' reg_flag_list ')'     { $$ = $3; }
-    | KW_PRESERVES '(' reg_flag_list ')'    { $$ = $3; }
+    : KW_CLOBBERS '(' reg_flag_list ')'     { asm_is_clobbers = true; $$ = $3; }
+    | KW_PRESERVES '(' reg_flag_list ')'    { asm_is_clobbers = false; $$ = $3; }
     ;
 
 /* ==== Expressions ==== */

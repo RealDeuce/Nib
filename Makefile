@@ -34,11 +34,8 @@ check: nib.y
 	@echo "---"
 	@grep -c "conflict" nib.output || echo "No conflicts found"
 
-test: nib
-	@for f in tests/*.nib; do \
-		printf "%-30s " "$$f:"; \
-		./nib "$$f" 2>&1; \
-	done
+test: all
+	@sh tests/run_tests.sh
 
 clean:
 	rm -f nib nibasm nibdis nibbind nibbuild nib.tab.c nib.tab.h lex.yy.c nib.output bison_report.txt

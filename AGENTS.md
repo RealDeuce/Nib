@@ -81,7 +81,7 @@ Requires: bison 3.8+, flex 2.6+, clang (FreeBSD base).
 | `TODO.md` | Outstanding work items |
 | `asm.c` | V20 cross-assembler |
 | `dis.cpp` | Disassembler (wraps `../dreamulator/src/dis86.cpp`) |
-| `nib.y` | Bison grammar (zero conflicts) |
+| `nib.y` | Bison grammar (%expect 2: far param pin ambiguity) |
 | `nib.l` | Flex lexer (two modes: normal + asm block) |
 | `ast.h` / `ast.c` | AST node types and constructors |
 | `compile.h` / `compile.c` | Compiler backend: symbol table, type checker, .nir/.nif emitters |

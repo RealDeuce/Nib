@@ -238,6 +238,8 @@ typedef struct {
     int  addr_off;
     struct { int preg; } param_pins[16];
     int  nparams;
+    int  preserves[NUM_PREGS];  /* list of PREG_* preserved by extern */
+    int  npreserves;
 } extern_fn_t;
 
 #define MAX_EXTERNS 64
@@ -843,7 +845,9 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_BOUND;
             ins->src1 = parse_vreg(p, &p);
             skip_comma(&p);
-            ins->src2 = parse_vreg(p, &p);
+            p = skip_ws(p);
+            ins->has_imm = true;
+            ins->imm = (int)strtol(p, (char **)&p, 0);
         }
         else if (strcmp(opname, "setflag") == 0) {
             ins->op = IR_SETFLAG;
@@ -1225,6 +1229,23 @@ static void parse_nir(const char *path) {
                         ext->param_pins[pi].preg = parse_preg(reg);
                     }
                     pi++;
+                }
+                if (strncmp(ep, ".preserves", 10) == 0) {
+                    /* Parse comma-separated register list */
+                    ep += 10;
+                    while (*ep) {
+                        ep = skip_ws(ep);
+                        if (!*ep || *ep == '\n') break;
+                        char reg[16];
+                        read_word(ep, reg, sizeof(reg));
+                        if (!reg[0]) break;
+                        ep += strlen(reg);
+                        if (*ep == ',') ep++;
+                        if (strcmp(reg, "FLAGS") == 0) continue;
+                        int preg = parse_preg(reg);
+                        if (preg != PREG_NONE && ext->npreserves < NUM_PREGS)
+                            ext->preserves[ext->npreserves++] = preg;
+                    }
                 }
             }
             ext->nparams = pi;
@@ -2423,6 +2444,14 @@ static void emit_function(func_t *fn) {
                     break;
                 }
             }
+            /* Also check extern declarations for preserves */
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    for (int pp = 0; pp < externs[e].npreserves; pp++)
+                        callee_preserves[externs[e].preserves[pp]] = true;
+                    break;
+                }
+            }
             int call_saved[16];
             int call_nsaved = 0;
 
@@ -2851,9 +2880,18 @@ static void emit_function(func_t *fn) {
             break;
         }
 
-        case IR_BOUND:
-            fprintf(out_asm, "    ; bound check\n");
+        case IR_BOUND: {
+            /* Emit bounds check: if index >= limit, trigger INT 5 */
+            const char *idx_reg = vreg_asm(fn, ins->src1);
+            int limit = ins->imm;
+            if (limit > 0) {
+                fprintf(out_asm, "    cmp %s, %d\n", idx_reg, limit);
+                fprintf(out_asm, "    jb .bound_ok_%d\n", i);
+                fprintf(out_asm, "    int 0x05\n");
+                fprintf(out_asm, ".bound_ok_%d:\n", i);
+            }
             break;
+        }
 
         case IR_BREAK:
         case IR_CONTINUE:

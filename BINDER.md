@@ -90,13 +90,16 @@ preferences that violate addressing constraints are overridden.
 
 ### Phase 5: Liveness analysis
 
-Simple backward scan per function. For each vreg, compute first def
-and last use positions. This determines which vregs are simultaneously
-live and therefore cannot share a physical register.
+Simple linear liveness — no CFG, no SSA. Forward scan finds first def,
+backward scan finds last use. Live range is the interval [def, last_use].
+Loop-aware extension: backward jumps (loops) extend the live range of
+vregs defined before the loop and used inside it to the loop back-edge.
+This is conservative but correct for reducible control flow.
 
 ### Phase 6: Register allocation
 
-Linear scan with pre-coloring:
+Linear scan with pre-coloring (not graph coloring — no interference
+graph is built; conflicts are checked pairwise during assignment):
 1. Pre-colored vregs (from `.prefer` or `in REG` pins) get their
    assigned register first
 2. Remaining vregs are allocated in order, checking for conflicts

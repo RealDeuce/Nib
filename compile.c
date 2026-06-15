@@ -1190,7 +1190,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
 
         int dst = alloc_vreg();
         const char *lop = (elem && elem->kind == TYPE_U8) ? "loadb" : "load";
-        fprintf(C.nir, "    bound %%%d, %%%d\n", idx.vreg, arr.vreg);
+        int arr_len = (arr.type && arr.type->array_size > 0) ? arr.type->array_size : 0;
+        fprintf(C.nir, "    bound %%%d, %d\n", idx.vreg, arr_len);
         fprintf(C.nir, "    %s %%%d, %%%d[%%%d]\n", lop, dst, arr.vreg, scaled_idx2);
         return TV(dst, elem);
     }
@@ -2564,21 +2565,60 @@ static void import_nif(const char *path, int use_line) {
             continue;
         }
 
-        /* .struct name */
+        /* .struct name [, aligned] */
         if (strncmp(p, ".struct ", 8) == 0) {
             p += 8;
             char name[64];
-            nif_read_word(p, name, sizeof(name));
-            /* Register struct name so type checker knows it */
+            p = nif_read_word(p, name, sizeof(name));
+            bool aligned = false;
+            p = nif_skip_ws(p);
+            if (*p == ',') { p++; char q[16]; nif_read_word(p, q, sizeof(q));
+                if (strcmp(q, "aligned") == 0) aligned = true; }
+            /* Parse fields until .endstruct */
+            field_t *fields = NULL, *tail = NULL;
+            char sline[512];
+            while (fgets(sline, sizeof(sline), fp)) {
+                char *sp = sline;
+                while (*sp == ' ' || *sp == '\t') sp++;
+                int slen = strlen(sp);
+                while (slen > 0 && (sp[slen-1] == '\n' || sp[slen-1] == '\r'))
+                    sp[--slen] = '\0';
+                if (strncmp(sp, ".endstruct", 10) == 0) break;
+                /* Parse "name: type" or "name: bits(N)" or "_: bits(N)" */
+                char fname[64], ftype[64];
+                sp = nif_read_word(sp, fname, sizeof(fname));
+                /* Skip colon */
+                sp = nif_skip_ws(sp);
+                if (*sp == ':') sp++;
+                sp = nif_skip_ws(sp);
+                sp = nif_read_word(sp, ftype, sizeof(ftype));
+                field_t *f;
+                if (strncmp(ftype, "bits(", 5) == 0) {
+                    int bits = atoi(ftype + 5);
+                    f = mk_field_bits(strcmp(fname, "_") == 0 ? NULL : fname, bits);
+                } else {
+                    /* Check for "as type" */
+                    sp = nif_skip_ws(sp);
+                    if (strncmp(sp, "as ", 3) == 0) {
+                        sp += 3;
+                        char astype[64];
+                        nif_read_word(sp, astype, sizeof(astype));
+                        f = mk_field_typed_ptr(fname, nif_parse_type(ftype),
+                                               nif_parse_type(astype));
+                    } else {
+                        f = mk_field(fname, nif_parse_type(ftype));
+                    }
+                }
+                if (!fields) fields = f;
+                else tail->next = f;
+                tail = f;
+            }
             if (C.nstructs < 128) {
                 strncpy(C.structs[C.nstructs].name, name, 63);
-                C.structs[C.nstructs].fields = NULL;
-                C.structs[C.nstructs].aligned = false;
+                C.structs[C.nstructs].fields = fields;
+                C.structs[C.nstructs].aligned = aligned;
                 C.nstructs++;
             }
-            continue;
-        }
-        if (strncmp(p, ".endstruct", 10) == 0) {
             continue;
         }
 
