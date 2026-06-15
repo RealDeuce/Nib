@@ -3251,14 +3251,14 @@ static void emit_function(func_t *fn) {
                     if (strcmp(externs[e].name, ins->name) == 0) {
                         if (externs[e].is_interrupt) {
                             fprintf(out_asm, "    int 0x%02X\n", externs[e].int_vector);
+                            found_extern = true;
                         } else if (externs[e].has_address) {
                             fprintf(out_asm, "    call far 0x%04X:0x%04X\n",
                                     externs[e].addr_seg, externs[e].addr_off);
-                        } else {
-                            fprintf(out_asm, "    ; ERROR: extern '%s' has no address\n",
-                                    ins->name);
+                            found_extern = true;
                         }
-                        found_extern = true;
+                        /* No address: fall through to function lookup
+                         * (pub extern fn with body defines both) */
                         break;
                     }
                 }
