@@ -625,6 +625,43 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             continue;
         }
 
+        if (strncmp(p, ".vreg", 5) == 0) {
+            p += 5;
+            int v = parse_vreg(p, &p);
+            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            if (v >= 0 && v < MAX_VREGS) {
+                /* Parse type and flags: .vreg %N, type [, flag...] */
+                skip_comma(&p);
+                char tok[16];
+                read_word(p, tok, sizeof(tok));
+                p += strlen(tok);
+                if (strcmp(tok, "u8") == 0)
+                    fn->vregs[v].is_byte = true;
+                else if (strcmp(tok, "seg") == 0)
+                    fn->vregs[v].is_seg = true;
+                /* Parse optional flags */
+                while (*p) {
+                    skip_comma(&p);
+                    p = skip_ws(p);
+                    if (!*p || *p == '\n' || *p == ';') break;
+                    read_word(p, tok, sizeof(tok));
+                    p += strlen(tok);
+                    if (strcmp(tok, "csref") == 0)
+                        fn->vregs[v].is_cs_ref = true;
+                    else if (strcmp(tok, "const") == 0)
+                        fn->vregs[v].is_const = true;
+                    else if (strncmp(tok, "pin=", 4) == 0) {
+                        int preg = parse_preg(tok + 4);
+                        fn->vregs[v].prefer = preg;
+                        if (preg >= PREG_ES && preg <= PREG_DS)
+                            fn->vregs[v].is_seg = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        /* Legacy annotations — kept for backward compatibility */
         if (strncmp(p, ".byte", 5) == 0) {
             p += 5;
             int v = parse_vreg(p, &p);

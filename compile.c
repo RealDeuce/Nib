@@ -574,8 +574,12 @@ static int emit_expr(expr_t *e) {
 
 static typed_vreg_t TV(int vreg, type_t *type) {
     typed_vreg_t tv = { vreg, type };
-    if (type && type->kind == TYPE_U8 && C.nir)
-        fprintf(C.nir, ".byte %%%d\n", vreg);
+    if (type && C.nir) {
+        if (type->kind == TYPE_U8)
+            fprintf(C.nir, ".vreg %%%d, u8\n", vreg);
+        else if (type->kind == TYPE_SEG)
+            fprintf(C.nir, ".vreg %%%d, seg\n", vreg);
+    }
     return tv;
 }
 
@@ -638,7 +642,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 else
                     fprintf(C.nir, "    mov %%%d, %s\n", r, sym->name);
                 if (sym->is_cs_data)
-                    fprintf(C.nir, ".csref %%%d\n", r);
+                    fprintf(C.nir, ".vreg %%%d, u16, csref\n", r);
             }
             return TV(r, sym->type);
         }
@@ -884,7 +888,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 int cx = alloc_vreg();
                 fprintf(C.nir, ".prefer %%%d, DI\n", di);
                 fprintf(C.nir, ".prefer %%%d, AL\n", al);
-                fprintf(C.nir, ".byte %%%d\n", al);
+                fprintf(C.nir, ".vreg %%%d, u8\n", al);
                 fprintf(C.nir, ".prefer %%%d, CX\n", cx);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", al, arg_vregs[1]);
@@ -1159,7 +1163,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             symbol_t *arr_sym = (e->u.index.array->kind == EXPR_IDENT)
                 ? sym_lookup(e->u.index.array->u.ident) : NULL;
             if (arr_sym && arr_sym->is_cs_data)
-                fprintf(C.nir, ".csref %%%d\n", dst);
+                fprintf(C.nir, ".vreg %%%d, u16, csref\n", dst);
             return TV(dst, elem);
         }
         const char *op = (elem->kind == TYPE_U8) ? "loadb" : "load";
@@ -1523,7 +1527,8 @@ static void emit_stmt(stmt_t *s) {
             cerr(s->line, "unsized array requires an initializer");
         }
         if (sym->is_const)
-            fprintf(C.nir, ".immutable %%%d\n", sym->vreg);
+            fprintf(C.nir, ".vreg %%%d, %s, const\n", sym->vreg,
+                    (s->u.vardecl.type && s->u.vardecl.type->kind == TYPE_U8) ? "u8" : "u16");
         if (sym->is_pinned) {
             fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg,
                     reg_name_str(sym->pinned_reg, sym->pin_class));
