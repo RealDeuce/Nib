@@ -1,0 +1,10 @@
+// Test: imul reg, imm must move result to destination vreg.
+// When dst != src1, the result in src1's register must be
+// moved to dst. Without this, the result stays in src1 and
+// subsequent code clobbers it.
+
+fn compute(a: u16, b: u16) -> u16 {
+    u16 x = a * 6;
+    u16 y = b * 8;
+    return x + y;
+}

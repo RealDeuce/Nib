@@ -1810,9 +1810,11 @@ static void emit_function(func_t *fn) {
             if (strcmp(op, "mul") == 0 || strcmp(op, "imul") == 0) {
                 /* MUL/IMUL: AX * src -> DX:AX */
                 if (ins->has_imm) {
-                    /* IMUL reg, imm (186+ three-operand form) */
+                    /* IMUL reg, imm (186+ three-operand form)
+                     * Result goes into src1's register. Move to dst. */
                     fprintf(out_asm, "    imul %s, %d\n",
                             vreg_asm(fn, ins->src1), ins->imm);
+                    emit_mov(fn, ins->dst, ins->src1);
                 } else {
                     fprintf(out_asm, "    %s %s\n", op, vreg_asm(fn, ins->src2));
                 }
