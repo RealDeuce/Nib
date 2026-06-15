@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <ctype.h>
 #include <stdarg.h>
 
@@ -233,6 +234,17 @@ typedef struct {
     /* Interference graph: adj[v] is bitset of vregs that interfere with v */
     uint64_t    igraph[MAX_VREGS][VREG_WORDS];
     int         degree[MAX_VREGS]; /* number of neighbors */
+
+    /* Resolved instruction stream (post-allocation, pre-emission) */
+#define MAX_RESOLVED 8192
+    struct {
+        enum { RINS_IR, RINS_ASM } kind;
+        union {
+            int  ir_idx;        /* index into insns[] */
+            char asm_text[128]; /* pre-formatted assembly line */
+        };
+    } resolved[MAX_RESOLVED];
+    int nresolved;
 
     /* Labels: name -> insn index */
     struct { char name[64]; int insn_idx; } labels[MAX_LABELS];
@@ -2103,6 +2115,105 @@ static void allocate_registers(func_t *fn, bool bp_available) {
 }
 
 /* ================================================================
+ * Post-allocation move insertion
+ * ================================================================ */
+
+/* Compute which physical registers are free at instruction position `pos`
+ * within block `b`. Returns a bitmask of free PREG_* values. */
+static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
+    bblock_t *bb = &fn->blocks[b_idx];
+    uint64_t live[VREG_WORDS];
+    memcpy(live, bb->live_out, sizeof(live));
+
+    /* Walk backward from block end to pos, maintaining live set */
+    for (int i = bb->end - 1; i >= pos; i--) {
+        ir_insn_t *ins = &fn->insns[i];
+
+        /* Remove defs (vreg dies here going backward) */
+        if (ins->dst >= 0 && ins->dst < fn->nvregs &&
+            ins->op != IR_STORE && ins->op != IR_STOREMEM &&
+            ins->op != IR_STOREFIELD)
+            vset_clear(live, ins->dst);
+
+        /* Add uses (vreg becomes live going backward) */
+        if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+            vset_set(live, ins->src1);
+        if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
+            vset_set(live, ins->src2);
+        for (int j = 0; j < 8; j++)
+            if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
+                vset_set(live, ins->extra_args[j]);
+        if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
+             ins->op == IR_STOREFIELD) &&
+            ins->dst >= 0 && ins->dst < fn->nvregs)
+            vset_set(live, ins->dst);
+    }
+
+    /* Build set of occupied physical registers */
+    uint32_t occupied = 0;
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (!vset_test(live, v)) continue;
+        int preg = fn->vregs[v].assigned;
+        if (preg == PREG_NONE) continue;
+        occupied |= (1u << preg);
+        /* Also mark aliases as occupied */
+        if (preg < 4) { /* word reg — mark byte halves */
+            occupied |= (1u << preg_alias_lo[preg]);
+            occupied |= (1u << preg_alias_hi[preg]);
+        } else if (preg >= PREG_AL && preg <= PREG_BH) {
+            occupied |= (1u << preg_alias_parent[preg]);
+            /* Mark sibling byte */
+            int parent = preg_alias_parent[preg];
+            occupied |= (1u << preg_alias_lo[parent]);
+            occupied |= (1u << preg_alias_hi[parent]);
+        }
+    }
+    /* SP is never free; BP is never free if frame pointer */
+    occupied |= (1u << PREG_SP);
+    if (fn->needs_frame) occupied |= (1u << PREG_BP);
+
+    return ~occupied;  /* free = complement of occupied */
+}
+
+/* Find which block contains instruction index `pos` */
+static int block_of(func_t *fn, int pos) {
+    for (int b = 0; b < fn->nblocks; b++)
+        if (pos >= fn->blocks[b].start && pos < fn->blocks[b].end)
+            return b;
+    return 0;
+}
+
+/* Add a resolved IR instruction */
+static void rins_ir(func_t *fn, int ir_idx) {
+    if (fn->nresolved >= MAX_RESOLVED) return;
+    fn->resolved[fn->nresolved].kind = RINS_IR;
+    fn->resolved[fn->nresolved].ir_idx = ir_idx;
+    fn->nresolved++;
+}
+
+/* Add a resolved pre-formatted assembly line */
+static void rins_asm(func_t *fn, const char *fmt, ...) {
+    if (fn->nresolved >= MAX_RESOLVED) return;
+    fn->resolved[fn->nresolved].kind = RINS_ASM;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(fn->resolved[fn->nresolved].asm_text,
+              sizeof(fn->resolved[fn->nresolved].asm_text), fmt, ap);
+    va_end(ap);
+    fn->nresolved++;
+}
+
+/* Build the resolved instruction stream.
+ * Currently passes through all instructions unchanged — fixup
+ * categories will be added incrementally. */
+static void insert_fixup_moves(func_t *fn) {
+    fn->nresolved = 0;
+    for (int i = 0; i < fn->ninsns; i++) {
+        rins_ir(fn, i);
+    }
+}
+
+/* ================================================================
  * Assembly emission
  * ================================================================ */
 
@@ -3801,6 +3912,9 @@ int main(int argc, char **argv) {
             allocate_registers(fn, false);
         }
         fn->frame_size = fn->nspill_slots * 2;
+
+        /* Build resolved instruction stream (move insertion pass) */
+        insert_fixup_moves(fn);
 
         /* Count CL fixups: shift/rotate ops where count didn't get CL */
         fn->ncl_fixups = 0;
