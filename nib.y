@@ -1,4 +1,4 @@
-%expect 2  /* far IN: shift wins for far-specific pin form (far in ES:SI) */
+%expect 0
 %{
 #include <stdio.h>
 #include <stdlib.h>
@@ -452,10 +452,12 @@ param
     | KW_VALUE IDENT ':' type       { $$ = mk_param($2, $4, true); }
     | IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
+    | IDENT ':' type KW_IN seg_reg ':' word_reg
+        { if (!$3 || $3->kind != TYPE_FAR)
+              yyerror("seg:reg pin is only valid for far32 parameters");
+          $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     | KW_VALUE IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($2, $4, $6.reg, $6.rclass); $$->is_value = true; }
-    | IDENT ':' KW_FAR32 KW_IN seg_reg ':' word_reg
-        { $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     ;
 
 extern_param_list
@@ -466,8 +468,10 @@ extern_param_list
 extern_param
     : IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
-    | IDENT ':' KW_FAR32 KW_IN seg_reg ':' word_reg
-        { $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
+    | IDENT ':' type KW_IN seg_reg ':' word_reg
+        { if (!$3 || $3->kind != TYPE_FAR)
+              yyerror("seg:reg pin is only valid for far32 parameters");
+          $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     ;
 
 /* ==== Statements ==== */
