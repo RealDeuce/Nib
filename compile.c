@@ -1310,8 +1310,33 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_RAW_FIELD: {
         /* Same as EXPR_FIELD but returns storage type, ignoring as annotation.
-         * Also handles far type component access: ptr`seg, ptr`off */
+         * Also handles far type component access: ptr`seg, ptr`off
+         * and array metadata: arr`len, arr`sz */
         typed_vreg_t obj = emit_expr_typed(e->u.field.object);
+
+        /* Array type: `len (element count) and `sz (byte size) */
+        if (obj.type && obj.type->kind == TYPE_ARRAY) {
+            const char *fname = e->u.field.field_name;
+            if (strcmp(fname, "len") == 0) {
+                int dst = alloc_vreg();
+                fprintf(C.nir, "    mov %%%d, %d\n", dst, obj.type->array_size);
+                return TV(dst, mk_type(TYPE_U16));
+            } else if (strcmp(fname, "sz") == 0) {
+                int elem_sz = 1;
+                if (obj.type->element_type) {
+                    switch (obj.type->element_type->kind) {
+                    case TYPE_U16: case TYPE_SEG: elem_sz = 2; break;
+                    case TYPE_FAR: case TYPE_U32: elem_sz = 4; break;
+                    default: elem_sz = 1; break;
+                    }
+                }
+                int dst = alloc_vreg();
+                fprintf(C.nir, "    mov %%%d, %d\n", dst, obj.type->array_size * elem_sz);
+                return TV(dst, mk_type(TYPE_U16));
+            } else {
+                cerr(e->line, "array type only has `len and `sz, not `%s", fname);
+            }
+        }
 
         /* far type: `seg and `off */
         if (obj.type && obj.type->kind == TYPE_FAR) {

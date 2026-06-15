@@ -116,7 +116,7 @@ tracks flag liveness — a flag set by an ADD is available for a subsequent
 |------------|---------------|--------------------------------|
 | `u8[N]`    | N bytes       | Fixed-size byte array          |
 | `u16[N]`   | N * 2 bytes   | Fixed-size word array          |
-| `far[N]`   | N * 4 bytes   | Fixed-size far pointer array   |
+| `far32[N]` | N * 4 bytes   | Fixed-size far pointer array   |
 | `bcd[N]`   | N bytes       | Packed BCD, 2 digits per byte  |
 
 Array size is part of the type. `u8[80]` and `u8[40]` are distinct types.
@@ -131,6 +131,16 @@ u16[] table = {1, 2, 3, 4};    // u16[4], size inferred from elements
 ```
 
 Unsized arrays without an initializer are a compile error.
+
+Array metadata is accessible via backtick:
+
+```
+u16[10] table;
+u16 n = table`len;      // 10 (element count)
+u16 s = table`sz;       // 20 (total byte size: 10 * 2)
+```
+
+Both are compile-time constants emitted as immediates.
 
 ### Far type
 
