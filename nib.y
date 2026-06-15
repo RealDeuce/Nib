@@ -141,7 +141,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 
 /* ---- Keywords ---- */
 %token KW_FN KW_STRUCT KW_ALIGNED KW_EXTERN KW_FAR KW_FAR32
-%token KW_INTERRUPT
+%token KW_INTERRUPT KW_BARE
 %token KW_IF KW_ELSE KW_WHILE KW_FOR KW_IN
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
@@ -363,6 +363,7 @@ fn_modifiers
 fn_modifier
     : KW_FAR                    { current_mods.is_far = true; }
     | KW_INTERRUPT              { current_mods.is_interrupt = true; }
+    | KW_BARE                   { current_mods.is_bare = true; }
     | KW_AT '(' LIT_INT ':' LIT_INT ')'
         { current_mods.has_at = true; current_mods.at_seg = $3; current_mods.at_off = $5; }
     ;

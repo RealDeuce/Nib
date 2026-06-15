@@ -334,6 +334,7 @@ typedef enum {
 typedef struct {
     bool is_far;
     bool is_interrupt;
+    bool is_bare;
     bool has_preserves;
     bool is_clobbers;       /* true if clobbers() used instead of preserves() */
     reg_list_t *preserves;

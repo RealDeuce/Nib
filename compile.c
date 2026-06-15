@@ -2160,6 +2160,8 @@ static void compile_fn(decl_t *d) {
     if (d->u.fn.mods.is_far) fprintf(C.nir, ", far");
     if (d->u.fn.mods.is_interrupt)
         fprintf(C.nir, ", interrupt");
+    if (d->u.fn.mods.is_bare)
+        fprintf(C.nir, ", bare");
     if (d->u.fn.mods.has_at)
         fprintf(C.nir, ", at(0x%04X:0x%04X)", d->u.fn.mods.at_seg, d->u.fn.mods.at_off);
     fprintf(C.nir, "\n");

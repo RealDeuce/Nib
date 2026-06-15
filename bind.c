@@ -205,6 +205,7 @@ typedef struct {
     bool        is_pub;
     bool        is_far;
     bool        is_interrupt;
+    bool        is_bare;
     bool        has_at;
     int         at_seg;
     int         at_off;
@@ -417,6 +418,9 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         /* reentrant removed */
         else if (strcmp(word, "interrupt") == 0) {
             fn->is_interrupt = true;
+        }
+        else if (strcmp(word, "bare") == 0) {
+            fn->is_bare = true;
         }
         else if (strncmp(word, "at(", 3) == 0) {
             fn->has_at = true;
@@ -2984,19 +2988,21 @@ static void emit_function(func_t *fn) {
 
     fprintf(out_asm, "%s:\n", asm_name);
 
-    /* Prologue */
-    if (fn->is_interrupt)
-        fprintf(out_asm, "    pusha\n");
+    /* Prologue (bare functions manage their own stack) */
+    if (!fn->is_bare) {
+        if (fn->is_interrupt)
+            fprintf(out_asm, "    pusha\n");
 
-    /* Callee-save pushes */
-    for (int i = 0; i < nsave; i++)
-        fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
+        /* Callee-save pushes */
+        for (int i = 0; i < nsave; i++)
+            fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
 
-    if (fn->needs_frame) {
-        fprintf(out_asm, "    push bp\n");
-        fprintf(out_asm, "    mov bp, sp\n");
-        if (fn->frame_size > 0)
-            fprintf(out_asm, "    sub sp, %d\n", fn->frame_size);
+        if (fn->needs_frame) {
+            fprintf(out_asm, "    push bp\n");
+            fprintf(out_asm, "    mov bp, sp\n");
+            if (fn->frame_size > 0)
+                fprintf(out_asm, "    sub sp, %d\n", fn->frame_size);
+        }
     }
 
     /* Body — iterate resolved instruction stream */
@@ -3354,20 +3360,22 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_RET:
-            if (fn->needs_frame) {
-                fprintf(out_asm, "    mov sp, bp\n");
-                fprintf(out_asm, "    pop bp\n");
-            }
-            /* Callee-save pops (reverse order) */
-            for (int j = nsave - 1; j >= 0; j--)
-                fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
-            if (fn->is_interrupt) {
-                fprintf(out_asm, "    popa\n");
-                fprintf(out_asm, "    iret\n");
-            } else if (fn->is_far) {
-                fprintf(out_asm, "    retf\n");
-            } else {
-                fprintf(out_asm, "    ret\n");
+            if (!fn->is_bare) {
+                if (fn->needs_frame) {
+                    fprintf(out_asm, "    mov sp, bp\n");
+                    fprintf(out_asm, "    pop bp\n");
+                }
+                /* Callee-save pops (reverse order) */
+                for (int j = nsave - 1; j >= 0; j--)
+                    fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
+                if (fn->is_interrupt) {
+                    fprintf(out_asm, "    popa\n");
+                    fprintf(out_asm, "    iret\n");
+                } else if (fn->is_far) {
+                    fprintf(out_asm, "    retf\n");
+                } else {
+                    fprintf(out_asm, "    ret\n");
+                }
             }
             break;
 
@@ -3587,7 +3595,8 @@ static void emit_function(func_t *fn) {
     }
 
     /* Final ret if not already emitted */
-    if (fn->ninsns == 0 || fn->insns[fn->ninsns-1].op != IR_RET) {
+    if (!fn->is_bare &&
+        (fn->ninsns == 0 || fn->insns[fn->ninsns-1].op != IR_RET)) {
         if (fn->needs_frame) {
             fprintf(out_asm, "    mov sp, bp\n");
             fprintf(out_asm, "    pop bp\n");

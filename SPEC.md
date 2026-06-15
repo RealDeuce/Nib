@@ -1765,6 +1765,36 @@ ivt_install(0xF8, keyboard_handler);
   the appropriate OUT instruction for their IRQ.
 
 
+## Bare Functions
+
+The `bare` qualifier suppresses all compiler-generated prologue and
+epilogue — no frame setup, no callee-save push/pop, no RET. The
+function body has full control over the stack and registers.
+
+```
+pub fn bare at(0xE000:0x0000) reset() {
+    // set up SS:SP, DS, ES manually
+    SS := 0x0000;
+    SP := 0x3FA0;
+    DS := 0x0000;
+    // ...
+}
+```
+
+If the function has spills, the programmer must set up BP as a frame
+pointer before any spilled variable is accessed:
+
+```
+fn bare boot() {
+    // BP must be valid before the compiler can spill to [BP-N]
+    asm { push bp; mov bp, sp; sub sp, 16 }
+    // ... body with spills uses [BP-2], [BP-4], etc. ...
+    asm { mov sp, bp; pop bp; ret }
+}
+```
+
+Without a valid BP, any spilled vreg access will read/write garbage.
+
 ## Modules
 
 ### use
