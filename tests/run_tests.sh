@@ -326,6 +326,15 @@ if [ -f /tmp/t_byte_array.asm ]; then
     fi
 fi
 
+# Pointer deref: near [var] must use DS-default addressable register (BX, SI, DI)
+if [ -f /tmp/t_deref.asm ]; then
+    if grep -q '\[BX\]\|mov \[SI\]\|mov \[DI\]' /tmp/t_deref.asm && ! grep -q '\[AX\]\|\[CX\]\|\[DX\]' /tmp/t_deref.asm; then
+        pass "deref: near pointer uses DS-default addressable register"
+    else
+        fail "deref" "near pointer deref uses invalid register for memory operand"
+    fi
+fi
+
 echo ""
 
 echo "--- Type error tests (expected failures) ---"

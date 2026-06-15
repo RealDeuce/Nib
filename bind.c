@@ -143,6 +143,7 @@ typedef struct {
     bool    needs_addressable; /* true if used in memory operand (any of base/index) */
     bool    needs_base;        /* true if used as base: must be BX or BP */
     bool    needs_index;       /* true if used as index: must be SI or DI */
+    bool    needs_ds_addr;     /* true if used as DS-relative address: BX, SI, DI (not BP) */
     bool    needs_cl;          /* true if used as shift/rotate count: must be CL */
     bool    is_const;          /* true if immutable — prefer to spill over mutable */
     int     use_count;         /* number of instructions referencing this vreg */
@@ -845,24 +846,54 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         else if (strcmp(opname, "loadmem") == 0) {
             ins->op = IR_LOADMEM;
             ins->dst = parse_vreg(p, &p);
-            /* Rest is address text — store as name */
             skip_comma(&p);
             p = skip_ws(p);
-            strncpy(ins->name, p, 63);
+            if (*p == '%') {
+                /* Vreg-based form: loadmem %dst, %off [, %seg] */
+                ins->src1 = parse_vreg(p, &p);
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p == '%')
+                    ins->src2 = parse_vreg(p, &p);
+                ins->name[0] = '\0'; /* no address text */
+            } else {
+                /* Label/address form: loadmem %dst, [addr] */
+                strncpy(ins->name, p, 63);
+            }
         }
         else if (strcmp(opname, "storemem") == 0) {
             ins->op = IR_STOREMEM;
-            /* Address text then vreg */
             p = skip_ws(p);
-            /* Read until ], */
-            char *bracket = strrchr(p, ']');
-            if (bracket) {
-                int alen = (int)(bracket - p + 1);
-                memcpy(ins->name, p, alen);
-                ins->name[alen] = '\0';
-                p = bracket + 1;
+            if (*p == '%') {
+                /* Vreg-based form: storemem %off [, %seg], %val */
+                ins->dst = parse_vreg(p, &p);
                 skip_comma(&p);
-                ins->src1 = parse_vreg(p, &p);
+                p = skip_ws(p);
+                if (*p == '%') {
+                    int v1 = parse_vreg(p, &p);
+                    skip_comma(&p);
+                    p = skip_ws(p);
+                    if (*p == '%') {
+                        /* Three vregs: off, seg, val */
+                        ins->src2 = v1; /* seg */
+                        ins->src1 = parse_vreg(p, &p); /* val */
+                    } else {
+                        /* Two vregs: off, val */
+                        ins->src1 = v1; /* val */
+                    }
+                }
+                ins->name[0] = '\0';
+            } else {
+                /* Label/address form: storemem [addr], %val */
+                char *bracket = strrchr(p, ']');
+                if (bracket) {
+                    int alen = (int)(bracket - p + 1);
+                    memcpy(ins->name, p, alen);
+                    ins->name[alen] = '\0';
+                    p = bracket + 1;
+                    skip_comma(&p);
+                    ins->src1 = parse_vreg(p, &p);
+                }
             }
         }
         else if (strcmp(opname, "field") == 0) {
@@ -1888,6 +1919,18 @@ static void scan_addressing_constraints(func_t *fn) {
                 fn->vregs[ins->src2].needs_index = true;
             }
         }
+        /* Vreg-based loadmem/storemem: offset vreg needs addressable */
+        if ((ins->op == IR_LOADMEM || ins->op == IR_STOREMEM) &&
+            ins->name[0] == '\0') {
+            /* For loadmem: src1=off, src2=seg; for storemem: dst=off, src2=seg */
+            int off_vreg = (ins->op == IR_LOADMEM) ? ins->src1 : ins->dst;
+            bool has_seg = (ins->src2 >= 0);
+            if (off_vreg >= 0 && off_vreg < MAX_VREGS) {
+                fn->vregs[off_vreg].needs_addressable = true;
+                if (!has_seg)
+                    fn->vregs[off_vreg].needs_ds_addr = true;
+            }
+        }
     }
     /* Propagate is_cs_ref through mov chains */
     for (int i = 0; i < fn->ninsns; i++) {
@@ -1917,6 +1960,9 @@ static int get_vreg_pool(func_t *fn, int v, bool bp_available, int *pool) {
         pool[n++] = PREG_BX;
         if (bp_available) pool[n++] = PREG_BP;
     } else if (vr->needs_index) {
+        pool[n++] = PREG_SI; pool[n++] = PREG_DI;
+    } else if (vr->needs_ds_addr) {
+        pool[n++] = PREG_BX;
         pool[n++] = PREG_SI; pool[n++] = PREG_DI;
     } else if (vr->needs_addressable) {
         pool[n++] = PREG_BX;
@@ -3202,34 +3248,115 @@ static void emit_function(func_t *fn) {
 
         case IR_LOADMEM:
         case IR_STOREMEM: {
-            /* Address register fixup handled by move insertion pass */
-
             if (ins->op == IR_LOADMEM) {
                 bool dst_byte = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                                  fn->vregs[ins->dst].is_byte);
-                if (is_spilled(fn, ins->dst)) {
-                    const char *acc = dst_byte ? "AL" : "AX";
-                    fprintf(out_asm, "    mov %s, %s\n", acc, ins->name);
-                    fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
+                if (ins->name[0]) {
+                    /* Label-based: loadmem %dst, [addr_text] */
+                    if (is_spilled(fn, ins->dst)) {
+                        const char *acc = dst_byte ? "AL" : "AX";
+                        fprintf(out_asm, "    mov %s, %s\n", acc, ins->name);
+                        fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
+                    } else {
+                        fprintf(out_asm, "    mov %s, %s\n",
+                                vreg_asm(fn, ins->dst), ins->name);
+                    }
                 } else {
-                    fprintf(out_asm, "    mov %s, %s\n",
-                            vreg_asm(fn, ins->dst), ins->name);
+                    /* Vreg-based: loadmem %dst, %off [, %seg] */
+                    bool has_seg = (ins->src2 >= 0);
+                    const char *d = vreg_asm(fn, ins->dst);
+                    const char *acc = dst_byte ? "AL" : "AX";
+                    /* Resolve offset register — if spilled, load into BX scratch */
+                    const char *off_reg;
+                    bool off_spilled = is_spilled(fn, ins->src1);
+                    if (off_spilled) {
+                        fprintf(out_asm, "    push BX\n");
+                        fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+                        off_reg = "BX";
+                    } else {
+                        off_reg = vreg_asm(fn, ins->src1);
+                    }
+                    if (has_seg) {
+                        /* Far: set up ES from seg vreg, then mov dst, [ES:off] */
+                        if (is_spilled(fn, ins->src2)) {
+                            fprintf(out_asm, "    push AX\n");
+                            fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
+                            fprintf(out_asm, "    mov ES, AX\n");
+                            fprintf(out_asm, "    pop AX\n");
+                        }
+                        if (is_spilled(fn, ins->dst)) {
+                            fprintf(out_asm, "    mov %s, [ES:%s]\n", acc, off_reg);
+                            fprintf(out_asm, "    mov %s, %s\n", d, acc);
+                        } else {
+                            fprintf(out_asm, "    mov %s, [ES:%s]\n", d, off_reg);
+                        }
+                    } else {
+                        /* Near: mov dst, [off] */
+                        if (is_spilled(fn, ins->dst)) {
+                            fprintf(out_asm, "    mov %s, [%s]\n", acc, off_reg);
+                            fprintf(out_asm, "    mov %s, %s\n", d, acc);
+                        } else {
+                            fprintf(out_asm, "    mov %s, [%s]\n", d, off_reg);
+                        }
+                    }
+                    if (off_spilled)
+                        fprintf(out_asm, "    pop BX\n");
                 }
             } else {
-                bool src_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                                 fn->vregs[ins->src1].is_byte);
-                if (is_spilled(fn, ins->src1)) {
-                    const char *acc = src_byte ? "AL" : "AX";
-                    fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
-                    fprintf(out_asm, "    mov %s, %s\n", ins->name, acc);
+                if (ins->name[0]) {
+                    /* Label-based: storemem [addr_text], %val */
+                    bool src_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                                     fn->vregs[ins->src1].is_byte);
+                    if (is_spilled(fn, ins->src1)) {
+                        const char *acc = src_byte ? "AL" : "AX";
+                        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+                        fprintf(out_asm, "    mov %s, %s\n", ins->name, acc);
+                    } else {
+                        fprintf(out_asm, "    mov %s, %s\n",
+                                ins->name, vreg_asm(fn, ins->src1));
+                    }
                 } else {
-                    fprintf(out_asm, "    mov %s, %s\n",
-                            ins->name, vreg_asm(fn, ins->src1));
+                    /* Vreg-based: storemem %off [, %seg], %val */
+                    bool has_seg = (ins->src2 >= 0);
+                    bool val_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                                     fn->vregs[ins->src1].is_byte);
+                    /* Resolve offset register — if spilled, load into BX scratch */
+                    const char *off_reg;
+                    bool off_spilled = is_spilled(fn, ins->dst);
+                    if (off_spilled) {
+                        fprintf(out_asm, "    push BX\n");
+                        fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->dst));
+                        off_reg = "BX";
+                    } else {
+                        off_reg = vreg_asm(fn, ins->dst);
+                    }
+                    /* Resolve value — if spilled, load into accumulator */
+                    const char *val_reg;
+                    bool val_spilled = is_spilled(fn, ins->src1);
+                    if (val_spilled) {
+                        const char *acc = val_byte ? "AL" : "AX";
+                        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+                        val_reg = acc;
+                    } else {
+                        val_reg = vreg_asm(fn, ins->src1);
+                    }
+                    if (has_seg) {
+                        if (is_spilled(fn, ins->src2)) {
+                            fprintf(out_asm, "    push AX\n");
+                            fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
+                            fprintf(out_asm, "    mov ES, AX\n");
+                            fprintf(out_asm, "    pop AX\n");
+                        }
+                        fprintf(out_asm, "    mov [ES:%s], %s\n", off_reg, val_reg);
+                    } else {
+                        fprintf(out_asm, "    mov [%s], %s\n", off_reg, val_reg);
+                    }
+                    if (off_spilled)
+                        fprintf(out_asm, "    pop BX\n");
                 }
             }
             break;
         }
-            break;
 
         case IR_FIELD:
             fprintf(out_asm, "    ; field %s.%s -> %s\n",

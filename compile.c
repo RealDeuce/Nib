@@ -1268,35 +1268,20 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, mk_type(TYPE_U8));
     }
     case EXPR_DEREF: {
-        /* [var] — pointer dereference through a far or u16 variable */
+        /* [var] — pointer dereference through a far or u16 variable.
+         * Emits vreg-based loadmem: the binder allocates the address
+         * vregs to appropriate registers (SI for offset, ES for segment). */
         symbol_t *sym = sym_lookup(e->u.deref.name);
         if (!sym)
             cerr(e->line, "undefined variable '%s' in dereference", e->u.deref.name);
         int dst = alloc_vreg();
         if (sym->type && sym->type->kind == TYPE_FAR && sym->vreg_seg >= 0) {
-            /* Far pointer: set up seg:off for [SEG:SI] access */
-            const char *seg = (e->u.deref.seg != REG_NONE)
-                ? sreg_name(e->u.deref.seg) : "ES";
-            int sv = alloc_vreg();
-            int ov = alloc_vreg();
-            fprintf(C.nir, "    ; pin %%%d -> %s\n", sv, seg);
-            fprintf(C.nir, ".prefer %%%d, %s\n", sv, seg);
-            fprintf(C.nir, "    mov %%%d, %%%d\n", sv, sym->vreg_seg);
-            fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
-            fprintf(C.nir, ".prefer %%%d, SI\n", ov);
-            fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
-            fprintf(C.nir, "    loadmem %%%d, [%s:SI]\n", dst, seg);
+            /* Far pointer: loadmem dst, off_vreg, seg_vreg */
+            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
+                    dst, sym->vreg, sym->vreg_seg);
         } else {
-            /* Near pointer (u16): set up SI for [SI] access */
-            int ov = alloc_vreg();
-            fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
-            fprintf(C.nir, ".prefer %%%d, SI\n", ov);
-            fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
-            if (e->u.deref.seg != REG_NONE)
-                fprintf(C.nir, "    loadmem %%%d, [%s:SI]\n", dst,
-                        sreg_name(e->u.deref.seg));
-            else
-                fprintf(C.nir, "    loadmem %%%d, [SI]\n", dst);
+            /* Near pointer: loadmem dst, off_vreg */
+            fprintf(C.nir, "    loadmem %%%d, %%%d\n", dst, sym->vreg);
         }
         return TV(dst, mk_type(TYPE_U8));
     }
@@ -1714,32 +1699,16 @@ static void emit_stmt(stmt_t *s) {
             }
             fprintf(C.nir, "], %%%d\n", val.vreg);
         } else if (t->kind == EXPR_DEREF) {
-            /* [var] = value — store through pointer dereference */
+            /* [var] = value — store through pointer dereference.
+             * Vreg-based storemem: binder allocates address vregs. */
             symbol_t *sym = sym_lookup(t->u.deref.name);
             if (!sym)
                 cerr(t->line, "undefined variable '%s' in dereference", t->u.deref.name);
             if (sym->type && sym->type->kind == TYPE_FAR && sym->vreg_seg >= 0) {
-                const char *seg = (t->u.deref.seg != REG_NONE)
-                    ? sreg_name(t->u.deref.seg) : "ES";
-                int sv = alloc_vreg();
-                int ov = alloc_vreg();
-                fprintf(C.nir, "    ; pin %%%d -> %s\n", sv, seg);
-                fprintf(C.nir, ".prefer %%%d, %s\n", sv, seg);
-                fprintf(C.nir, "    mov %%%d, %%%d\n", sv, sym->vreg_seg);
-                fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
-                fprintf(C.nir, ".prefer %%%d, SI\n", ov);
-                fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
-                fprintf(C.nir, "    storemem [%s:SI], %%%d\n", seg, val.vreg);
+                fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
+                        sym->vreg, sym->vreg_seg, val.vreg);
             } else {
-                int ov = alloc_vreg();
-                fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
-                fprintf(C.nir, ".prefer %%%d, SI\n", ov);
-                fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
-                if (t->u.deref.seg != REG_NONE)
-                    fprintf(C.nir, "    storemem [%s:SI], %%%d\n",
-                            sreg_name(t->u.deref.seg), val.vreg);
-                else
-                    fprintf(C.nir, "    storemem [SI], %%%d\n", val.vreg);
+                fprintf(C.nir, "    storemem %%%d, %%%d\n", sym->vreg, val.vreg);
             }
         } else if (t->kind == EXPR_INDEX) {
             typed_vreg_t arr_tv = emit_expr_typed(t->u.index.array);
