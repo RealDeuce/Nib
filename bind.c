@@ -1417,8 +1417,9 @@ static void compute_liveness(func_t *fn) {
             int def = fn->vregs[v].def_pos;
             int use = fn->vregs[v].last_use;
             if (def < 0 || use < 0) continue;
-            /* Vreg is used inside loop body and defined before loop end */
-            if (def <= loop_end && use >= target && use < loop_end) {
+            /* Only extend vregs defined BEFORE the loop and used inside it.
+             * Vregs defined inside the loop are re-created each iteration. */
+            if (def < target && use >= target && use < loop_end) {
                 fn->vregs[v].last_use = loop_end;
             }
         }
@@ -1690,9 +1691,9 @@ static void emit_mov(func_t *fn, int dst, int src) {
     bool dst_byte = (dst >= 0 && dst < MAX_VREGS && fn->vregs[dst].is_byte);
     bool src_byte = (src >= 0 && src < MAX_VREGS && fn->vregs[src].is_byte);
     if (is_spilled(fn, dst) && is_spilled(fn, src)) {
-        /* mem-to-mem: go through AX */
-        fprintf(out_asm, "    mov AX, %s\n", s);
-        fprintf(out_asm, "    mov %s, AX\n", d);
+        /* mem-to-mem: use push/pop to avoid clobbering any register */
+        fprintf(out_asm, "    push word %s\n", s);
+        fprintf(out_asm, "    pop word %s\n", d);
     } else if (fn->vregs[dst].is_seg && fn->vregs[src].is_seg) {
         /* seg-to-seg: go through AX */
         fprintf(out_asm, "    mov AX, %s\n", s);
