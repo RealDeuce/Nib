@@ -2057,8 +2057,20 @@ static void emit_function(func_t *fn) {
                     break;
                 }
             }
-            if (!found_extern)
-                fprintf(out_asm, "    call %s\n", resolve_fn_name(ins->name));
+            if (!found_extern) {
+                /* Check if callee is a far function */
+                bool callee_far = false;
+                for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                    if (strcmp(functions[fi2].name, ins->name) == 0) {
+                        callee_far = functions[fi2].is_far;
+                        break;
+                    }
+                }
+                if (callee_far)
+                    fprintf(out_asm, "    call far %s\n", resolve_fn_name(ins->name));
+                else
+                    fprintf(out_asm, "    call %s\n", resolve_fn_name(ins->name));
+            }
             break;
         }
 
