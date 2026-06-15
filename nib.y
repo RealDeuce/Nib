@@ -371,8 +371,6 @@ fn_modifier
 interrupt_clause
     : KW_INTERRUPT '(' ')'
         { current_mods.is_interrupt = true; }
-    | KW_INTERRUPT '(' LIT_INT ')'
-        { current_mods.is_interrupt = true; current_mods.interrupt_vector = $3; }
     ;
 
 return_clause
@@ -427,7 +425,6 @@ extern_modifiers
 
 extern_modifier
     : KW_FAR                            { current_mods.is_far = true; }
-    | KW_INTERRUPT '(' LIT_INT ')'     { current_mods.is_interrupt = true; current_mods.interrupt_vector = $3; }
     ;
 
 return_clause_extern_type

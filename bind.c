@@ -267,8 +267,6 @@ typedef struct {
 typedef struct {
     char name[64];
     bool is_far;
-    bool is_interrupt;
-    int  int_vector;
     bool has_address;
     int  addr_seg;
     int  addr_off;
@@ -421,12 +419,6 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         else if (strcmp(word, "interrupt") == 0) {
             fn->is_interrupt = true;
         }
-        else if (strncmp(word, "interrupt(", 10) == 0) {
-            /* Legacy: interrupt(N) — vector number ignored */
-            fn->is_interrupt = true;
-            p = skip_ws(p);
-            if (*p == ')') p++;
-        }
         else if (strncmp(word, "at(", 3) == 0) {
             fn->has_at = true;
             /* word is "at(0xSEG:0xOFF" — colon inside the word */
@@ -438,12 +430,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             p = skip_ws(p);
             if (*p == ')') p++;
         }
-        else if (strncmp(word, "chain(", 6) == 0) {
-            /* chain() is deprecated — _vec always exists.
-             * Skip the argument for backward compat. */
-            p = skip_ws(p);
-            if (*p == ')') p++;
-        }
+        /* chain removed */
     }
 
     /* Read body lines until .endfn */
@@ -1317,11 +1304,6 @@ static void parse_nir(const char *path) {
                 if (!word[0]) break;
                 p += strlen(word);
                 if (strcmp(word, "far") == 0) ext->is_far = true;
-                else if (strncmp(word, "interrupt(", 10) == 0) {
-                    ext->is_interrupt = true;
-                    ext->int_vector = (int)strtol(word + 10, NULL, 0);
-                    p = skip_ws(p); if (*p == ')') p++;
-                }
                 else if (strncmp(word, "addr_seg=", 9) == 0) {
                     ext->has_address = true;
                     ext->addr_seg = (int)strtol(word + 9, NULL, 0);
@@ -3255,10 +3237,7 @@ static void emit_function(func_t *fn) {
                 bool found_extern = false;
                 for (int e = 0; e < nexterns; e++) {
                     if (strcmp(externs[e].name, ins->name) == 0) {
-                        if (externs[e].is_interrupt) {
-                            fprintf(out_asm, "    int 0x%02X\n", externs[e].int_vector);
-                            found_extern = true;
-                        } else if (externs[e].has_address) {
+                        if (externs[e].has_address) {
                             fprintf(out_asm, "    call far 0x%04X:0x%04X\n",
                                     externs[e].addr_seg, externs[e].addr_off);
                             found_extern = true;

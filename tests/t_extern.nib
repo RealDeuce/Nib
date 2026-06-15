@@ -6,7 +6,7 @@ extern fn far [0xF000:0x0050] rom_read(port: u16 in DX) -> u16 in AX
 extern fn far [0xF000:0x0100] rom_init()
     preserves(BP, DS, ES, SS);
 
-extern fn interrupt(0x21) dos_putchar(
+extern fn far [0xF000:0x0080] dos_putchar(
     svc: u8 in AH,
     char: u8 in DL
 ) preserves(BX, CX, SI, DI, BP, DS, ES, SS);

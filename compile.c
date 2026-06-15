@@ -2335,8 +2335,6 @@ static void compile_extern_fn(decl_t *d) {
     /* Emit to .nir so the binder knows how to call it */
     fprintf(C.nir, "\n.extern %s", d->u.extern_fn.name);
     if (d->u.extern_fn.mods.is_far) fprintf(C.nir, ", far");
-    if (d->u.extern_fn.mods.is_interrupt)
-        fprintf(C.nir, ", interrupt(0x%02X)", d->u.extern_fn.mods.interrupt_vector);
     if (d->u.extern_fn.has_address)
         fprintf(C.nir, ", addr_seg=0x%04X, addr_off=0x%04X",
                 d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
@@ -2366,8 +2364,6 @@ static void compile_extern_fn(decl_t *d) {
     /* Also emit to .nif for cross-module type checking */
     fprintf(C.nif, ".extern %s", d->u.extern_fn.name);
     if (d->u.extern_fn.mods.is_far) fprintf(C.nif, ", far");
-    if (d->u.extern_fn.mods.is_interrupt)
-        fprintf(C.nif, ", interrupt(0x%02X)", d->u.extern_fn.mods.interrupt_vector);
     if (d->u.extern_fn.has_address)
         fprintf(C.nif, ", addr_seg=0x%04X, addr_off=0x%04X",
                 d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
