@@ -1394,6 +1394,35 @@ static void compute_liveness(func_t *fn) {
         if (fn->vregs[i].def_pos >= 0 && fn->vregs[i].last_use < 0)
             fn->vregs[i].last_use = fn->vregs[i].def_pos;
     }
+
+    /* Loop-aware liveness: find backward jumps (loops) and extend
+     * liveness of vregs used inside the loop body.
+     * A vreg defined before the loop and used inside it must be live
+     * for the entire loop (since the back-edge re-enters). */
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->op != IR_JMP) continue;
+        /* Find the label this jumps to */
+        int target = -1;
+        for (int j = 0; j < fn->nlabels; j++) {
+            if (strcmp(fn->labels[j].name, ins->name) == 0) {
+                target = fn->labels[j].insn_idx;
+                break;
+            }
+        }
+        if (target < 0 || target >= i) continue; /* not a back-edge */
+        /* Loop from target..i — extend liveness of vregs used in this range */
+        int loop_end = i;
+        for (int v = 0; v < fn->nvregs; v++) {
+            int def = fn->vregs[v].def_pos;
+            int use = fn->vregs[v].last_use;
+            if (def < 0 || use < 0) continue;
+            /* Vreg is used inside loop body and defined before loop end */
+            if (def <= loop_end && use >= target && use < loop_end) {
+                fn->vregs[v].last_use = loop_end;
+            }
+        }
+    }
 }
 
 /* Check if two vregs have overlapping live ranges */
@@ -1836,27 +1865,54 @@ static void emit_function(func_t *fn) {
                 /* Load offset word from [ptr+0] */
                 bool cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
                            fn->vregs[ins->src1].is_cs_ref);
-                if (cs)
-                    fprintf(out_asm, "    mov %s, [CS:%s]\n",
-                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
-                else
-                    fprintf(out_asm, "    mov %s, [%s]\n",
-                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                const char *seg = cs ? "CS:" : "";
+                if (is_spilled(fn, ins->src1)) {
+                    fprintf(out_asm, "    push BX\n");
+                    fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+                    if (is_spilled(fn, ins->dst)) {
+                        fprintf(out_asm, "    mov AX, [%sBX]\n", seg);
+                        fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                    } else {
+                        fprintf(out_asm, "    mov %s, [%sBX]\n",
+                                vreg_asm(fn, ins->dst), seg);
+                    }
+                    fprintf(out_asm, "    pop BX\n");
+                } else if (is_spilled(fn, ins->dst)) {
+                    fprintf(out_asm, "    mov AX, [%s%s]\n",
+                            seg, vreg_asm(fn, ins->src1));
+                    fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                } else {
+                    fprintf(out_asm, "    mov %s, [%s%s]\n",
+                            vreg_asm(fn, ins->dst), seg, vreg_asm(fn, ins->src1));
+                }
                 break;
             }
             if (strcmp(op, "far.seg") == 0) {
                 /* Load segment word from [ptr+2] */
                 bool cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
                            fn->vregs[ins->src1].is_cs_ref);
+                const char *seg = cs ? "CS:" : "";
                 const char *d = vreg_asm(fn, ins->dst);
-                const char *s = vreg_asm(fn, ins->src1);
-                if (cs && fn->vregs[ins->dst].is_seg) {
-                    fprintf(out_asm, "    mov AX, [CS:%s+2]\n", s);
-                    fprintf(out_asm, "    mov %s, AX\n", d);
-                } else if (cs) {
-                    fprintf(out_asm, "    mov %s, [CS:%s+2]\n", d, s);
+                bool dst_seg = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                                fn->vregs[ins->dst].is_seg);
+                if (is_spilled(fn, ins->src1)) {
+                    fprintf(out_asm, "    push BX\n");
+                    fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+                    if (dst_seg || is_spilled(fn, ins->dst)) {
+                        fprintf(out_asm, "    mov AX, [%sBX+2]\n", seg);
+                        fprintf(out_asm, "    mov %s, AX\n", d);
+                    } else {
+                        fprintf(out_asm, "    mov %s, [%sBX+2]\n", d, seg);
+                    }
+                    fprintf(out_asm, "    pop BX\n");
                 } else {
-                    fprintf(out_asm, "    mov %s, [%s+2]\n", d, s);
+                    const char *s = vreg_asm(fn, ins->src1);
+                    if (dst_seg) {
+                        fprintf(out_asm, "    mov AX, [%s%s+2]\n", seg, s);
+                        fprintf(out_asm, "    mov %s, AX\n", d);
+                    } else {
+                        fprintf(out_asm, "    mov %s, [%s%s+2]\n", d, seg, s);
+                    }
                 }
                 break;
             }
@@ -2075,16 +2131,21 @@ static void emit_function(func_t *fn) {
             }
             if (strcmp(mnem, "zext") == 0) {
                 /* Zero-extend u8 -> u16: clear word, then mov low byte.
-                 * dst is a word reg, src is a byte reg. */
+                 * dst is a word reg or spill slot, src is byte. */
                 int dst_preg = fn->vregs[ins->dst].assigned;
-                fprintf(out_asm, "    xor %s, %s\n", d, d);
-                /* Get the low-byte name of dst's word register */
-                if (dst_preg >= PREG_AX && dst_preg <= PREG_BX) {
-                    const char *lo = preg_name[preg_alias_lo[dst_preg]];
-                    fprintf(out_asm, "    mov %s, %s\n", lo, s);
+                if (is_spilled(fn, ins->dst)) {
+                    /* Spilled: use AX as scratch */
+                    fprintf(out_asm, "    push AX\n");
+                    fprintf(out_asm, "    xor AX, AX\n");
+                    fprintf(out_asm, "    mov AL, %s\n", s);
+                    fprintf(out_asm, "    mov %s, AX\n", d);
+                    fprintf(out_asm, "    pop AX\n");
+                } else if (dst_preg >= PREG_AX && dst_preg <= PREG_BX) {
+                    fprintf(out_asm, "    xor %s, %s\n", d, d);
+                    fprintf(out_asm, "    mov %s, %s\n",
+                            preg_name[preg_alias_lo[dst_preg]], s);
                 } else {
-                    /* dst is SI/DI/BP — can't access low byte directly.
-                     * Use AX as scratch: xor dst,dst; mov AL,src; add dst,AX */
+                    /* SI/DI/BP — use AX as scratch */
                     fprintf(out_asm, "    push AX\n");
                     fprintf(out_asm, "    xor AX, AX\n");
                     fprintf(out_asm, "    mov AL, %s\n", s);
