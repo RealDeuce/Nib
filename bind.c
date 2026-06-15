@@ -3401,12 +3401,15 @@ static void emit_function(func_t *fn) {
                             fprintf(out_asm, "    mov %s, [ES:%s]\n", d, off_reg);
                         }
                     } else {
-                        /* Near: mov dst, [off] */
+                        /* Near: mov dst, [off] or [CS:off] */
+                        bool cs_ref = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                                       fn->vregs[ins->src1].is_cs_ref);
+                        const char *seg = cs_ref ? "CS:" : "";
                         if (is_spilled(fn, ins->dst)) {
-                            fprintf(out_asm, "    mov %s, [%s]\n", acc, off_reg);
+                            fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg, off_reg);
                             fprintf(out_asm, "    mov %s, %s\n", d, acc);
                         } else {
-                            fprintf(out_asm, "    mov %s, [%s]\n", d, off_reg);
+                            fprintf(out_asm, "    mov %s, [%s%s]\n", d, seg, off_reg);
                         }
                     }
                     if (off_spilled)
@@ -3459,7 +3462,11 @@ static void emit_function(func_t *fn) {
                         }
                         fprintf(out_asm, "    mov [ES:%s], %s\n", off_reg, val_reg);
                     } else {
-                        fprintf(out_asm, "    mov [%s], %s\n", off_reg, val_reg);
+                        /* Near store, check CS: override */
+                        bool cs_ref = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                                       fn->vregs[ins->dst].is_cs_ref);
+                        const char *seg = cs_ref ? "CS:" : "";
+                        fprintf(out_asm, "    mov [%s%s], %s\n", seg, off_reg, val_reg);
                     }
                     if (off_spilled)
                         fprintf(out_asm, "    pop BX\n");

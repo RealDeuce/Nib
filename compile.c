@@ -1272,9 +1272,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, mk_type(TYPE_U8));
     }
     case EXPR_DEREF: {
-        /* [var] — pointer dereference through a far or u16 variable.
+        /* [var] or [CS:var] — pointer dereference through a far or u16 variable.
          * Emits vreg-based loadmem: the binder allocates the address
-         * vregs to appropriate registers (SI for offset, ES for segment). */
+         * vregs to appropriate registers (SI for offset, ES for segment).
+         * [CS:var] marks the offset vreg as csref for CS: prefix. */
         symbol_t *sym = sym_lookup(e->u.deref.name);
         if (!sym)
             cerr(e->line, "undefined variable '%s' in dereference", e->u.deref.name);
@@ -1285,6 +1286,9 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                     dst, sym->vreg, sym->vreg_seg);
         } else {
             /* Near pointer: loadmem dst, off_vreg */
+            if (e->u.deref.seg != REG_NONE &&
+                strcmp(sreg_name(e->u.deref.seg), "CS") == 0)
+                fprintf(C.nir, ".vreg %%%d, u16, csref\n", sym->vreg);
             fprintf(C.nir, "    loadmem %%%d, %%%d\n", dst, sym->vreg);
         }
         return TV(dst, mk_type(TYPE_U8));
@@ -1704,7 +1708,7 @@ static void emit_stmt(stmt_t *s) {
             }
             fprintf(C.nir, "], %%%d\n", val.vreg);
         } else if (t->kind == EXPR_DEREF) {
-            /* [var] = value — store through pointer dereference.
+            /* [var] or [CS:var] = value — store through pointer dereference.
              * Vreg-based storemem: binder allocates address vregs. */
             symbol_t *sym = sym_lookup(t->u.deref.name);
             if (!sym)
@@ -1713,6 +1717,9 @@ static void emit_stmt(stmt_t *s) {
                 fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
                         sym->vreg, sym->vreg_seg, val.vreg);
             } else {
+                if (t->u.deref.seg != REG_NONE &&
+                    strcmp(sreg_name(t->u.deref.seg), "CS") == 0)
+                    fprintf(C.nir, ".vreg %%%d, u16, csref\n", sym->vreg);
                 fprintf(C.nir, "    storemem %%%d, %%%d\n", sym->vreg, val.vreg);
             }
         } else if (t->kind == EXPR_INDEX) {
