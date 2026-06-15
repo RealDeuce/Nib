@@ -800,7 +800,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memcopy") == 0) {
-            /* REP MOVSB: DI=dst, SI=src, CX=count */
+            /* REP MOVSB: ES:DI=dst, DS:SI=src, CX=count.
+             * Must set ES=DS since MOVSB writes through ES. */
             if (argc >= 2) {
                 int sz = arg_types[0] ? type_size(arg_types[0]) : 0;
                 int di = alloc_vreg();
@@ -812,13 +813,16 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", si, arg_vregs[1]);
                 fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
+                fprintf(C.nir, "    push DS\n");
+                fprintf(C.nir, "    pop ES\n");
                 fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    rep movsb\n");
             }
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memset") == 0) {
-            /* REP STOSB: DI=dst, AL=fill, CX=count */
+            /* REP STOSB: ES:DI=dst, AL=fill, CX=count.
+             * Must set ES=DS since STOSB uses ES segment. */
             if (argc >= 2) {
                 int sz = arg_types[0] ? type_size(arg_types[0]) : 0;
                 int di = alloc_vreg();
@@ -830,13 +834,16 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", al, arg_vregs[1]);
                 fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
+                fprintf(C.nir, "    push DS\n");
+                fprintf(C.nir, "    pop ES\n");
                 fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    rep stosb\n");
             }
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memcmp") == 0) {
-            /* REPE CMPSB: DI=a, SI=b, CX=count */
+            /* REPE CMPSB: ES:DI=a, DS:SI=b, CX=count.
+             * Must set ES=DS since CMPSB reads through ES:DI. */
             if (argc >= 2) {
                 int sz = arg_types[0] ? type_size(arg_types[0]) : 0;
                 int di = alloc_vreg();
@@ -848,14 +855,20 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", si, arg_vregs[1]);
                 fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
-                fprintf(C.nir, "    cld\n");
+                fprintf(C.nir, "    push DS\n");
+                fprintf(C.nir, "    pop ES\n");
+                fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    repe cmpsb\n");
             }
             return TV(dst, mk_type(TYPE_BOOL));
         }
         if (strcmp(fn_name, "memscan") == 0) {
+            /* REPNE SCASB: ES:DI=haystack, AL=needle, CX=count.
+             * Must set ES=DS since SCASB reads through ES:DI. */
             if (argc >= 2) {
                 fprintf(C.nir, "    ; memscan %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                fprintf(C.nir, "    push DS\n");
+                fprintf(C.nir, "    pop ES\n");
                 fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    repne scasb\n");
             }

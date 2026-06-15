@@ -876,6 +876,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                  strcmp(opname, "salc") == 0 || strcmp(opname, "into") == 0 ||
                  strcmp(opname, "rep") == 0 || strcmp(opname, "repe") == 0 ||
                  strcmp(opname, "repne") == 0 ||
+                 strcmp(opname, "push") == 0 || strcmp(opname, "pop") == 0 ||
                  /* Conditional jumps from flag-check blocks */
                  strcmp(opname, "int") == 0) {
             /* Pass-through: emit as literal assembly */
