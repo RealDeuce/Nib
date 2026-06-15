@@ -2413,24 +2413,33 @@ static void emit_function(func_t *fn) {
             break;
         }
 
-        case IR_LOADMEM:
+        case IR_LOADMEM: {
+            bool dst_byte = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                             fn->vregs[ins->dst].is_byte);
             if (is_spilled(fn, ins->dst)) {
-                fprintf(out_asm, "    mov AX, %s\n", ins->name);
-                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                const char *acc = dst_byte ? "AL" : "AX";
+                fprintf(out_asm, "    mov %s, %s\n", acc, ins->name);
+                fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
             } else {
                 fprintf(out_asm, "    mov %s, %s\n",
                         vreg_asm(fn, ins->dst), ins->name);
             }
             break;
+        }
 
-        case IR_STOREMEM:
+        case IR_STOREMEM: {
+            bool src_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                             fn->vregs[ins->src1].is_byte);
             if (is_spilled(fn, ins->src1)) {
-                fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src1));
-                fprintf(out_asm, "    mov %s, AX\n", ins->name);
+                const char *acc = src_byte ? "AL" : "AX";
+                fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+                fprintf(out_asm, "    mov %s, %s\n", ins->name, acc);
             } else {
                 fprintf(out_asm, "    mov %s, %s\n",
                         ins->name, vreg_asm(fn, ins->src1));
             }
+            break;
+        }
             break;
 
         case IR_FIELD:
