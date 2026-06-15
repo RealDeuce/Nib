@@ -142,6 +142,9 @@ typedef struct {
     bool    needs_base;        /* true if used as base: must be BX or BP */
     bool    needs_index;       /* true if used as index: must be SI or DI */
     bool    needs_cl;          /* true if used as shift/rotate count: must be CL */
+    bool    is_const;          /* true if immutable — prefer to spill over mutable */
+    int     use_count;         /* number of instructions referencing this vreg */
+    bool    in_loop;           /* true if live range spans a loop back-edge */
     bool    is_cs_ref;         /* true if this vreg points to constant pool (CS segment) */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
@@ -584,6 +587,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             int v = parse_vreg(p, &p);
             if (v >= 0 && v < MAX_VREGS)
                 fn->vregs[v].is_byte = true;
+            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            continue;
+        }
+
+        if (strncmp(p, ".immutable", 10) == 0) {
+            p += 10;
+            int v = parse_vreg(p, &p);
+            if (v >= 0 && v < MAX_VREGS)
+                fn->vregs[v].is_const = true;
             if (v >= fn->nvregs) fn->nvregs = v + 1;
             continue;
         }
@@ -1364,6 +1376,8 @@ static void compute_liveness(func_t *fn) {
     for (int i = 0; i < fn->nvregs; i++) {
         fn->vregs[i].def_pos = -1;
         fn->vregs[i].last_use = -1;
+        fn->vregs[i].use_count = 0;
+        fn->vregs[i].in_loop = false;
     }
 
     /* Forward pass: find first def */
@@ -1388,6 +1402,24 @@ static void compute_liveness(func_t *fn) {
         if ((ins->op == IR_STORE || ins->op == IR_STOREMEM || ins->op == IR_STOREFIELD) &&
             ins->dst >= 0 && fn->vregs[ins->dst].last_use < 0)
             fn->vregs[ins->dst].last_use = i;
+    }
+
+    /* Count accesses: every reference as src or dst.
+     * Excludes the first def (every vreg has one). */
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+            fn->vregs[ins->src1].use_count++;
+        if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
+            fn->vregs[ins->src2].use_count++;
+        for (int j = 0; j < 8; j++)
+            if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
+                fn->vregs[ins->extra_args[j]].use_count++;
+        /* Count re-definitions (assignments after the initial def) */
+        if (ins->dst >= 0 && ins->dst < fn->nvregs &&
+            fn->vregs[ins->dst].def_pos >= 0 &&
+            fn->vregs[ins->dst].def_pos < i)
+            fn->vregs[ins->dst].use_count++;
     }
 
     /* Parameters are defined at position -1 (before first insn) */
@@ -1430,6 +1462,12 @@ static void compute_liveness(func_t *fn) {
              * Vregs defined inside the loop are re-created each iteration. */
             if (def < target && use >= target && use < loop_end) {
                 fn->vregs[v].last_use = loop_end;
+                fn->vregs[v].in_loop = true;
+            }
+            /* Also mark vregs defined AND used inside the loop body */
+            if (def >= target && def < loop_end &&
+                use >= target && use <= loop_end) {
+                fn->vregs[v].in_loop = true;
             }
         }
     }
@@ -1542,9 +1580,30 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         }
     }
 
+    /* Pre-spill: const vregs with few accesses outside loops don't
+     * justify occupying a register for their entire live range.
+     * Only applies on the second allocation pass (bp_available=false),
+     * when we already know there's register pressure. */
+    if (!bp_available)
+    for (int i = 0; i < fn->nvregs; i++) {
+        if (fn->vregs[i].assigned != PREG_NONE) continue;
+        if (!fn->vregs[i].is_const) continue;
+        if (fn->vregs[i].in_loop) continue;
+        if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0) continue;
+        /* Don't pre-spill vregs with register constraints */
+        if (fn->vregs[i].prefer != PREG_NONE) continue;
+        if (fn->vregs[i].needs_cl) continue;
+        if (fn->vregs[i].needs_addressable) continue;
+        if (fn->vregs[i].is_seg) continue;
+        if (fn->vregs[i].use_count <= 2) {
+            fn->vregs[i].spill_slot = fn->nspill_slots++;
+        }
+    }
+
     /* Second pass: assign remaining vregs */
     for (int i = 0; i < fn->nvregs; i++) {
         if (fn->vregs[i].assigned != PREG_NONE) continue;
+        if (fn->vregs[i].spill_slot >= 0) continue;  /* already pre-spilled */
         if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0) continue;
 
         int *pool;
@@ -1623,8 +1682,45 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         }
 
         if (!assigned) {
-            /* Spill this vreg */
-            fn->vregs[i].spill_slot = fn->nspill_slots++;
+            /* Before spilling this vreg, check if we can evict a
+             * const vreg from a register instead.  Const vregs are
+             * cheaper to spill because they don't need write-back. */
+            if (!fn->vregs[i].is_const) {
+                for (int r = 0; r < poolsz && !assigned; r++) {
+                    int preg = pool[r];
+                    /* Find a const vreg in this register that conflicts */
+                    for (int j = 0; j < fn->nvregs; j++) {
+                        if (j == i) continue;
+                        if (fn->vregs[j].assigned != preg) continue;
+                        if (!fn->vregs[j].is_const) continue;
+                        if (!vregs_interfere(fn, i, j)) continue;
+                        /* Check no OTHER non-const conflict blocks us */
+                        bool other_conflict = false;
+                        for (int k = 0; k < fn->nvregs; k++) {
+                            if (k == i || k == j) continue;
+                            if (fn->vregs[k].assigned == PREG_NONE) continue;
+                            if (!vregs_interfere(fn, i, k)) continue;
+                            if (fn->vregs[k].assigned == preg ||
+                                pregs_alias(fn->vregs[k].assigned, preg)) {
+                                other_conflict = true;
+                                break;
+                            }
+                        }
+                        if (!other_conflict) {
+                            /* Evict the const vreg */
+                            fn->vregs[j].assigned = PREG_NONE;
+                            fn->vregs[j].spill_slot = fn->nspill_slots++;
+                            fn->vregs[i].assigned = preg;
+                            assigned = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!assigned) {
+                /* Spill this vreg */
+                fn->vregs[i].spill_slot = fn->nspill_slots++;
+            }
         }
     }
 }
@@ -1928,7 +2024,7 @@ static void emit_function(func_t *fn) {
                     fprintf(out_asm, "    pop BX\n");
                 } else {
                     const char *s = vreg_asm(fn, ins->src1);
-                    if (dst_seg) {
+                    if (dst_seg || is_spilled(fn, ins->dst)) {
                         fprintf(out_asm, "    mov AX, [%s%s+2]\n", seg, s);
                         fprintf(out_asm, "    mov %s, AX\n", d);
                     } else {
@@ -2160,26 +2256,37 @@ static void emit_function(func_t *fn) {
             }
             if (strcmp(mnem, "zext") == 0) {
                 /* Zero-extend u8 -> u16: clear word, then mov low byte.
-                 * dst is a word reg or spill slot, src is byte. */
+                 * dst is a word reg or spill slot, src is byte.
+                 * Must handle case where src is AL — xor AX clobbers it. */
                 int dst_preg = fn->vregs[ins->dst].assigned;
-                if (is_spilled(fn, ins->dst)) {
-                    /* Spilled: use AX as scratch */
-                    fprintf(out_asm, "    push AX\n");
-                    fprintf(out_asm, "    xor AX, AX\n");
-                    fprintf(out_asm, "    mov AL, %s\n", s);
-                    fprintf(out_asm, "    mov %s, AX\n", d);
-                    fprintf(out_asm, "    pop AX\n");
-                } else if (dst_preg >= PREG_AX && dst_preg <= PREG_BX) {
-                    fprintf(out_asm, "    xor %s, %s\n", d, d);
-                    fprintf(out_asm, "    mov %s, %s\n",
-                            preg_name[preg_alias_lo[dst_preg]], s);
+                int src_preg = fn->vregs[ins->src1].assigned;
+                if (dst_preg >= PREG_AX && dst_preg <= PREG_BX &&
+                    !is_spilled(fn, ins->dst)) {
+                    /* dst is AX..BX — zero the word, then copy byte in */
+                    if (preg_alias_lo[dst_preg] == src_preg) {
+                        /* src is already the low byte of dst — just clear high */
+                        fprintf(out_asm, "    xor %s, %s\n",
+                                preg_name[preg_alias_hi[dst_preg]],
+                                preg_name[preg_alias_hi[dst_preg]]);
+                    } else {
+                        fprintf(out_asm, "    xor %s, %s\n", d, d);
+                        fprintf(out_asm, "    mov %s, %s\n",
+                                preg_name[preg_alias_lo[dst_preg]], s);
+                    }
                 } else {
-                    /* SI/DI/BP — use AX as scratch */
-                    fprintf(out_asm, "    push AX\n");
-                    fprintf(out_asm, "    xor AX, AX\n");
-                    fprintf(out_asm, "    mov AL, %s\n", s);
-                    fprintf(out_asm, "    mov %s, AX\n", d);
-                    fprintf(out_asm, "    pop AX\n");
+                    /* Spilled or SI/DI/BP — use AX as scratch.
+                     * If src is AL, save it first since xor AX clobbers AL. */
+                    bool src_is_al = (src_preg == PREG_AL);
+                    if (src_is_al) {
+                        fprintf(out_asm, "    xor AH, AH\n");
+                        fprintf(out_asm, "    mov %s, AX\n", d);
+                    } else {
+                        fprintf(out_asm, "    push AX\n");
+                        fprintf(out_asm, "    xor AX, AX\n");
+                        fprintf(out_asm, "    mov AL, %s\n", s);
+                        fprintf(out_asm, "    mov %s, AX\n", d);
+                        fprintf(out_asm, "    pop AX\n");
+                    }
                 }
                 break;
             }

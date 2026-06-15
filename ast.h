@@ -95,7 +95,8 @@ typedef enum {
     EXPR_CAST,
     EXPR_PAREN,
     EXPR_ARRAY_INIT, /* array initializer: [expr, expr, ...] */
-    EXPR_INDIRECT_CALL /* addr as name from module(args...) */
+    EXPR_INDIRECT_CALL, /* addr as name from module(args...) */
+    EXPR_DEREF          /* [var] — pointer dereference */
 } expr_kind_t;
 
 struct expr_node {
@@ -161,6 +162,12 @@ struct expr_node {
             char   *module_name;    /* module to look up extern in */
             expr_t *args;           /* argument list */
         } indirect_call;
+
+        /* DEREF — [var] pointer dereference */
+        struct {
+            char    *name;          /* variable name */
+            reg_id_t seg;           /* segment override or REG_NONE */
+        } deref;
     } u;
 
     expr_t *next;   /* for argument lists */
@@ -182,7 +189,8 @@ typedef enum {
     STMT_GOTO,
     STMT_TAILCALL,
     STMT_LABEL,
-    STMT_ASM
+    STMT_ASM,
+    STMT_CONST
 } stmt_kind_t;
 
 struct stmt_node {
@@ -197,6 +205,7 @@ struct stmt_node {
             int     pinned_reg;     /* REG_NONE or reg ID */
             reg_class_t pin_class;
             expr_t *init;           /* NULL if uninitialized */
+            bool    is_const;       /* const qualifier — prevents reassignment */
         } vardecl;
 
         /* ASSIGN / TOGGLE_ASSIGN */
@@ -225,6 +234,9 @@ struct stmt_node {
 
         /* LABEL */
         char *label_name;
+
+        /* CONST */
+        struct { char *name; int value; expr_t *init; } konst;
 
         /* ASM */
         struct {
@@ -439,6 +451,7 @@ expr_t     *mk_expr_cast(expr_t *operand, type_t *target, int line);
 expr_t     *mk_expr_array_init(expr_t *elements, int line);
 expr_t     *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
                                    const char *module_name, expr_t *args, int line);
+expr_t     *mk_expr_deref(const char *name, int line);
 
 stmt_t     *mk_stmt_vardecl(type_t *type, const char *name,
                              int pinned_reg, reg_class_t pin_class,
@@ -468,6 +481,8 @@ stmt_t     *mk_stmt_tailcall(expr_t *call_expr, int line);
 stmt_t     *mk_stmt_label(const char *name, int line);
 stmt_t     *mk_stmt_asm(const char *body, reg_list_t *annotation,
                          bool is_clobbers, bool has_annotation, int line);
+stmt_t     *mk_stmt_const(const char *name, int value, int line);
+stmt_t     *mk_stmt_const_expr(const char *name, expr_t *init, int line);
 
 param_t    *mk_param(const char *name, type_t *type, bool is_value);
 param_t    *mk_param_pinned(const char *name, type_t *type,

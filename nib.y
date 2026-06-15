@@ -477,6 +477,7 @@ stmt
     | KW_GOTO IDENT ';'            { $$ = mk_stmt_goto($2, yyline); }
     | KW_TAILCALL expr ';'         { $$ = mk_stmt_tailcall($2, yyline); }
     | IDENT ':'                     { $$ = mk_stmt_label($1, yyline); }
+    | KW_CONST var_decl ';'        { $$ = $2; $$->u.vardecl.is_const = true; }
     | asm_block                     { $$ = $1; }
     | when_stmt                     { $$ = $1; }
     ;
@@ -718,6 +719,8 @@ mem_access
         { $$ = $2; }
     | '[' seg_reg ':' mem_inner ']'
         { $$ = $4; $$->u.mem.seg = $2.reg; }
+    | '[' seg_reg ':' IDENT ']'
+        { $$ = mk_expr_deref($4, yyline); $$->u.deref.seg = $2.reg; }
     | '[' LIT_INT ':' LIT_INT ']'
         { $$ = mk_expr_mem_abs($2, $4, yyline); }
     ;
@@ -744,6 +747,8 @@ mem_inner
         { $$ = mk_expr_mem(REG_NONE, $1.reg, $3.reg, $5, true, yyline); }
     | LIT_INT
         { $$ = mk_expr_mem(REG_NONE, REG_NONE, REG_NONE, $1, true, yyline); }
+    | IDENT
+        { $$ = mk_expr_deref($1, yyline); }
     ;
 
 mem_base

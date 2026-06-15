@@ -178,6 +178,13 @@ expr_t *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
     return e;
 }
 
+expr_t *mk_expr_deref(const char *name, int line) {
+    expr_t *e = mk_expr(EXPR_DEREF, line);
+    e->u.deref.name = xstrdup(name);
+    e->u.deref.seg = REG_NONE;
+    return e;
+}
+
 /* ---- Statements ---- */
 
 static stmt_t *mk_stmt(stmt_kind_t kind, int line) {
@@ -196,6 +203,7 @@ stmt_t *mk_stmt_vardecl(type_t *type, const char *name,
     s->u.vardecl.pinned_reg = pinned_reg;
     s->u.vardecl.pin_class = pin_class;
     s->u.vardecl.init = init;
+    s->u.vardecl.is_const = false;
     return s;
 }
 
@@ -342,6 +350,22 @@ stmt_t *mk_stmt_asm(const char *body, reg_list_t *annotation,
         else
             s->u.asm_stmt.preserves = annotation;
     }
+    return s;
+}
+
+stmt_t *mk_stmt_const(const char *name, int value, int line) {
+    stmt_t *s = mk_stmt(STMT_CONST, line);
+    s->u.konst.name = xstrdup(name);
+    s->u.konst.value = value;
+    s->u.konst.init = NULL;
+    return s;
+}
+
+stmt_t *mk_stmt_const_expr(const char *name, expr_t *init, int line) {
+    stmt_t *s = mk_stmt(STMT_CONST, line);
+    s->u.konst.name = xstrdup(name);
+    s->u.konst.value = 0;
+    s->u.konst.init = init;
     return s;
 }
 

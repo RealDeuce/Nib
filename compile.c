@@ -29,6 +29,7 @@ typedef struct symbol {
     int         pinned_reg;
     reg_class_t pin_class;
     bool        is_global;
+    bool        is_const;       /* const qualifier — prevents reassignment */
     bool        has_at;         /* global with at() placement */
     int         at_seg;
     int         at_off;
@@ -139,6 +140,7 @@ static symbol_t *sym_add(const char *name, type_t *type, bool is_global) {
     sym->vreg = C.next_vreg++;
     sym->vreg_seg = -1;
     sym->is_global = is_global;
+    sym->is_const = false;
     sym->is_pinned = false;
     sym->pinned_reg = REG_NONE;
     return sym;
@@ -186,6 +188,54 @@ static void register_constant(const char *name, int value) {
     strncpy(C.constants[C.nconstants].name, name, 63);
     C.constants[C.nconstants].value = value;
     C.nconstants++;
+}
+
+/* Evaluate a constant expression at compile time.
+ * Supports literals, named constants, and arithmetic on them. */
+static bool eval_const_expr(expr_t *e, int *result) {
+    if (!e) return false;
+    switch (e->kind) {
+    case EXPR_LIT_INT:
+        *result = e->u.lit_int;
+        return true;
+    case EXPR_IDENT: {
+        int val;
+        if (find_constant(e->u.ident, &val) >= 0) {
+            *result = val;
+            return true;
+        }
+        return false;
+    }
+    case EXPR_BINOP: {
+        int l, r;
+        if (!eval_const_expr(e->u.binop.left, &l)) return false;
+        if (!eval_const_expr(e->u.binop.right, &r)) return false;
+        switch (e->u.binop.op) {
+        case NIB_ADD: *result = l + r; return true;
+        case NIB_SUB: *result = l - r; return true;
+        case NIB_MUL: *result = l * r; return true;
+        case NIB_DIV: if (r == 0) return false; *result = l / r; return true;
+        case NIB_MOD: if (r == 0) return false; *result = l % r; return true;
+        case NIB_AND: *result = l & r; return true;
+        case NIB_OR:  *result = l | r; return true;
+        case NIB_XOR: *result = l ^ r; return true;
+        case NIB_SHL: *result = l << r; return true;
+        case NIB_SHR: *result = (unsigned)l >> r; return true;
+        default: return false;
+        }
+    }
+    case EXPR_UNOP: {
+        int v;
+        if (!eval_const_expr(e->u.unop.operand, &v)) return false;
+        switch (e->u.unop.op) {
+        case NIB_NEG: *result = -v; return true;
+        case NIB_NOT: *result = ~v; return true;
+        default: return false;
+        }
+    }
+    default:
+        return false;
+    }
 }
 
 /* ---- Function lookup ---- */
@@ -1181,6 +1231,39 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* Type inferred from declaration context — caller must check */
         return TV(dst, mk_type(TYPE_U8));
     }
+    case EXPR_DEREF: {
+        /* [var] — pointer dereference through a far or u16 variable */
+        symbol_t *sym = sym_lookup(e->u.deref.name);
+        if (!sym)
+            cerr(e->line, "undefined variable '%s' in dereference", e->u.deref.name);
+        int dst = alloc_vreg();
+        if (sym->type && sym->type->kind == TYPE_FAR && sym->vreg_seg >= 0) {
+            /* Far pointer: set up seg:off for [SEG:SI] access */
+            const char *seg = (e->u.deref.seg != REG_NONE)
+                ? sreg_name(e->u.deref.seg) : "ES";
+            int sv = alloc_vreg();
+            int ov = alloc_vreg();
+            fprintf(C.nir, "    ; pin %%%d -> %s\n", sv, seg);
+            fprintf(C.nir, ".prefer %%%d, %s\n", sv, seg);
+            fprintf(C.nir, "    mov %%%d, %%%d\n", sv, sym->vreg_seg);
+            fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
+            fprintf(C.nir, ".prefer %%%d, SI\n", ov);
+            fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
+            fprintf(C.nir, "    loadmem %%%d, [%s:SI]\n", dst, seg);
+        } else {
+            /* Near pointer (u16): set up SI for [SI] access */
+            int ov = alloc_vreg();
+            fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
+            fprintf(C.nir, ".prefer %%%d, SI\n", ov);
+            fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
+            if (e->u.deref.seg != REG_NONE)
+                fprintf(C.nir, "    loadmem %%%d, [%s:SI]\n", dst,
+                        sreg_name(e->u.deref.seg));
+            else
+                fprintf(C.nir, "    loadmem %%%d, [SI]\n", dst);
+        }
+        return TV(dst, mk_type(TYPE_U8));
+    }
     case EXPR_FAR_LIT: {
         /* Far literal — emit as constant pool entry (off, seg in LDS format) */
         int cid = C.next_const++;
@@ -1387,10 +1470,14 @@ static void emit_stmt(stmt_t *s) {
                                  s->u.vardecl.pinned_reg,
                                  s->u.vardecl.pin_class);
         }
+        if (s->u.vardecl.is_const)
+            sym->is_const = true;
         if (s->u.vardecl.type && s->u.vardecl.type->kind == TYPE_ARRAY &&
             s->u.vardecl.type->array_size == 0 && !s->u.vardecl.init) {
             cerr(s->line, "unsized array requires an initializer");
         }
+        if (sym->is_const)
+            fprintf(C.nir, ".immutable %%%d\n", sym->vreg);
         if (sym->is_pinned) {
             fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg,
                     reg_name_str(sym->pinned_reg, sym->pin_class));
@@ -1432,9 +1519,15 @@ static void emit_stmt(stmt_t *s) {
         break;
     }
     case STMT_ASSIGN: {
+        /* Check for assignment to const variable */
+        expr_t *t = s->u.assign.target;
+        if (t->kind == EXPR_IDENT) {
+            symbol_t *cs = sym_lookup(t->u.ident);
+            if (cs && cs->is_const)
+                cerr(s->line, "cannot reassign const variable '%s'", t->u.ident);
+        }
         /* For literal RHS assigned to a register, emit immediate directly */
         expr_t *val_expr = s->u.assign.value;
-        expr_t *t = s->u.assign.target;
         if (val_expr->kind == EXPR_LIT_INT &&
             (t->kind == EXPR_REG || t->kind == EXPR_SREG ||
              t->kind == EXPR_IDENT)) {
@@ -1559,6 +1652,34 @@ static void emit_stmt(stmt_t *s) {
                 fprintf(C.nir, "0x%04X", t->u.mem.disp);
             }
             fprintf(C.nir, "], %%%d\n", val.vreg);
+        } else if (t->kind == EXPR_DEREF) {
+            /* [var] = value — store through pointer dereference */
+            symbol_t *sym = sym_lookup(t->u.deref.name);
+            if (!sym)
+                cerr(t->line, "undefined variable '%s' in dereference", t->u.deref.name);
+            if (sym->type && sym->type->kind == TYPE_FAR && sym->vreg_seg >= 0) {
+                const char *seg = (t->u.deref.seg != REG_NONE)
+                    ? sreg_name(t->u.deref.seg) : "ES";
+                int sv = alloc_vreg();
+                int ov = alloc_vreg();
+                fprintf(C.nir, "    ; pin %%%d -> %s\n", sv, seg);
+                fprintf(C.nir, ".prefer %%%d, %s\n", sv, seg);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", sv, sym->vreg_seg);
+                fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
+                fprintf(C.nir, ".prefer %%%d, SI\n", ov);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
+                fprintf(C.nir, "    storemem [%s:SI], %%%d\n", seg, val.vreg);
+            } else {
+                int ov = alloc_vreg();
+                fprintf(C.nir, "    ; pin %%%d -> SI\n", ov);
+                fprintf(C.nir, ".prefer %%%d, SI\n", ov);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", ov, sym->vreg);
+                if (t->u.deref.seg != REG_NONE)
+                    fprintf(C.nir, "    storemem [%s:SI], %%%d\n",
+                            sreg_name(t->u.deref.seg), val.vreg);
+                else
+                    fprintf(C.nir, "    storemem [SI], %%%d\n", val.vreg);
+            }
         } else if (t->kind == EXPR_INDEX) {
             typed_vreg_t arr_tv = emit_expr_typed(t->u.index.array);
             int idx = emit_expr(t->u.index.index);
@@ -1759,6 +1880,19 @@ static void emit_stmt(stmt_t *s) {
             fprintf(C.nir, ")");
         }
         fprintf(C.nir, " {%s}\n", s->u.asm_stmt.body);
+        break;
+    }
+    case STMT_CONST: {
+        /* File-scope style const with literal value in function scope */
+        if (s->u.konst.init) {
+            int val;
+            if (eval_const_expr(s->u.konst.init, &val))
+                register_constant(s->u.konst.name, val);
+            else
+                cerr(s->line, "const initializer must be a constant expression");
+        } else {
+            register_constant(s->u.konst.name, s->u.konst.value);
+        }
         break;
     }
     }

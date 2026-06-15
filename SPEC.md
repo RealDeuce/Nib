@@ -196,6 +196,37 @@ const SCREEN_WIDTH = 480;
 port_out(PORT_LCD, data);           // same as port_out(0x60, data)
 ```
 
+#### Const locals
+
+Inside function scope, `const` qualifies a variable declaration.
+The value is computed at runtime but the variable cannot be reassigned
+with `:=`. Only initialization with `=` (at the declaration) is
+permitted:
+
+```
+const u8 shift = (x & 0x07) as (u8);
+const u8 rshift = 8 - shift;
+
+shift := 5;     // ERROR: cannot reassign const variable 'shift'
+```
+
+A `const` inside a loop body is re-initialized each iteration —
+the `=` in the declaration runs every time. The `const` qualifier
+prevents modification within the iteration, not across iterations:
+
+```
+while (i < n) {
+    const u8 ch = [str];   // OK: fresh initialization each iteration
+    // ch := 0;            // ERROR: cannot reassign const
+    i := i + 1;
+}
+```
+
+The register allocator exploits const immutability: const locals
+that are spilled to the stack never need write-back, and low-use
+consts outside loops may be kept in memory rather than occupying
+a register.
+
 ### Visibility
 
 By default, declarations are module-private — not visible to other
@@ -699,18 +730,18 @@ if (a == 0) { ... }     // TEST a, a; JZ ...
 Square bracket syntax for memory operations:
 
 ```
-u8 val = [SI];              // MOV val, DS:[SI]
-u8 val = [ES:DI];           // MOV val, ES:[DI]
-[DI] := val;                // MOV DS:[DI], val
-[ES:DI] := val;             // MOV ES:[DI], val
+u8 val = [SI];              // MOV val, [SI]
+u8 val = [ES:DI];           // MOV val, [ES:DI]
+[DI] := val;                // MOV [DI], val
+[ES:DI] := val;             // MOV [ES:DI], val
 
-u16 val = [BX + 4];         // MOV val, DS:[BX+4]
-u8 val = [BX + SI];         // MOV val, DS:[BX+SI]
-u8 val = [BX + SI + 2];     // MOV val, DS:[BX+SI+2]
+u16 val = [BX + 4];         // MOV val, [BX+4]
+u8 val = [BX + SI];         // MOV val, [BX+SI]
+u8 val = [BX + SI + 2];     // MOV val, [BX+SI+2]
 
 // Absolute address
-u8 val = [0x1234];           // MOV val, DS:[0x1234]
-u8 val = [0xB800:0x0000];   // MOV val, 0xB800:[0x0000]
+u8 val = [0x1234];           // MOV val, [0x1234]
+u8 val = [0xB800:0x0000];   // MOV val, [0xB800:0x0000]
 ```
 
 The addressing modes available mirror V20 hardware:
@@ -720,6 +751,29 @@ The addressing modes available mirror V20 hardware:
 - Direct 16-bit offset
 
 Note: register names in memory expressions are always uppercase.
+
+#### Pointer dereference
+
+Variables of type `u16` or `far` can be used as pointers inside brackets:
+
+```
+fn read_byte(ptr: u16) -> u8 {
+    return [ptr];               // loads from [ptr]
+}
+
+fn read_far(src: far) -> u8 {
+    return [src];               // loads from src`seg:src`off
+}
+
+[ptr] := val;                   // store through near pointer
+[src] := val;                   // store through far pointer
+u8 ch = [ES:my_offset];        // segment override with variable
+```
+
+For `far` pointers, the compiler sets up ES:SI from the pointer's
+segment and offset components. For `u16` pointers, SI is set up and
+DS is used as the implicit segment. A segment override prefix can be
+specified with `[SEG:var]`.
 
 #### Checked array access
 
@@ -1300,7 +1354,7 @@ to the 64K-per-segment limit.
 
 ```
 seg ES = 0xB800;            // MOV AX, 0xB800; MOV ES, AX
-[ES:0x0000] := 0x41;        // MOV ES:[0x0000], 0x41
+[ES:0x0000] := 0x41;        // MOV [ES:0x0000], 0x41
 ```
 
 ### Far calls

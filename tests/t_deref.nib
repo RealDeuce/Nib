@@ -1,0 +1,17 @@
+// Test: pointer dereference via [var] syntax.
+// [u16_var] reads from DS-relative address.
+// [far_var] reads through a far pointer (ES:SI).
+
+fn read_near(ptr: u16) -> u8 {
+    u8 val = [ptr];
+    return val;
+}
+
+fn read_far(src: far) -> u8 {
+    u8 val = [src];
+    return val;
+}
+
+fn write_near(ptr: u16, val: u8) {
+    [ptr] := val;
+}
