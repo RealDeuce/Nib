@@ -1,0 +1,12 @@
+// Test: u8 array element access must use byte registers.
+// loadb/storeb ensure fb[idx] operates on single bytes, not words.
+
+u8[16] buffer;
+
+fn read_byte(idx: u16) -> u8 {
+    return buffer[idx];
+}
+
+fn write_byte(idx: u16, val: u8) {
+    buffer[idx] := val;
+}

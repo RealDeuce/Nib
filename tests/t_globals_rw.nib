@@ -1,0 +1,16 @@
+// Test: scalar globals must load/store through memory, not as addresses.
+// u8 and u16 globals should generate loadmem/storemem in the IR.
+
+u8 flag;
+u16 counter;
+
+fn test_read() -> u16 {
+    u8 f = flag;
+    u16 c = counter;
+    return c;
+}
+
+fn test_write() {
+    flag := 1;
+    counter := 42;
+}

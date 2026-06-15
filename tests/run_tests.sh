@@ -210,6 +210,24 @@ if [ -f /tmp/t_shift_overlap.asm ]; then
     fi
 fi
 
+# Scalar globals: must use memory-indirect loads, not address loads
+if [ -f /tmp/t_globals_rw.asm ]; then
+    if grep -q '\[counter\]' /tmp/t_globals_rw.asm && grep -q '\[flag\]' /tmp/t_globals_rw.asm; then
+        pass "globals-rw: scalar globals accessed through memory"
+    else
+        fail "globals-rw" "scalar global loaded as address instead of memory"
+    fi
+fi
+
+# Byte array access: must use byte registers (AL, BL, etc.)
+if [ -f /tmp/t_byte_array.asm ]; then
+    if grep -q 'mov [A-D]L' /tmp/t_byte_array.asm; then
+        pass "byte-array: u8 elements use byte registers"
+    else
+        fail "byte-array" "u8 array access using word registers"
+    fi
+fi
+
 echo ""
 
 echo "--- Type error tests (expected failures) ---"
