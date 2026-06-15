@@ -1201,8 +1201,16 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             }
         }
 
-        /* Emit icall: icall %dst, %addr, extern_name, %arg1, ... */
-        fprintf(C.nir, "    icall %%%d, %%%d, %s", dst, addr_val.vreg, ext_name);
+        /* Emit icall with both offset and seg vregs when available.
+         * Format: icall %dst, %off, %seg, name, args...
+         * If no seg vreg, %off is a pointer to a memory-resident far32. */
+        if (addr_val.vreg_seg >= 0) {
+            fprintf(C.nir, "    icall %%%d, %%%d, %%%d, %s",
+                    dst, addr_val.vreg, addr_val.vreg_seg, ext_name);
+        } else {
+            fprintf(C.nir, "    icall %%%d, %%%d, %s",
+                    dst, addr_val.vreg, ext_name);
+        }
         for (int i = 0; i < nir_args; i++)
             fprintf(C.nir, ", %%%d", ir_args[i]);
         fprintf(C.nir, "\n");
@@ -1231,11 +1239,23 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
 
         int dst = alloc_vreg();
-        if (elem->kind == TYPE_FAR || type_is_aggregate(elem)) {
-            /* Aggregate/far elements: return address of element (by reference).
-             * The caller uses far.off/far.seg or field access to read. */
+        if (elem->kind == TYPE_FAR) {
+            /* Far32 element: load both offset and segment halves */
+            int addr = alloc_vreg();
+            fprintf(C.nir, "    add %%%d, %%%d, %%%d\n", addr, arr.vreg, scaled_idx);
+            symbol_t *arr_sym = (e->u.index.array->kind == EXPR_IDENT)
+                ? sym_lookup(e->u.index.array->u.ident) : NULL;
+            if (arr_sym && arr_sym->is_cs_data)
+                fprintf(C.nir, ".vreg %%%d, u16, csref\n", addr);
+            int off_v = alloc_vreg();
+            int seg_v = alloc_vreg();
+            fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, addr);
+            fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, addr);
+            return TV_FAR(off_v, seg_v);
+        }
+        if (type_is_aggregate(elem)) {
+            /* Aggregate elements: return address of element (by reference) */
             fprintf(C.nir, "    add %%%d, %%%d, %%%d\n", dst, arr.vreg, scaled_idx);
-            /* Propagate CS-ref from the array base */
             symbol_t *arr_sym = (e->u.index.array->kind == EXPR_IDENT)
                 ? sym_lookup(e->u.index.array->u.ident) : NULL;
             if (arr_sym && arr_sym->is_cs_data)

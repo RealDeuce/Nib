@@ -828,11 +828,18 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_ICALL;
             ins->dst = parse_vreg(p, &p);
             skip_comma(&p);
-            ins->src1 = parse_vreg(p, &p);  /* addr vreg */
+            ins->src1 = parse_vreg(p, &p);  /* addr/off vreg */
             skip_comma(&p);
+            p = skip_ws(p);
+            if (*p == '%') {
+                /* Three-vreg form: icall %dst, %off, %seg, name */
+                ins->src2 = parse_vreg(p, &p);
+                skip_comma(&p);
+            }
             p = read_word(p, ins->name, sizeof(ins->name)); /* extern name */
-            /* Mark addr vreg as needing an addressable register */
-            if (ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+            /* Mark addr vreg as needing an addressable register
+             * (only for pointer-based form, not register pair) */
+            if (ins->src2 < 0 && ins->src1 >= 0 && ins->src1 < MAX_VREGS)
                 fn->vregs[ins->src1].needs_addressable = true;
             /* Parse args */
             ins->nargs = 0;
@@ -3317,18 +3324,33 @@ static void emit_function(func_t *fn) {
         }
 
         case IR_ICALL: {
-            /* Indirect far call through a memory-resident far pointer.
-             * src1 = vreg holding address of the far pointer in memory. */
-            const char *addr = vreg_asm(fn, ins->src1);
-            bool ic_cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                          fn->vregs[ins->src1].is_cs_ref);
-            const char *ic_seg = ic_cs ? "CS:" : "";
-            if (is_spilled(fn, ins->src1)) {
-                /* Spilled: the spill slot IS the memory address */
-                fprintf(out_asm, "    call far %s\n", addr);
+            /* Indirect far call. src1 = offset vreg, src2 = seg vreg (if pair).
+             * If src2 is a seg vreg, build a far pointer on the stack and call
+             * through it. Otherwise src1 points to a memory-resident far32. */
+            bool has_seg = (ins->src2 >= 0 && ins->src2 < MAX_VREGS &&
+                            fn->vregs[ins->src2].is_seg);
+            if (has_seg) {
+                /* Register pair: build far pointer on stack, use BX to address it.
+                 * push seg; push off; push BX; mov BX,SP; add BX,2; call far [SS:BX]
+                 * After call: pop BX (restore); add SP,4 (clean far ptr) */
+                fprintf(out_asm, "    push %s\n", vreg_asm(fn, ins->src2));
+                fprintf(out_asm, "    push %s\n", vreg_asm(fn, ins->src1));
+                fprintf(out_asm, "    push BX\n");
+                fprintf(out_asm, "    mov BX, SP\n");
+                fprintf(out_asm, "    add BX, 2\n");
+                fprintf(out_asm, "    call far [SS:BX]\n");
+                fprintf(out_asm, "    pop BX\n");
+                fprintf(out_asm, "    add SP, 4\n");
             } else {
-                /* In a register: dereference as [reg] */
-                fprintf(out_asm, "    call far [%s%s]\n", ic_seg, addr);
+                const char *addr = vreg_asm(fn, ins->src1);
+                bool ic_cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                              fn->vregs[ins->src1].is_cs_ref);
+                const char *ic_seg = ic_cs ? "CS:" : "";
+                if (is_spilled(fn, ins->src1)) {
+                    fprintf(out_asm, "    call far %s\n", addr);
+                } else {
+                    fprintf(out_asm, "    call far [%s%s]\n", ic_seg, addr);
+                }
             }
             break;
         }
