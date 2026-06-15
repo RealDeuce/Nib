@@ -113,17 +113,38 @@ enabling future move coalescing).
 5. **Select**: pop stack and assign colors, preferring affinities;
    if no color fits, actually spill to a stack slot
 
-### Phase 7: Emit .asm
+### Phase 7: Move insertion
 
-Walk the IR, replacing virtual registers with physical register names:
+Post-allocation pass that builds a **resolved instruction stream**.
+Uses `free_regs_at()` to query which physical registers are free
+at each instruction point (from CFG liveness + allocation results).
+
+Handles three fixup categories via explicit moves instead of
+push/pop sequences:
+
+- **CL routing**: variable shift counts not in CL get an explicit
+  `mov CL, src` inserted. Uses a free register when CX is occupied.
+- **Call arguments**: mismatched caller/callee register assignments
+  get explicit movs. Includes caller-save push/pop and BP save.
+- **Address registers**: `[ES:SI]` operands where `.prefer SI`
+  failed get an explicit `mov SI, actual_reg` inserted.
+
+### Phase 8: Emit .asm
+
+Walk the resolved stream, outputting pre-formatted moves (RINS_ASM)
+and lowering IR instructions (RINS_IR) to V20 assembly:
+
 - Function label and prologue (PUSHA for interrupts, frame setup)
 - Callee-save PUSH for registers in the `preserves` list that are used
-- IR instructions lowered to V20 assembly:
-  - ALU: `op dst, src` with MOV for three-address → two-address
-  - CMP+Jcc: finds preceding CMP and emits correct conditional jump
-  - Calls: `call label` (near) or `call far seg:off` (extern)
-  - Chain calls: `pushf` + `call far [chain_addr]`
-  - Inline asm: spliced through verbatim
+- Hardware workarounds in named helpers:
+  - `emit_alu()`: IN/OUT accumulator routing, far.off/far.seg spill
+    handling, byte IMUL, spill-to-spill ALU, three-address lowering
+  - `emit_load()`: spilled base/index via BX/SI scratch, CS: prefix
+  - `emit_store()`: spilled value/base/index handling
+  - `emit_mov()`: byte/word conversion, seg-to-seg, spill-to-spill
+- CMP+Jcc: finds preceding CMP and emits correct conditional jump
+- Calls: `call label` (near) or `call far seg:off` (extern)
+- Inline asm: spliced through verbatim
 - Callee-save POP in reverse order
 - Function epilogue (IRET for interrupts, RET for normal)
 - `; @file:line` debug comments carried through for `.dbg` generation
