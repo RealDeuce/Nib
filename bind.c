@@ -2281,6 +2281,93 @@ static void insert_fixup_moves(func_t *fn) {
             continue;
         }
 
+        /* ---- Call argument fixup + BP caller-save ---- */
+        if (ins->op == IR_CALL) {
+            /* Build callee preserves set */
+            bool callee_preserves[NUM_PREGS];
+            memset(callee_preserves, 0, sizeof(callee_preserves));
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, ins->name) == 0) {
+                    for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
+                        callee_preserves[functions[fi2].fn_preserves[pp]] = true;
+                    break;
+                }
+            }
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    for (int pp = 0; pp < externs[e].npreserves; pp++)
+                        callee_preserves[externs[e].preserves[pp]] = true;
+                    break;
+                }
+            }
+
+            /* BP caller-save */
+            int call_saved[16];
+            int call_nsaved = 0;
+            if (fn->needs_frame && !callee_preserves[PREG_BP]) {
+                call_saved[call_nsaved++] = PREG_BP;
+                rins_asm(fn, "    push BP");
+            }
+
+            /* Caller-save: push live registers the callee may clobber */
+            for (int v = 0; v < fn->nvregs; v++) {
+                int preg = fn->vregs[v].assigned;
+                if (preg == PREG_NONE || preg == PREG_SP) continue;
+                if (fn->vregs[v].is_seg) continue;
+                if (fn->vregs[v].last_use <= (int)i) continue;
+                if (fn->vregs[v].def_pos > (int)i) continue;
+                int push_reg = preg;
+                if (preg >= PREG_AL && preg <= PREG_BH)
+                    push_reg = preg_alias_parent[preg];
+                if (callee_preserves[push_reg]) continue;
+                bool dup = false;
+                for (int s = 0; s < call_nsaved; s++)
+                    if (call_saved[s] == push_reg) { dup = true; break; }
+                if (dup) continue;
+                if (call_nsaved < 16)
+                    call_saved[call_nsaved++] = push_reg;
+                rins_asm(fn, "    push %s", preg_name[push_reg]);
+            }
+
+            /* Argument fixup: place args in expected registers */
+            int callee_fi = -1;
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, ins->name) == 0)
+                    { callee_fi = fi2; break; }
+            }
+            if (callee_fi >= 0) {
+                fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
+                for (int a = 0; a < ins->nargs; a++) {
+                    int arg_vreg;
+                    if (a == 0) arg_vreg = ins->src1;
+                    else if (a == 1) arg_vreg = ins->src2;
+                    else arg_vreg = ins->extra_args[a - 2];
+                    if (arg_vreg < 0) continue;
+                    int expected = callee_fa->param_regs[a];
+                    if (expected == PREG_NONE) continue;
+                    int actual = fn->vregs[arg_vreg].assigned;
+                    if (actual == expected || pregs_alias(actual, expected))
+                        continue;
+                    /* Emit fixup mov */
+                    if (is_spilled(fn, arg_vreg))
+                        rins_asm(fn, "    mov %s, %s",
+                                 preg_name[expected], vreg_asm(fn, arg_vreg));
+                    else
+                        rins_asm(fn, "    mov %s, %s",
+                                 preg_name[expected], preg_name[actual]);
+                }
+            }
+
+            /* Emit the call instruction itself (emitter handles encoding) */
+            rins_ir(fn, i);
+
+            /* Caller-restore: pop in reverse order */
+            for (int s = call_nsaved - 1; s >= 0; s--)
+                rins_asm(fn, "    pop %s", preg_name[call_saved[s]]);
+
+            continue;
+        }
+
         /* Default: pass through unchanged */
         rins_ir(fn, i);
     }
@@ -2964,104 +3051,9 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_CALL: {
-            /* Caller-save: push live registers that the callee may clobber */
-            bool callee_preserves[NUM_PREGS] = {0};
-            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
-                if (strcmp(functions[fi2].name, ins->name) == 0) {
-                    for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
-                        callee_preserves[functions[fi2].fn_preserves[pp]] = true;
-                    break;
-                }
-            }
-            /* Also check extern declarations for preserves */
-            for (int e = 0; e < nexterns; e++) {
-                if (strcmp(externs[e].name, ins->name) == 0) {
-                    for (int pp = 0; pp < externs[e].npreserves; pp++)
-                        callee_preserves[externs[e].preserves[pp]] = true;
-                    break;
-                }
-            }
-            int call_saved[16];
-            int call_nsaved = 0;
-
-            /* If the caller uses BP as a frame pointer and the callee
-             * doesn't preserve it, BP must be saved/restored.  The
-             * vreg scan below won't catch it because BP isn't assigned
-             * to any vreg — it's the implicit frame pointer. */
-            if (fn->needs_frame && !callee_preserves[PREG_BP]) {
-                call_saved[call_nsaved++] = PREG_BP;
-                fprintf(out_asm, "    push BP\n");
-            }
-
-            for (int v = 0; v < fn->nvregs; v++) {
-                int preg = fn->vregs[v].assigned;
-                if (preg == PREG_NONE || preg == PREG_SP) continue;
-                if (fn->vregs[v].is_seg) continue;
-                if (fn->vregs[v].last_use <= (int)i) continue;
-                if (fn->vregs[v].def_pos > (int)i) continue;
-                int push_reg = preg;
-                if (preg >= PREG_AL && preg <= PREG_BH)
-                    push_reg = preg_alias_parent[preg];
-                if (callee_preserves[push_reg]) continue;
-                bool dup = false;
-                for (int s = 0; s < call_nsaved; s++)
-                    if (call_saved[s] == push_reg) { dup = true; break; }
-                if (dup) continue;
-                if (call_nsaved < 16)
-                    call_saved[call_nsaved++] = push_reg;
-                fprintf(out_asm, "    push %s\n", preg_name[push_reg]);
-            }
-
-            /* Argument fixup: if a call argument vreg isn't in the
-             * register the callee expects, emit a mov to place it.
-             * This handles spilled args and preference mismatches. */
-            {
-                /* Find callee's expected parameter registers */
-                int callee_fi = -1;
-                for (int fi2 = 0; fi2 < nfunctions; fi2++) {
-                    if (strcmp(functions[fi2].name, ins->name) == 0) {
-                        callee_fi = fi2;
-                        break;
-                    }
-                }
-                if (callee_fi >= 0) {
-                    fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
-                    /* Collect fixups: args not in the expected register */
-                    int fix_src[16], fix_dst[16];
-                    int nfix = 0;
-                    for (int a = 0; a < ins->nargs; a++) {
-                        int arg_vreg;
-                        if (a == 0) arg_vreg = ins->src1;
-                        else if (a == 1) arg_vreg = ins->src2;
-                        else arg_vreg = ins->extra_args[a - 2];
-                        if (arg_vreg < 0) continue;
-                        int expected = callee_fa->param_regs[a];
-                        if (expected == PREG_NONE) continue;
-                        int actual = fn->vregs[arg_vreg].assigned;
-                        /* Check if already in the right register */
-                        if (actual == expected) continue;
-                        /* Check if actual is a byte alias of expected
-                         * (e.g., AL when AX expected — close enough) */
-                        if (pregs_alias(actual, expected)) continue;
-                        fix_src[nfix] = arg_vreg;
-                        fix_dst[nfix] = expected;
-                        nfix++;
-                    }
-                    /* Emit fixups: spilled args first, then reg-to-reg */
-                    for (int f = 0; f < nfix; f++) {
-                        int dst_preg = fix_dst[f];
-                        const char *dst_name = preg_name[dst_preg];
-                        if (is_spilled(fn, fix_src[f])) {
-                            fprintf(out_asm, "    mov %s, %s\n",
-                                    dst_name, vreg_asm(fn, fix_src[f]));
-                        } else {
-                            int src_preg = fn->vregs[fix_src[f]].assigned;
-                            fprintf(out_asm, "    mov %s, %s\n",
-                                    dst_name, preg_name[src_preg]);
-                        }
-                    }
-                }
-            }
+            /* Caller-save, argument fixup, and caller-restore are now
+             * handled by the move insertion pass (insert_fixup_moves).
+             * The emitter just emits the call instruction itself. */
 
             /* Emit the actual call instruction */
             if (fn->has_chain && strcmp(ins->name, fn->chain_name) == 0) {
@@ -3098,9 +3090,7 @@ static void emit_function(func_t *fn) {
                         fprintf(out_asm, "    call %s\n", resolve_fn_name(ins->name));
                 }
             }
-            /* Caller-restore: pop saved registers (reverse order) */
-            for (int s = call_nsaved - 1; s >= 0; s--)
-                fprintf(out_asm, "    pop %s\n", preg_name[call_saved[s]]);
+            /* Caller-restore handled by move insertion pass */
             break;
         }
 
