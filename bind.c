@@ -147,6 +147,7 @@ typedef struct {
     bool    needs_index;       /* true if used as index: must be SI or DI */
     bool    needs_ds_addr;     /* true if used as DS-relative address: BX, SI, DI (not BP) */
     bool    needs_cl;          /* true if used as shift/rotate count: must be CL */
+    bool    needs_word_free;   /* byte IMUL dst — sibling byte must be free */
     bool    is_const;          /* true if immutable — prefer to spill over mutable */
     int     use_count;         /* number of instructions referencing this vreg */
     bool    in_loop;           /* true if live range spans a loop back-edge */
@@ -1995,6 +1996,14 @@ static void scan_addressing_constraints(func_t *fn) {
                 }
             }
         }
+        /* Byte IMUL dst: the zero-extend + IMUL clobbers the entire
+         * parent word register, so the dst's sibling byte must be free */
+        if (ins->op == IR_ALU && ins->dst >= 0 && ins->dst < MAX_VREGS &&
+            fn->vregs[ins->dst].is_byte) {
+            const char *op = ins->name;
+            if (strcmp(op, "mul") == 0 || strcmp(op, "imul") == 0)
+                fn->vregs[ins->dst].needs_word_free = true;
+        }
         if (ins->op == IR_LOAD || ins->op == IR_STORE) {
             if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
                 fn->vregs[ins->src1].needs_addressable = true;
@@ -2206,6 +2215,22 @@ static void allocate_registers(func_t *fn, bool bp_available) {
                     bits &= bits - 1;
                 }
             }
+            /* Byte IMUL dst: also check sibling byte */
+            if (ok && fn->vregs[v].needs_word_free &&
+                preg >= PREG_AL && preg <= PREG_BH) {
+                int parent = preg_alias_parent[preg];
+                int sibling = (preg == preg_alias_lo[parent])
+                              ? preg_alias_hi[parent] : preg_alias_lo[parent];
+                for (int w = 0; w < VREG_WORDS && ok; w++) {
+                    uint64_t bits = fn->igraph[v][w];
+                    while (bits) {
+                        int nb = w * 64 + __builtin_ctzll(bits);
+                        if (nb < nv && fn->vregs[nb].assigned == sibling)
+                            ok = false;
+                        bits &= bits - 1;
+                    }
+                }
+            }
             if (ok) {
                 /* Verify it's in the pool */
                 for (int r = 0; r < psz; r++) {
@@ -2231,6 +2256,22 @@ static void allocate_registers(func_t *fn, bool bp_available) {
                              pregs_alias(fn->vregs[nb].assigned, preg)))
                             { conflict = true; break; }
                         bits &= bits - 1;
+                    }
+                }
+                /* Byte IMUL dst: check sibling byte is also free */
+                if (!conflict && fn->vregs[v].needs_word_free &&
+                    preg >= PREG_AL && preg <= PREG_BH) {
+                    int parent = preg_alias_parent[preg];
+                    int sibling = (preg == preg_alias_lo[parent])
+                                  ? preg_alias_hi[parent] : preg_alias_lo[parent];
+                    for (int w = 0; w < VREG_WORDS && !conflict; w++) {
+                        uint64_t bits = fn->igraph[v][w];
+                        while (bits) {
+                            int nb = w * 64 + __builtin_ctzll(bits);
+                            if (nb < nv && fn->vregs[nb].assigned == sibling)
+                                { conflict = true; break; }
+                            bits &= bits - 1;
+                        }
                     }
                 }
                 if (!conflict) {
