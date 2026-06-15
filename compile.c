@@ -2080,6 +2080,32 @@ static void compile_global(decl_t *d) {
         return;
     }
 
+    /* String-initialized global: u8[N] name = "..."; */
+    if (d->u.global.init && d->u.global.init->kind == EXPR_LIT_STR &&
+        d->u.global.type && d->u.global.type->kind == TYPE_ARRAY) {
+        const char *str = d->u.global.init->u.lit_str;
+        int slen = strlen(str);
+        type_t *ty = d->u.global.type;
+        /* Infer size if unsized */
+        if (ty->array_size == 0) ty->array_size = slen;
+        int arr_size = ty->array_size;
+        if (slen > arr_size) {
+            cerr(d->line, "string initializer too long for %s", type_str(ty));
+            return;
+        }
+        fprintf(C.nir, "\n.data %s, %s", name, type_str(ty));
+        if (d->u.global.has_at)
+            fprintf(C.nir, ", at(0x%04X:0x%04X)",
+                    d->u.global.at_seg, d->u.global.at_off);
+        fprintf(C.nir, "\n");
+        for (int i = 0; i < slen; i++)
+            fprintf(C.nir, "  db 0x%02X\n", (unsigned char)str[i]);
+        for (int i = slen; i < arr_size; i++)
+            fprintf(C.nir, "  db 0x00\n");
+        fprintf(C.nir, ".enddata\n");
+        return;
+    }
+
     /* Non-array global */
     fprintf(C.nir, ".global %s, %s", name, type_str(d->u.global.type));
     if (d->u.global.has_at)
