@@ -1781,19 +1781,25 @@ pub fn bare at(0xE000:0x0000) reset() {
 }
 ```
 
-If the function has spills, the programmer must set up BP as a frame
-pointer before any spilled variable is accessed:
+If the function has spills, call `frame_enter()` after setting up the
+stack to establish BP as a frame pointer, and `frame_leave()` before
+returning. These builtins emit `push bp; mov bp, sp; sub sp, N` and
+`mov sp, bp; pop bp` with the correct frame size for the function's
+spill slots. They are only valid in bare functions.
 
 ```
-fn bare boot() {
-    // BP must be valid before the compiler can spill to [BP-N]
-    asm { push bp; mov bp, sp; sub sp, 16 }
-    // ... body with spills uses [BP-2], [BP-4], etc. ...
-    asm { mov sp, bp; pop bp; ret }
+pub fn bare at(0xE000:0x0000) reset() {
+    SS := 0x0000;
+    SP := 0x3FA0;
+    DS := 0x0000;
+    frame_enter();       // set up BP for spills
+    // ... body ...
+    frame_leave();       // tear down frame
 }
 ```
 
-Without a valid BP, any spilled vreg access will read/write garbage.
+Without `frame_enter()`, any spilled vreg access will read/write
+garbage through an invalid BP.
 
 ## Modules
 

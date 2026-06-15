@@ -880,6 +880,18 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             fprintf(C.nir, "    sti\n");
             return TV(dst, mk_type(TYPE_VOID));
         }
+        if (strcmp(fn_name, "frame_enter") == 0) {
+            if (!C.cur_fn_mods.is_bare)
+                cerr(e->line, "frame_enter() is only valid in bare functions");
+            fprintf(C.nir, "    frame_enter\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "frame_leave") == 0) {
+            if (!C.cur_fn_mods.is_bare)
+                cerr(e->line, "frame_leave() is only valid in bare functions");
+            fprintf(C.nir, "    frame_leave\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
         if (strcmp(fn_name, "salc") == 0) {
             fprintf(C.nir, "    salc %%%d\n", dst);
             return TV(dst, mk_type(TYPE_U8));

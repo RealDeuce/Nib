@@ -113,6 +113,8 @@ typedef enum {
     IR_BREAK,       /* break */
     IR_CONTINUE,    /* continue */
     IR_FAR_LIT,     /* far.lit %d, seg, off — store far literal on stack */
+    IR_FRAME_ENTER, /* frame_enter — push bp, mov bp, sp, sub sp, N */
+    IR_FRAME_LEAVE, /* frame_leave — mov sp, bp, pop bp */
     IR_ASM,         /* asm block (opaque) */
     IR_PREFER,      /* .prefer %v, REG (directive, not real insn) */
     IR_LABEL,       /* label: */
@@ -1031,7 +1033,19 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                  strcmp(opname, "repne") == 0 ||
                  strcmp(opname, "push") == 0 || strcmp(opname, "pop") == 0 ||
                  strcmp(opname, "pushf") == 0 || strcmp(opname, "popf") == 0 ||
-                 strcmp(opname, "cli") == 0 || strcmp(opname, "sti") == 0 ||
+                 strcmp(opname, "cli") == 0 || strcmp(opname, "sti") == 0) {
+            ins->op = IR_ASM;
+            p = skip_ws(p);
+            snprintf(ins->asm_body, sizeof(ins->asm_body), "    %s %s", opname, p);
+            ins->asm_ann[0] = '\0';
+        }
+        else if (strcmp(opname, "frame_enter") == 0) {
+            ins->op = IR_FRAME_ENTER;
+        }
+        else if (strcmp(opname, "frame_leave") == 0) {
+            ins->op = IR_FRAME_LEAVE;
+        }
+        else if (
                  /* Conditional jumps from flag-check blocks */
                  strcmp(opname, "int") == 0) {
             /* Pass-through: emit as literal assembly */
@@ -3545,6 +3559,18 @@ static void emit_function(func_t *fn) {
             fprintf(out_asm, "    loop %s\n", scoped_label(fn, ins->name));
             break;
         }
+
+        case IR_FRAME_ENTER:
+            fprintf(out_asm, "    push bp\n");
+            fprintf(out_asm, "    mov bp, sp\n");
+            if (fn->frame_size > 0)
+                fprintf(out_asm, "    sub sp, %d\n", fn->frame_size);
+            break;
+
+        case IR_FRAME_LEAVE:
+            fprintf(out_asm, "    mov sp, bp\n");
+            fprintf(out_asm, "    pop bp\n");
+            break;
 
         case IR_CJMP:
             /* Flag-check conditional jump with scoped label */
