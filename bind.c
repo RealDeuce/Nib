@@ -3017,9 +3017,12 @@ static void emit_function(func_t *fn) {
         case IR_MOV:
             if (ins->has_imm) {
                 const char *d = vreg_asm(fn, ins->dst);
-                /* Segment registers can't take immediates — use AX as intermediate */
+                /* Segment registers can't take immediates directly */
                 if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                     fn->vregs[ins->dst].is_seg) {
+                    /* The compiler emits an intermediate word vreg +
+                     * a mov to the seg vreg, so this path shouldn't
+                     * be reached. Fallback: use AX. */
                     fprintf(out_asm, "    mov AX, %d\n", ins->imm);
                     fprintf(out_asm, "    mov %s, AX\n", d);
                 } else {
@@ -3043,6 +3046,7 @@ static void emit_function(func_t *fn) {
                 /* Segment registers can't take label refs — use AX */
                 if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                     fn->vregs[ins->dst].is_seg) {
+                    /* Same fallback — compiler should route through word vreg */
                     fprintf(out_asm, "    mov AX, %s\n", resolved);
                     fprintf(out_asm, "    mov %s, AX\n", d);
                 } else {
