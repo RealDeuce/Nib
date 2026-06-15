@@ -812,6 +812,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", si, arg_vregs[1]);
                 fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
+                fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    rep movsb\n");
             }
             return TV(dst, mk_type(TYPE_VOID));
@@ -829,6 +830,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", al, arg_vregs[1]);
                 fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
+                fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    rep stosb\n");
             }
             return TV(dst, mk_type(TYPE_VOID));
@@ -846,7 +848,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", si, arg_vregs[1]);
                 fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
-                fprintf(C.nir, "    repe cmpsb\n");
+                fprintf(C.nir, "    cld\n");
                 fprintf(C.nir, "    repe cmpsb\n");
             }
             return TV(dst, mk_type(TYPE_BOOL));

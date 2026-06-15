@@ -819,7 +819,14 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_SETFLAG;
             p = read_word(p, ins->name, sizeof(ins->name));
             skip_comma(&p);
-            ins->src1 = parse_vreg(p, &p);
+            p = skip_ws(p);
+            if (*p == '%') {
+                ins->src1 = parse_vreg(p, &p);
+            } else {
+                /* Immediate value (e.g., setflag DF, 0) */
+                ins->has_imm = true;
+                ins->imm = (int)strtol(p, (char **)&p, 0);
+            }
         }
         else if (strcmp(opname, "getflag") == 0) {
             ins->op = IR_GETFLAG;
@@ -2311,9 +2318,11 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_SETFLAG: {
-            /* Determine value: look back for the mov that defined src1 */
             int val = 1; /* default assume set */
-            if (ins->src1 >= 0) {
+            if (ins->has_imm) {
+                val = ins->imm;
+            } else if (ins->src1 >= 0) {
+                /* Look back for the mov that defined src1 */
                 for (int j = i - 1; j >= 0; j--) {
                     if (fn->insns[j].dst == ins->src1 &&
                         fn->insns[j].op == IR_MOV && fn->insns[j].has_imm) {
