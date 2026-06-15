@@ -947,12 +947,17 @@ static void asm_jmp_call(const char *mnemonic, operand_t *op) {
         int next_ip = (out_pos + org_base) + (is_call ? 3 : 2);
 
         if (!is_call) {
-            /* JMP short or near */
+            /* JMP short or near — use same relaxation as Jcc to
+             * ensure consistent sizing across passes */
             int rel = target - ((out_pos + org_base) + 2);
-            if (rel >= -128 && rel <= 127) {
+            if (is_relaxed_line(current_line)) {
+                /* Previously marked — always near (3 bytes) */
+            } else if (rel >= -128 && rel <= 127) {
                 emit(0xEB);
                 emit(rel & 0xFF);
                 return;
+            } else {
+                mark_relaxed_line(current_line);
             }
         }
         /* Near */
