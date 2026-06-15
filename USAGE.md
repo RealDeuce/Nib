@@ -108,16 +108,20 @@ the source file and line number.
 ## nibdis — Disassembler
 
 Disassembles V20 flat binary files with optional label and source
-line annotation.
+line annotation. Supports 20-bit linear addresses for the full 1MB
+address space.
 
 ```
-nibdis [-o org] [-b bytes] [-m mapfile] [-d dbgfile] file.bin
+nibdis [options] file.bin
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-o addr` | Set origin address (default: `0x0000`) |
-| `-b N` | Disassemble only first N bytes |
+| `-b N` | Disassemble N bytes |
+| `-s offset` | Start at file offset |
+| `-a addr` | Start at linear address |
+| `-l label` | Disassemble a function/label (requires `-m`) |
 | `-m file` | Load symbol map for labels and code/data distinction |
 | `-d file` | Load debug info for source line interleaving |
 
@@ -125,12 +129,17 @@ Without a map file, all bytes are disassembled as code. With a map
 file, data regions are emitted as `DB` directives and code regions
 are disassembled with labels.
 
+`-l label` looks up the label in the map, disassembles from that
+address to the next label. Combine with `-b` to override the range.
+
 ### Examples
 
 ```sh
 ./nibdis program.bin
 ./nibdis -m program.map -d program.dbg program.bin
-./nibdis -o 0xF000 -b 256 rom.bin
+./nibdis -a 0xE0000 -b 256 rom.bin
+./nibdis -m serif.map -l lcd_init serif.bin
+./nibdis -a 0xFFFF0 -b 16 serif.bin
 ```
 
 ---
