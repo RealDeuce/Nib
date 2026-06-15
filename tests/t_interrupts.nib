@@ -1,15 +1,11 @@
-// Test: interrupt handlers — basic and reentrant
+// Test: interrupt handlers — PUSHA/POPA/IRET prologue/epilogue
 
-fn interrupt() basic_isr() {
+fn interrupt basic_isr() {
     u8 AL = port_in(0x00B0);
     port_out(0x90, 0x01);
 }
 
-fn interrupt() reentrant timer_isr() {
-    nop();
-}
-
-fn interrupt() keyboard_hook() {
+fn interrupt keyboard_hook() {
     u8 AL = port_in(0x60);
     if (AL == 0x3B) {
         return;

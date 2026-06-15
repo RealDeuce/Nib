@@ -205,7 +205,6 @@ typedef struct {
     bool        is_pub;
     bool        is_far;
     bool        is_interrupt;
-    bool        is_reentrant;
     bool        has_at;
     int         at_seg;
     int         at_off;
@@ -415,7 +414,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
 
         if (strcmp(word, "pub") == 0) fn->is_pub = true;
         else if (strcmp(word, "far") == 0) fn->is_far = true;
-        else if (strcmp(word, "reentrant") == 0) fn->is_reentrant = true;
+        /* reentrant removed */
         else if (strcmp(word, "interrupt") == 0) {
             fn->is_interrupt = true;
         }
@@ -2964,12 +2963,8 @@ static void emit_function(func_t *fn) {
     fprintf(out_asm, "%s:\n", asm_name);
 
     /* Prologue */
-    if (fn->is_interrupt) {
-        fprintf(out_asm, "; interrupt handler\n");
+    if (fn->is_interrupt)
         fprintf(out_asm, "    pusha\n");
-        if (fn->is_reentrant)
-            fprintf(out_asm, "    sti\n");
-    }
 
     /* Callee-save pushes */
     for (int i = 0; i < nsave; i++)
@@ -3571,13 +3566,6 @@ static void emit_function(func_t *fn) {
         } else {
             fprintf(out_asm, "    ret\n");
         }
-    }
-
-    /* Emit saved vector storage for interrupt handlers.
-     * Uses the bare function name so Nib code can reference it
-     * with @name_vec or &name_vec. */
-    if (fn->is_interrupt) {
-        fprintf(out_asm, "%s_vec dw 0, 0\n", fn->name);
     }
 
     /* Emit per-function constant pool (strings, far refs) */

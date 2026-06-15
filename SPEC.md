@@ -1755,118 +1755,41 @@ u8[80] line = "Ready";    // 80 bytes: "Ready" + 75 zero bytes
 
 ## Interrupt Handlers
 
-Interrupt handlers are declared with `fn interrupt(vector)`. They take
-no parameters, return nothing, and compile to IRET instead of RET.
-
-Unlike normal functions, interrupt handlers do not participate in the
-binder's register propagation. Since interrupts are asynchronous, the
-handler must save and restore every register it clobbers. The compiler
-determines the minimal set automatically — no need for blanket PUSHA.
-
-### Basic handler
+Interrupt handlers are declared with `fn interrupt`. The symbol is a
+far32 constant — its value is the handler's seg:off address. The
+handler uses PUSHA/POPA/IRET instead of the normal prologue/epilogue.
 
 ```
-fn interrupt(0xF8) keyboard_handler() {
-    u8 AL = [0x00B0];           // read keyboard matrix
-    // ... process key ...
-    AL = 0x01;
-    asm { out 0x90, AL }        // ack interrupt (explicit)
+fn interrupt keyboard_handler() {
+    u8 AL = port_in(0x00B0);
+    port_out(0x90, 0x01);
 }
 ```
 
-The compiler generates:
+The binder generates:
 
 ```asm
 keyboard_handler:
-    PUSH AX                     ; only clobbered registers
+    PUSHA
     ; ... body ...
-    POP AX
+    POPA
     IRET
 ```
 
-The binder writes the handler's seg:off into the IVT at
-`vector * 4` (physical address 0x003E0 for vector 0xF8).
-
-Interrupt acknowledgment is never automatic — the programmer writes
-the appropriate OUT instruction for their IRQ.
-
-### Re-entrant handlers
-
-The `reentrant` modifier causes the compiler to emit STI in the
-prologue, re-enabling maskable interrupts immediately on entry:
+IVT installation is not automatic — it is the responsibility of
+library code. The handler symbol can be used as a far32 value:
 
 ```
-fn interrupt(0x1C) reentrant timer_tick() {
-    // interrupts are enabled here
-    tick_count := tick_count + 1;
-}
-```
-
-Generates:
-
-```asm
-timer_tick:
-    PUSH AX
-    STI                         ; reentrant modifier
-    ; ... body ...
-    POP AX
-    IRET
-```
-
-Without `reentrant`, interrupts remain disabled (IF=0, as set by the
-CPU on interrupt entry) for the duration of the handler.
-
-### Chaining (hooking existing vectors)
-
-The `chain` clause captures the previous IVT entry as a callable
-far function reference:
-
-```
-fn interrupt(0x1C, chain old_handler) my_timer() {
-    // do our work
-    tick_count := tick_count + 1;
-
-    old_handler();              // far call to previous handler
-}
-```
-
-The binder:
-1. Reads the existing seg:off at the vector before installing.
-2. Stores it as a far pointer in the data segment.
-3. `old_handler()` compiles to a far call through that pointer.
-
-The chain call can appear anywhere in the body — before the handler's
-own logic, after it, or conditionally:
-
-```
-fn interrupt(0x09, chain prev) keyboard_hook() {
-    u8 AL = [0x0060];           // read scancode
-    if (AL == 0x3B) {           // F1 key
-        // handle it ourselves
-    } else {
-        prev();                 // let original handler deal with it
-    }
-}
-```
-
-If `chain` is omitted, the old vector is overwritten. There is no
-implicit way to recover it.
-
-### Combining modifiers
-
-```
-fn interrupt(0x08, chain old) reentrant system_timer() {
-    old();                      // chain first
-    // our work with interrupts enabled
-}
+far32 vec = keyboard_handler;
+ivt_install(0xF8, keyboard_handler);
 ```
 
 ### Constraints
 
-- `interrupt` functions cannot have parameters or return types.
-- `interrupt` functions cannot be called directly from Nib code.
-- The vector number must be a constant (0x00-0xFF).
-- `chain` names are scoped to the function body.
+- `interrupt` cannot be combined with `pub`, `far`, `at()`, parameters,
+  or return types.
+- Interrupt acknowledgment is never automatic — the programmer writes
+  the appropriate OUT instruction for their IRQ.
 
 
 ## Modules

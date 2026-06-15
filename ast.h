@@ -333,7 +333,6 @@ typedef enum {
 
 typedef struct {
     bool is_far;
-    bool is_reentrant;
     bool is_interrupt;
     bool has_preserves;
     bool is_clobbers;       /* true if clobbers() used instead of preserves() */

@@ -56,7 +56,6 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 "far"                   { return KW_FAR; }
 "far32"                 { return KW_FAR32; }
 "interrupt"             { return KW_INTERRUPT; }
-"reentrant"             { return KW_REENTRANT; }
 "if"                    { return KW_IF; }
 "else"                  { return KW_ELSE; }
 "while"                 { return KW_WHILE; }

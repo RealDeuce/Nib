@@ -2047,13 +2047,26 @@ static void compile_fn(decl_t *d) {
     register_function(d->u.fn.name, nparams, d->u.fn.return_type,
                        d->u.fn.params);
 
+    /* Validate interrupt handler constraints */
+    if (d->u.fn.mods.is_interrupt) {
+        if (d->is_pub)
+            cerr(d->line, "interrupt handlers cannot be pub");
+        if (d->u.fn.mods.is_far)
+            cerr(d->line, "interrupt handlers cannot be far");
+        if (d->u.fn.mods.has_at)
+            cerr(d->line, "interrupt handlers cannot have at()");
+        if (d->u.fn.params)
+            cerr(d->line, "interrupt handlers cannot have parameters");
+        if (d->u.fn.return_type)
+            cerr(d->line, "interrupt handlers cannot have a return type");
+    }
+
     /* Emit .nir function header */
     fprintf(C.nir, "\n.fn %s", d->u.fn.name);
     if (d->is_pub) fprintf(C.nir, ", pub");
     if (d->u.fn.mods.is_far) fprintf(C.nir, ", far");
     if (d->u.fn.mods.is_interrupt)
         fprintf(C.nir, ", interrupt");
-    if (d->u.fn.mods.is_reentrant) fprintf(C.nir, ", reentrant");
     if (d->u.fn.mods.has_at)
         fprintf(C.nir, ", at(0x%04X:0x%04X)", d->u.fn.mods.at_seg, d->u.fn.mods.at_off);
     fprintf(C.nir, "\n");
@@ -2065,9 +2078,6 @@ static void compile_fn(decl_t *d) {
     if (nif) {
         fprintf(C.nif, ".fn %s", d->u.fn.name);
         if (d->u.fn.mods.is_far) fprintf(C.nif, ", far");
-        if (d->u.fn.mods.is_interrupt)
-            fprintf(C.nif, ", interrupt");
-        if (d->u.fn.mods.is_reentrant) fprintf(C.nif, ", reentrant");
         fprintf(C.nif, "\n");
 
         emit_preserves(C.nif, &d->u.fn.mods);
