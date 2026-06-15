@@ -2795,11 +2795,12 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
                     fprintf(out_asm, "    xor %s, %s\n", hi, hi);
                 }
                 fprintf(out_asm, "    imul %s, %d\n", wd, ins->imm);
-                if (save_other) {
-                    emit_mov(fn, ins->dst, ins->src1);
-                    fprintf(out_asm, "    pop %s\n", wd);
-                    return;
-                }
+                /* Result is in lo byte of the word register, not src1 */
+                const char *d = vreg_asm(fn, ins->dst);
+                if (strcmp(d, lo) != 0)
+                    fprintf(out_asm, "    mov %s, %s\n", d, lo);
+                if (save_other) fprintf(out_asm, "    pop %s\n", wd);
+                return;
             } else {
                 fprintf(out_asm, "    imul %s, %d\n", vreg_asm(fn, ins->src1), ins->imm);
             }
