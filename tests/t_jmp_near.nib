@@ -1,0 +1,35 @@
+// Test: near JMP backward target must be exact.
+// A backward JMP beyond short range uses 3-byte near encoding.
+// The displacement must use next_ip = current + 3, not current + 2.
+// Bug: off-by-one causes CPU to land mid-instruction.
+
+fn loop_test(count: u16) -> u16 {
+    u16 sum = 0;
+    u16 i = 0;
+    while (i < count) {
+        // Pad the loop body to push the backward jump beyond short range
+        u16 a = i + 1;
+        u16 b = a + 2;
+        u16 c = b + 3;
+        u16 d = c + 4;
+        u16 e = d + 5;
+        u16 f = e + 6;
+        u16 g = f + 7;
+        u16 h = g + 8;
+        u16 j = h + 9;
+        u16 k = j + 10;
+        u16 l = k + 11;
+        u16 m = l + 12;
+        u16 n = m + 13;
+        u16 o = n + 14;
+        u16 p = o + 15;
+        u16 q = p + 16;
+        u16 r = q + 17;
+        u16 s = r + 18;
+        u16 t = s + 19;
+        u16 v = t + 20;
+        sum := sum + v;
+        i := i + 1;
+    }
+    return sum;
+}

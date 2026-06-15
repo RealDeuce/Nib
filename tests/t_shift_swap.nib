@@ -1,0 +1,15 @@
+// Test: derived shift counts must not be swapped when dst aliases CX.
+// The dst_is_cx detour must preserve CL across the count load,
+// otherwise a live vreg in CL gets clobbered with the shift count.
+
+fn blit_shift(sbyte: u8, x: u16) -> u16 {
+    u8 shift = (x & 0x07) as (u8);
+    u8 rshift = 8 - shift;
+    u8 mask = 0xFC;
+    u8 mask_lo = mask >> shift;
+    u8 mask_hi = mask << rshift;
+    u8 src_lo = sbyte >> shift;
+    u8 src_hi = sbyte << rshift;
+    u16 result = mask_lo as (u16) + mask_hi as (u16) + src_lo as (u16) + src_hi as (u16);
+    return result;
+}

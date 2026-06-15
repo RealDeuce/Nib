@@ -261,6 +261,55 @@ if [ -f /tmp/t_globals_rw.asm ]; then
     fi
 fi
 
+# Near JMP backward: displacement must account for 3-byte instruction size
+if [ -f /tmp/t_jmp_near.asm ]; then
+    outbin="/tmp/t_jmp_near_check.bin"
+    outmap="/tmp/t_jmp_near_check.map"
+    if ./nibasm /tmp/t_jmp_near.asm -o "$outbin" -m "$outmap" >/dev/null 2>&1; then
+        # Get .L0 label address from map
+        l0_addr=$(grep '\.L0' "$outmap" | awk '{print $1}')
+        if [ -n "$l0_addr" ]; then
+            # Find last E9 (near JMP) in the binary and verify its target
+            target=$(python3 -c "
+import struct
+with open('$outbin', 'rb') as f:
+    data = f.read()
+last_e9 = -1
+for i in range(len(data)-2):
+    if data[i] == 0xE9:
+        last_e9 = i
+if last_e9 >= 0:
+    disp = struct.unpack_from('<h', data, last_e9+1)[0]
+    target = (last_e9 + 3 + disp) & 0xFFFF
+    print(f'{target:04X}')
+")
+            if [ "$target" = "$l0_addr" ]; then
+                pass "jmp-near: backward near JMP targets correct label"
+            else
+                fail "jmp-near" "backward JMP target $target != label $l0_addr (off by $((0x$target - 0x$l0_addr)))"
+            fi
+        else
+            fail "jmp-near" "could not find .L0 in map"
+        fi
+    else
+        fail "jmp-near" "assembly failed"
+    fi
+else
+    skip "jmp-near" "asm not generated"
+fi
+
+# Shift with CX-aliased dst must preserve CL (push CX / pop CX)
+if [ -f /tmp/t_shift_swap.asm ]; then
+    # The dst_is_cx detour must push/pop CX to preserve live CL
+    if grep -A1 'push CX' /tmp/t_shift_swap.asm | grep -q 'mov CL,'; then
+        pass "shift-swap: dst_is_cx preserves CL with push/pop CX"
+    else
+        fail "shift-swap" "dst_is_cx detour does not preserve CL"
+    fi
+else
+    skip "shift-swap" "asm not generated"
+fi
+
 # Byte array access: must use byte registers (AL, BL, etc.)
 if [ -f /tmp/t_byte_array.asm ]; then
     if grep -q 'mov [A-D]L' /tmp/t_byte_array.asm; then

@@ -244,6 +244,15 @@ static int nexterns = 0;
 /* Forward declarations */
 static const char *fn_asm_name(func_t *fn);
 
+/* Resolved parameter register assignments per function */
+typedef struct {
+    int param_regs[16];     /* PREG_* for each parameter, or PREG_NONE */
+    int return_reg;         /* PREG_* for return value, or PREG_NONE */
+    bool resolved;
+} fn_assignment_t;
+
+static fn_assignment_t fn_assigns[MAX_FNS];
+
 
 /* Data blocks (initialized globals with placement) */
 #define MAX_DATA_BLOCKS 64
@@ -1691,13 +1700,24 @@ static void emit_mov(func_t *fn, int dst, int src) {
     bool dst_byte = (dst >= 0 && dst < MAX_VREGS && fn->vregs[dst].is_byte);
     bool src_byte = (src >= 0 && src < MAX_VREGS && fn->vregs[src].is_byte);
     if (is_spilled(fn, dst) && is_spilled(fn, src)) {
-        /* mem-to-mem: use push/pop to avoid clobbering any register */
-        fprintf(out_asm, "    push word %s\n", s);
-        fprintf(out_asm, "    pop word %s\n", d);
+        if (dst_byte || src_byte) {
+            /* Byte spill-to-spill: route through AL to avoid
+             * word push/pop copying garbage from adjacent bytes. */
+            fprintf(out_asm, "    push AX\n");
+            fprintf(out_asm, "    mov AL, %s\n", s);
+            fprintf(out_asm, "    mov %s, AL\n", d);
+            fprintf(out_asm, "    pop AX\n");
+        } else {
+            /* Word spill-to-spill: use push/pop */
+            fprintf(out_asm, "    push word %s\n", s);
+            fprintf(out_asm, "    pop word %s\n", d);
+        }
     } else if (fn->vregs[dst].is_seg && fn->vregs[src].is_seg) {
-        /* seg-to-seg: go through AX */
+        /* seg-to-seg: go through AX, saving it first */
+        fprintf(out_asm, "    push AX\n");
         fprintf(out_asm, "    mov AX, %s\n", s);
         fprintf(out_asm, "    mov %s, AX\n", d);
+        fprintf(out_asm, "    pop AX\n");
     } else if (dst_byte && !src_byte && !is_spilled(fn, src)) {
         /* byte dst, word src: extract low byte through AX */
         int src_preg = fn->vregs[src].assigned;
@@ -2063,16 +2083,22 @@ static void emit_function(func_t *fn) {
                                       dst_preg == PREG_CL ||
                                       dst_preg == PREG_CH);
                     if (dst_is_cx) {
-                        /* dst aliases CX — can't push/pop CX.
-                         * Move value to AX, load count to CL,
-                         * shift AX, move result back. */
+                        /* dst aliases CX — shift in AL, save/restore
+                         * CX so that CL (which may hold a live vreg)
+                         * is preserved across the count load. */
                         const char *d = vreg_asm(fn, ins->dst);
+                        bool byte_dst = fn->vregs[ins->dst].is_byte;
                         fprintf(out_asm, "    push AX\n");
-                        fprintf(out_asm, "    mov AX, %s\n", d);
+                        fprintf(out_asm, "    mov %s, %s\n",
+                                byte_dst ? "AL" : "AX", d);
+                        fprintf(out_asm, "    push CX\n");
                         fprintf(out_asm, "    mov CL, %s\n",
                                 vreg_asm(fn, ins->src2));
-                        fprintf(out_asm, "    %s AX, CL\n", mnem);
-                        fprintf(out_asm, "    mov %s, AX\n", d);
+                        fprintf(out_asm, "    %s %s, CL\n", mnem,
+                                byte_dst ? "AL" : "AX");
+                        fprintf(out_asm, "    pop CX\n");
+                        fprintf(out_asm, "    mov %s, %s\n", d,
+                                byte_dst ? "AL" : "AX");
                         fprintf(out_asm, "    pop AX\n");
                     } else {
                         fprintf(out_asm, "    push CX\n");
@@ -2084,9 +2110,11 @@ static void emit_function(func_t *fn) {
                     }
                 }
             } else if (is_spilled(fn, ins->dst) && is_spilled(fn, ins->src2)) {
-                /* op [mem], [mem] — load src2 into AX, then op */
-                fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
-                fprintf(out_asm, "    %s %s, AX\n", mnem, vreg_asm(fn, ins->dst));
+                /* op [mem], [mem] — load src2 into scratch, then op */
+                bool alu_byte = fn->vregs[ins->dst].is_byte;
+                const char *acc = alu_byte ? "AL" : "AX";
+                fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src2));
+                fprintf(out_asm, "    %s %s, %s\n", mnem, vreg_asm(fn, ins->dst), acc);
             } else {
                 fprintf(out_asm, "    %s %s, %s\n", mnem,
                         vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src2));
@@ -2156,7 +2184,17 @@ static void emit_function(func_t *fn) {
                 break;
             }
             emit_mov(fn, ins->dst, ins->src1);
-            fprintf(out_asm, "    %s %s\n", mnem, vreg_asm(fn, ins->dst));
+            if (is_spilled(fn, ins->dst) && fn->vregs[ins->dst].is_byte) {
+                /* Unary on spilled byte: route through AL to
+                 * avoid word-sized not/neg on the spill slot. */
+                fprintf(out_asm, "    push AX\n");
+                fprintf(out_asm, "    mov AL, %s\n", vreg_asm(fn, ins->dst));
+                fprintf(out_asm, "    %s AL\n", mnem);
+                fprintf(out_asm, "    mov %s, AL\n", vreg_asm(fn, ins->dst));
+                fprintf(out_asm, "    pop AX\n");
+            } else {
+                fprintf(out_asm, "    %s %s\n", mnem, vreg_asm(fn, ins->dst));
+            }
             break;
         }
 
@@ -2260,8 +2298,18 @@ static void emit_function(func_t *fn) {
                     break;
                 }
             }
-            int call_saved[8];
+            int call_saved[16];
             int call_nsaved = 0;
+
+            /* If the caller uses BP as a frame pointer and the callee
+             * doesn't preserve it, BP must be saved/restored.  The
+             * vreg scan below won't catch it because BP isn't assigned
+             * to any vreg — it's the implicit frame pointer. */
+            if (fn->needs_frame && !callee_preserves[PREG_BP]) {
+                call_saved[call_nsaved++] = PREG_BP;
+                fprintf(out_asm, "    push BP\n");
+            }
+
             for (int v = 0; v < fn->nvregs; v++) {
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
@@ -2276,9 +2324,60 @@ static void emit_function(func_t *fn) {
                 for (int s = 0; s < call_nsaved; s++)
                     if (call_saved[s] == push_reg) { dup = true; break; }
                 if (dup) continue;
-                if (call_nsaved < 8)
+                if (call_nsaved < 16)
                     call_saved[call_nsaved++] = push_reg;
                 fprintf(out_asm, "    push %s\n", preg_name[push_reg]);
+            }
+
+            /* Argument fixup: if a call argument vreg isn't in the
+             * register the callee expects, emit a mov to place it.
+             * This handles spilled args and preference mismatches. */
+            {
+                /* Find callee's expected parameter registers */
+                int callee_fi = -1;
+                for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                    if (strcmp(functions[fi2].name, ins->name) == 0) {
+                        callee_fi = fi2;
+                        break;
+                    }
+                }
+                if (callee_fi >= 0) {
+                    fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
+                    /* Collect fixups: args not in the expected register */
+                    int fix_src[16], fix_dst[16];
+                    int nfix = 0;
+                    for (int a = 0; a < ins->nargs; a++) {
+                        int arg_vreg;
+                        if (a == 0) arg_vreg = ins->src1;
+                        else if (a == 1) arg_vreg = ins->src2;
+                        else arg_vreg = ins->extra_args[a - 2];
+                        if (arg_vreg < 0) continue;
+                        int expected = callee_fa->param_regs[a];
+                        if (expected == PREG_NONE) continue;
+                        int actual = fn->vregs[arg_vreg].assigned;
+                        /* Check if already in the right register */
+                        if (actual == expected) continue;
+                        /* Check if actual is a byte alias of expected
+                         * (e.g., AL when AX expected — close enough) */
+                        if (pregs_alias(actual, expected)) continue;
+                        fix_src[nfix] = arg_vreg;
+                        fix_dst[nfix] = expected;
+                        nfix++;
+                    }
+                    /* Emit fixups: spilled args first, then reg-to-reg */
+                    for (int f = 0; f < nfix; f++) {
+                        int dst_preg = fix_dst[f];
+                        const char *dst_name = preg_name[dst_preg];
+                        if (is_spilled(fn, fix_src[f])) {
+                            fprintf(out_asm, "    mov %s, %s\n",
+                                    dst_name, vreg_asm(fn, fix_src[f]));
+                        } else {
+                            int src_preg = fn->vregs[fix_src[f]].assigned;
+                            fprintf(out_asm, "    mov %s, %s\n",
+                                    dst_name, preg_name[src_preg]);
+                        }
+                    }
+                }
             }
 
             /* Emit the actual call instruction */
@@ -2416,13 +2515,15 @@ static void emit_function(func_t *fn) {
                 idx_str = vreg_asm(fn, ins->src2);
             }
             if (is_spilled(fn, ins->dst)) {
+                bool ld_byte = fn->vregs[ins->dst].is_byte;
+                const char *acc = ld_byte ? "AL" : "AX";
                 if (idx_str)
-                    fprintf(out_asm, "    mov AX, [%s+%s]\n", base_str, idx_str);
+                    fprintf(out_asm, "    mov %s, [%s+%s]\n", acc, base_str, idx_str);
                 else
-                    fprintf(out_asm, "    mov AX, [%s]\n", base_str);
+                    fprintf(out_asm, "    mov %s, [%s]\n", acc, base_str);
                 if (pushed_si) fprintf(out_asm, "    pop SI\n");
                 if (pushed_bx) fprintf(out_asm, "    pop BX\n");
-                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
             } else {
                 if (idx_str)
                     fprintf(out_asm, "    mov %s, [%s+%s]\n",
@@ -2443,8 +2544,10 @@ static void emit_function(func_t *fn) {
             bool pushed_bx = false, pushed_si = false;
             /* Value to store */
             if (is_spilled(fn, ins->dst)) {
-                fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->dst));
-                val_str = fn->vregs[ins->dst].is_byte ? "AL" : "AX";
+                bool st_byte = fn->vregs[ins->dst].is_byte;
+                const char *acc = st_byte ? "AL" : "AX";
+                fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->dst));
+                val_str = acc;
             } else {
                 val_str = vreg_asm(fn, ins->dst);
             }
@@ -2475,30 +2578,72 @@ static void emit_function(func_t *fn) {
             break;
         }
 
-        case IR_LOADMEM: {
-            bool dst_byte = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
-                             fn->vregs[ins->dst].is_byte);
-            if (is_spilled(fn, ins->dst)) {
-                const char *acc = dst_byte ? "AL" : "AX";
-                fprintf(out_asm, "    mov %s, %s\n", acc, ins->name);
-                fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
-            } else {
-                fprintf(out_asm, "    mov %s, %s\n",
-                        vreg_asm(fn, ins->dst), ins->name);
-            }
-            break;
-        }
-
+        case IR_LOADMEM:
         case IR_STOREMEM: {
-            bool src_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                             fn->vregs[ins->src1].is_byte);
-            if (is_spilled(fn, ins->src1)) {
-                const char *acc = src_byte ? "AL" : "AX";
-                fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
-                fprintf(out_asm, "    mov %s, %s\n", ins->name, acc);
+            /* Fix up address registers: if the address expression
+             * references a physical register (e.g., [ES:SI]) and a
+             * vreg with .prefer for that register ended up elsewhere,
+             * emit a mov to place the value in the expected register. */
+            for (int preg = 0; preg < NUM_PREGS; preg++) {
+                const char *rn = preg_name[preg];
+                /* Check if this register name appears in the address */
+                const char *p2 = ins->name;
+                bool found = false;
+                while ((p2 = strstr(p2, rn)) != NULL) {
+                    /* Verify it's a whole word (not a substring) */
+                    char before = (p2 > ins->name) ? p2[-1] : '[';
+                    char after = p2[strlen(rn)];
+                    if (!isalpha(before) && !isalpha(after)) {
+                        found = true;
+                        break;
+                    }
+                    p2++;
+                }
+                if (!found) continue;
+                /* Find the most recently defined vreg that prefers
+                 * this register but isn't assigned to it.  The vreg
+                 * may appear dead (last_use < i) because the loadmem/
+                 * storemem address uses the physical register without
+                 * referencing the vreg, so we search by def_pos. */
+                int best_v = -1, best_def = -1;
+                for (int v = 0; v < fn->nvregs; v++) {
+                    if (fn->vregs[v].prefer != preg) continue;
+                    if (fn->vregs[v].assigned == preg) continue;
+                    if (fn->vregs[v].assigned == PREG_NONE) continue;
+                    if (fn->vregs[v].def_pos > (int)i) continue;
+                    if (fn->vregs[v].def_pos > best_def) {
+                        best_def = fn->vregs[v].def_pos;
+                        best_v = v;
+                    }
+                }
+                if (best_v >= 0) {
+                    fprintf(out_asm, "    mov %s, %s\n",
+                            rn, preg_name[fn->vregs[best_v].assigned]);
+                }
+            }
+
+            if (ins->op == IR_LOADMEM) {
+                bool dst_byte = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                                 fn->vregs[ins->dst].is_byte);
+                if (is_spilled(fn, ins->dst)) {
+                    const char *acc = dst_byte ? "AL" : "AX";
+                    fprintf(out_asm, "    mov %s, %s\n", acc, ins->name);
+                    fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
+                } else {
+                    fprintf(out_asm, "    mov %s, %s\n",
+                            vreg_asm(fn, ins->dst), ins->name);
+                }
             } else {
-                fprintf(out_asm, "    mov %s, %s\n",
-                        ins->name, vreg_asm(fn, ins->src1));
+                bool src_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                                 fn->vregs[ins->src1].is_byte);
+                if (is_spilled(fn, ins->src1)) {
+                    const char *acc = src_byte ? "AL" : "AX";
+                    fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+                    fprintf(out_asm, "    mov %s, %s\n", ins->name, acc);
+                } else {
+                    fprintf(out_asm, "    mov %s, %s\n",
+                            ins->name, vreg_asm(fn, ins->src1));
+                }
             }
             break;
         }
@@ -2645,15 +2790,6 @@ typedef struct {
 #define MAX_EDGES 1024
 static call_edge_t call_edges[MAX_EDGES];
 static int nedges = 0;
-
-/* Resolved parameter register assignments per function */
-typedef struct {
-    int param_regs[16];     /* PREG_* for each parameter, or PREG_NONE */
-    int return_reg;         /* PREG_* for return value, or PREG_NONE */
-    bool resolved;
-} fn_assignment_t;
-
-static fn_assignment_t fn_assigns[MAX_FNS];
 
 static int find_fn(const char *name) {
     for (int i = 0; i < nfunctions; i++)

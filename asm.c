@@ -960,9 +960,10 @@ static void asm_jmp_call(const char *mnemonic, operand_t *op) {
                 mark_relaxed_line(current_line);
             }
         }
-        /* Near */
+        /* Near (3 bytes: opcode + 16-bit displacement) */
         emit(is_call ? 0xE8 : 0xE9);
-        int rel = target - next_ip;
+        int near_ip = (out_pos + org_base) + 2;  /* IP after this instruction */
+        int rel = target - near_ip;
         emit16(rel & 0xFFFF);
         return;
     }
