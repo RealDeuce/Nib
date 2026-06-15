@@ -225,6 +225,15 @@ if [ -f /tmp/t_call_clobber.asm ]; then
     fi
 fi
 
+# memset/memcopy must set up DI, AL/SI, CX before string ops
+if [ -f /tmp/t_memops.asm ]; then
+    if grep -q 'mov DI' /tmp/t_memops.asm && grep -q 'mov CX' /tmp/t_memops.asm && grep -q 'rep stosb' /tmp/t_memops.asm; then
+        pass "memops: DI/CX/AL set up for rep stosb"
+    else
+        fail "memops" "string op register setup missing"
+    fi
+fi
+
 # Scalar globals: must use memory-indirect loads, not address loads
 if [ -f /tmp/t_globals_rw.asm ]; then
     if grep -q '\[counter\]' /tmp/t_globals_rw.asm && grep -q '\[flag\]' /tmp/t_globals_rw.asm; then

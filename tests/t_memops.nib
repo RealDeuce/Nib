@@ -1,0 +1,13 @@
+// Test: memset/memcopy/memcmp must set up DI, SI, AL, CX
+// before the string instruction.
+
+u8[32] buf1;
+u8[32] buf2;
+
+fn test_memset() {
+    memset(buf1, 0x20);
+}
+
+fn test_memcopy() {
+    memcopy(buf1, buf2);
+}

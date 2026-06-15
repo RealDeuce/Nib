@@ -798,22 +798,53 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memcopy") == 0) {
+            /* REP MOVSB: DI=dst, SI=src, CX=count */
             if (argc >= 2) {
-                fprintf(C.nir, "    ; memcopy %%%d <- %%%d\n", arg_vregs[0], arg_vregs[1]);
+                int sz = arg_types[0] ? type_size(arg_types[0]) : 0;
+                int di = alloc_vreg();
+                int si = alloc_vreg();
+                int cx = alloc_vreg();
+                fprintf(C.nir, ".prefer %%%d, DI\n", di);
+                fprintf(C.nir, ".prefer %%%d, SI\n", si);
+                fprintf(C.nir, ".prefer %%%d, CX\n", cx);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", si, arg_vregs[1]);
+                fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
                 fprintf(C.nir, "    rep movsb\n");
             }
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memset") == 0) {
+            /* REP STOSB: DI=dst, AL=fill, CX=count */
             if (argc >= 2) {
-                fprintf(C.nir, "    ; memset %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                int sz = arg_types[0] ? type_size(arg_types[0]) : 0;
+                int di = alloc_vreg();
+                int al = alloc_vreg();
+                int cx = alloc_vreg();
+                fprintf(C.nir, ".prefer %%%d, DI\n", di);
+                fprintf(C.nir, ".prefer %%%d, AL\n", al);
+                fprintf(C.nir, ".prefer %%%d, CX\n", cx);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", al, arg_vregs[1]);
+                fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
                 fprintf(C.nir, "    rep stosb\n");
             }
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memcmp") == 0) {
+            /* REPE CMPSB: DI=a, SI=b, CX=count */
             if (argc >= 2) {
-                fprintf(C.nir, "    ; memcmp %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                int sz = arg_types[0] ? type_size(arg_types[0]) : 0;
+                int di = alloc_vreg();
+                int si = alloc_vreg();
+                int cx = alloc_vreg();
+                fprintf(C.nir, ".prefer %%%d, DI\n", di);
+                fprintf(C.nir, ".prefer %%%d, SI\n", si);
+                fprintf(C.nir, ".prefer %%%d, CX\n", cx);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
+                fprintf(C.nir, "    mov %%%d, %%%d\n", si, arg_vregs[1]);
+                fprintf(C.nir, "    mov %%%d, %d\n", cx, sz);
+                fprintf(C.nir, "    repe cmpsb\n");
                 fprintf(C.nir, "    repe cmpsb\n");
             }
             return TV(dst, mk_type(TYPE_BOOL));
