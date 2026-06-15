@@ -299,7 +299,7 @@ auto-declared on first use with the correct type and pin. This is
 essential for interrupt handlers that read caller-set registers:
 
 ```
-fn interrupt(0x21) dispatch() {
+fn interrupt dispatch() {
     u8 device = AH;     // AH auto-declared, reads caller's value
     u8 version = AL;
 }
@@ -501,13 +501,13 @@ Extern declarations describe calling conventions for functions whose
 bodies the binder cannot analyze. There are two forms:
 
 **Declaration form** — for ROM routines, BIOS calls, third-party
-binaries. Includes a fixed address or interrupt vector:
+binaries. Includes a fixed far address:
 
 ```
 extern fn far [0xF000:0x0100] rom_init()
     preserves(BP, DS, ES, SS);
 
-extern fn interrupt(0x21) dos_putchar(svc: u8 in AH, char: u8 in DL)
+extern fn far [0xF000:0x0080] dos_putchar(svc: u8 in AH, char: u8 in DL)
     preserves(BX, CX, SI, DI, BP, DS, ES, SS);
 ```
 
@@ -573,37 +573,6 @@ address from the link map or an explicit address:
 extern fn far [0xF000:0x0100] rom_init()
     preserves(BP, DS, ES, SS);
 ```
-
-### Extern interrupt declarations
-
-Software interrupts can be declared as extern functions using the
-`interrupt(N)` modifier. The compiler emits INT N instead of CALL,
-but everything else works like a normal function call — register
-setup, clobber tracking, and binder integration.
-
-```
-extern fn interrupt(0x21) dos_putchar(
-    service: u8 in AH,
-    char: u8 in DL
-) preserves(BX, CX, SI, DI, BP, DS, ES, SS);
-
-// Called like any function — compiler emits INT 0x21
-dos_putchar(0x02, "A");
-```
-
-This eliminates manual register setup and push/pop for software
-interrupt calls. Multiple services on the same vector can be declared
-as separate functions:
-
-```
-extern fn interrupt(0x21) dos_putchar(svc: u8 in AH, char: u8 in DL)
-    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
-
-extern fn interrupt(0x21) dos_getchar(svc: u8 in AH) -> u8 in AL
-    preserves(BX, CX, DX, SI, DI, BP, DS, ES, SS);
-```
-
-For a raw INT with manual register setup, use `asm { int N }`.
 
 ### Indirect calls via extern descriptors
 
@@ -1858,7 +1827,7 @@ all .nir files         →  [nibbind]  →  .asm
 
 ### Functions
 
-`clobbers`, `preserves`, `interrupt`, `reentrant`, `chain`, `at`, `in`,
+`clobbers`, `preserves`, `interrupt`, `at`, `in`,
 `far32` (call convention)
 
 ### Assembly
