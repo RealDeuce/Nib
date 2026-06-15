@@ -1678,8 +1678,14 @@ static void emit_stmt(stmt_t *s) {
             if (cs && cs->is_const)
                 cerr(s->line, "cannot reassign const variable '%s'", t->u.ident);
         }
-        /* For literal RHS assigned to a register, emit immediate directly */
+        /* For literal RHS assigned to a flag, emit setflag with immediate */
         expr_t *val_expr = s->u.assign.value;
+        if (val_expr->kind == EXPR_LIT_INT && t->kind == EXPR_FLAG) {
+            fprintf(C.nir, "    setflag %s, %d\n",
+                    flag_name(t->u.flag_id), val_expr->u.lit_int);
+            break;
+        }
+        /* For literal RHS assigned to a register, emit immediate directly */
         if (val_expr->kind == EXPR_LIT_INT &&
             (t->kind == EXPR_REG || t->kind == EXPR_SREG ||
              t->kind == EXPR_IDENT)) {
