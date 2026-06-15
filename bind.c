@@ -1875,6 +1875,27 @@ static void build_igraph(func_t *fn) {
         for (int i = bb->end - 1; i >= (int)bb->start; i--) {
             ir_insn_t *ins = &fn->insns[i];
 
+            /* For three-operand ALU instructions (add %d, %s1, %s2),
+             * the lowering to two-operand x86 does: mov dst, src1; op dst, src2.
+             * This means src2 must survive past the mov, so it must interfere
+             * with dst. Add uses to live BEFORE the def for non-MOV instructions
+             * to create this interference. MOV keeps the coalescing exception
+             * (uses added after def). */
+            bool is_copy = (ins->op == IR_MOV && !ins->has_imm);
+            if (!is_copy) {
+                if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+                    vset_set(live, ins->src1);
+                if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
+                    vset_set(live, ins->src2);
+                for (int j = 0; j < 8; j++)
+                    if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
+                        vset_set(live, ins->extra_args[j]);
+                if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
+                     ins->op == IR_STOREFIELD) &&
+                    ins->dst >= 0 && ins->dst < fn->nvregs)
+                    vset_set(live, ins->dst);
+            }
+
             /* Def: the defined vreg interferes with everything
              * currently live (except itself — handled by add_interference).
              * For MOV, the src does NOT interfere with dst (they can
@@ -1890,13 +1911,6 @@ static void build_igraph(func_t *fn) {
                     while (bits) {
                         int bit = __builtin_ctzll(bits);
                         int v = w * 64 + bit;
-                        /* For MOV: don't add edge between dst and src1
-                         * (enables move coalescing later) */
-                        if (ins->op == IR_MOV && !ins->has_imm &&
-                            v == ins->src1) {
-                            bits &= bits - 1;
-                            continue;
-                        }
                         add_interference(fn, def, v);
                         bits &= bits - 1;
                     }
@@ -1905,19 +1919,11 @@ static void build_igraph(func_t *fn) {
                 vset_clear(live, def);
             }
 
-            /* Uses: add to live set */
-            if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
-                vset_set(live, ins->src1);
-            if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
-                vset_set(live, ins->src2);
-            for (int j = 0; j < 8; j++)
-                if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
-                    vset_set(live, ins->extra_args[j]);
-            /* Store dst is a use (address is read) */
-            if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
-                 ins->op == IR_STOREFIELD) &&
-                ins->dst >= 0 && ins->dst < fn->nvregs)
-                vset_set(live, ins->dst);
+            /* For MOV: add uses after def (coalescing exception) */
+            if (is_copy) {
+                if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+                    vset_set(live, ins->src1);
+            }
         }
 
         /* After walking to block top, add interference between all
@@ -2796,21 +2802,45 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     }
 
     /* --- General ALU: three-address → two-address lowering --- */
-    emit_mov(fn, ins->dst, ins->src1);
-    if (ins->has_imm) {
-        fprintf(out_asm, "    %s %s, %d\n", op, vreg_asm(fn, ins->dst), ins->imm);
-    } else if (is_shift_op(op)) {
-        /* Shift: count should be in CL (move insertion pass handles routing).
-         * Fallback: if src2 is already CL, emit directly. */
-        fprintf(out_asm, "    %s %s, CL\n", op, vreg_asm(fn, ins->dst));
-    } else if (is_spilled(fn, ins->dst) && is_spilled(fn, ins->src2)) {
-        bool alu_byte = fn->vregs[ins->dst].is_byte;
-        const char *acc = alu_byte ? "AL" : "AX";
-        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src2));
-        fprintf(out_asm, "    %s %s, %s\n", op, vreg_asm(fn, ins->dst), acc);
+    /* Check for dst == src2 alias: if dst already holds src2,
+     * doing mov dst, src1 would clobber it. Instead, op dst, src1
+     * since dst already contains src2 and the op is commutative.
+     * For non-commutative ops (sub), swap operands and use reverse. */
+    bool dst_is_src2 = (!ins->has_imm && ins->src2 >= 0 &&
+                        ins->dst >= 0 && ins->src2 < MAX_VREGS &&
+                        ins->dst < MAX_VREGS &&
+                        !is_spilled(fn, ins->dst) &&
+                        !is_spilled(fn, ins->src2) &&
+                        fn->vregs[ins->dst].assigned ==
+                        fn->vregs[ins->src2].assigned);
+    if (dst_is_src2 && !is_shift_op(op)) {
+        /* dst already contains src2 — emit: op dst, src1 */
+        if (is_spilled(fn, ins->src1)) {
+            bool alu_byte = fn->vregs[ins->dst].is_byte;
+            const char *acc = alu_byte ? "AL" : "AX";
+            fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+            fprintf(out_asm, "    %s %s, %s\n", op, vreg_asm(fn, ins->dst), acc);
+        } else {
+            fprintf(out_asm, "    %s %s, %s\n", op,
+                    vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+        }
     } else {
-        fprintf(out_asm, "    %s %s, %s\n", op,
-                vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src2));
+        emit_mov(fn, ins->dst, ins->src1);
+        if (ins->has_imm) {
+            fprintf(out_asm, "    %s %s, %d\n", op, vreg_asm(fn, ins->dst), ins->imm);
+        } else if (is_shift_op(op)) {
+            /* Shift: count should be in CL (move insertion pass handles routing).
+             * Fallback: if src2 is already CL, emit directly. */
+            fprintf(out_asm, "    %s %s, CL\n", op, vreg_asm(fn, ins->dst));
+        } else if (is_spilled(fn, ins->dst) && is_spilled(fn, ins->src2)) {
+            bool alu_byte = fn->vregs[ins->dst].is_byte;
+            const char *acc = alu_byte ? "AL" : "AX";
+            fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src2));
+            fprintf(out_asm, "    %s %s, %s\n", op, vreg_asm(fn, ins->dst), acc);
+        } else {
+            fprintf(out_asm, "    %s %s, %s\n", op,
+                    vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src2));
+        }
     }
 }
 
@@ -2875,6 +2905,18 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
         val_str = vreg_asm(fn, ins->dst);
     }
     if (is_spilled(fn, ins->src1)) {
+        /* Check for alias conflict: if value is in BL/BH,
+         * loading the spilled base into BX would clobber it.
+         * Save value to accumulator first. */
+        if (!is_spilled(fn, ins->dst)) {
+            int val_preg = fn->vregs[ins->dst].assigned;
+            if (val_preg == PREG_BL || val_preg == PREG_BH) {
+                bool st_byte = fn->vregs[ins->dst].is_byte;
+                const char *acc = st_byte ? "AL" : "AX";
+                fprintf(out_asm, "    mov %s, %s\n", acc, val_str);
+                val_str = acc;
+            }
+        }
         fprintf(out_asm, "    push BX\n");
         fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
         base_str = "BX"; pushed_bx = true;
