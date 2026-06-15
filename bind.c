@@ -1494,10 +1494,11 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         int *pool;
         int poolsz;
         if (fn->vregs[i].is_seg) {
-            /* Segment registers: ES, DS, SS (CS not allocatable) */
-            static int seg_pool[] = { PREG_ES, PREG_DS, PREG_SS };
+            /* Segment registers: only ES is freely allocatable.
+             * DS and SS are critical (data segment, stack segment). */
+            static int seg_pool[] = { PREG_ES };
             pool = seg_pool;
-            poolsz = 3;
+            poolsz = 1;
         } else if (fn->vregs[i].needs_cl) {
             /* Shift/rotate count: must be CL */
             static int cl_pool[] = { PREG_CL };
