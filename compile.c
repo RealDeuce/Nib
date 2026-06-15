@@ -635,11 +635,11 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     case EXPR_IDENT: {
         /* Interrupt handler name — far32 constant (label + SEG) */
         if (is_isr(e->u.ident)) {
-            int off = alloc_vreg();
             int seg = alloc_vreg();
-            fprintf(C.nir, "    mov %%%d, %s\n", off, e->u.ident);
+            int off = alloc_vreg();
             fprintf(C.nir, "    mov %%%d, SEG %s\n", seg, e->u.ident);
             fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+            fprintf(C.nir, "    mov %%%d, %s\n", off, e->u.ident);
             return TV_FAR(off, seg);
         }
         symbol_t *sym = sym_lookup(e->u.ident);
@@ -765,11 +765,11 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (e->u.unop.op == NIB_FAR_ADDR &&
             e->u.unop.operand->kind == EXPR_IDENT &&
             find_function(e->u.unop.operand->u.ident) >= 0) {
-            int off = alloc_vreg();
             int seg = alloc_vreg();
-            fprintf(C.nir, "    mov %%%d, %s\n", off, e->u.unop.operand->u.ident);
+            int off = alloc_vreg();
             fprintf(C.nir, "    mov %%%d, SEG %s\n", seg, e->u.unop.operand->u.ident);
             fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+            fprintf(C.nir, "    mov %%%d, %s\n", off, e->u.unop.operand->u.ident);
             return TV_FAR(off, seg);
         }
         /* @global — far pointer to global variable */
@@ -777,11 +777,11 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             e->u.unop.operand->kind == EXPR_IDENT) {
             symbol_t *sym = sym_lookup(e->u.unop.operand->u.ident);
             if (sym && sym->is_global) {
-                int off = alloc_vreg();
                 int seg = alloc_vreg();
-                fprintf(C.nir, "    mov %%%d, %s\n", off, sym->name);
+                int off = alloc_vreg();
                 fprintf(C.nir, "    mov %%%d, SEG %s\n", seg, sym->name);
                 fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+                fprintf(C.nir, "    mov %%%d, %s\n", off, sym->name);
                 return TV_FAR(off, seg);
             }
             cerr(e->line, "@ requires a function or global name");
@@ -1328,12 +1328,12 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, mk_type(TYPE_U8));
     }
     case EXPR_FAR_LIT: {
-        /* Far literal — two immediate movs (offset + segment) */
-        int off = alloc_vreg();
+        /* Far literal — segment first (through AX→ES), then offset into AX */
         int seg = alloc_vreg();
-        fprintf(C.nir, "    mov %%%d, 0x%04X\n", off, e->u.far_lit.off);
+        int off = alloc_vreg();
         fprintf(C.nir, "    mov %%%d, 0x%04X\n", seg, e->u.far_lit.seg);
         fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+        fprintf(C.nir, "    mov %%%d, 0x%04X\n", off, e->u.far_lit.off);
         return TV_FAR(off, seg);
     }
     case EXPR_RAW_FIELD: {

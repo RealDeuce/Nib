@@ -3040,7 +3040,7 @@ static void emit_function(func_t *fn) {
                     const char *clbl = resolve_const_label(fn, ins->name);
                     resolved = clbl ? clbl : resolve_fn_name(ins->name);
                 }
-                /* Segment registers can't take immediates — use AX */
+                /* Segment registers can't take label refs — use AX */
                 if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                     fn->vregs[ins->dst].is_seg) {
                     fprintf(out_asm, "    mov AX, %s\n", resolved);
