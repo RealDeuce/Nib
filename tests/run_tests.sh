@@ -225,6 +225,15 @@ if [ -f /tmp/t_call_clobber.asm ]; then
     fi
 fi
 
+# Port I/O: OUT must use AL, IN must read into AL
+if [ -f /tmp/t_port_io.asm ]; then
+    if grep -q 'out 0x50, AL' /tmp/t_port_io.asm && grep -q 'in AL, 0x60' /tmp/t_port_io.asm; then
+        pass "port-io: IN/OUT use AL accumulator"
+    else
+        fail "port-io" "IN/OUT not using AL"
+    fi
+fi
+
 # Byte vregs: zero_extend must use byte mov (MOV BL, AL not MOV BX, AL)
 if [ -f /tmp/t_byte_vreg.asm ]; then
     if grep -q 'mov [A-D]L, [A-D]L' /tmp/t_byte_vreg.asm; then

@@ -1,0 +1,11 @@
+// Test: port_out must use AL for the value, port_in must read into AL.
+// OUT always sources from AL/AX, IN always reads into AL/AX.
+
+fn test_out(val: u8) {
+    port_out(0x50, val);
+}
+
+fn test_in() -> u8 {
+    u8 result = port_in(0x60);
+    return result;
+}

@@ -1777,21 +1777,26 @@ static void emit_function(func_t *fn) {
 
             /* Special two-operand forms */
             if (strcmp(op, "in") == 0 || strcmp(op, "inb") == 0) {
+                /* IN always reads into AL (byte) or AX (word) */
+                bool byte_in = (strcmp(op, "inb") == 0);
+                const char *acc = byte_in ? "AL" : "AX";
                 if (ins->has_imm)
-                    fprintf(out_asm, "    in %s, 0x%02X\n",
-                            vreg_asm(fn, ins->dst), ins->imm);
+                    fprintf(out_asm, "    in %s, 0x%02X\n", acc, ins->imm);
                 else
-                    fprintf(out_asm, "    in %s, %s\n",
-                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                    fprintf(out_asm, "    in %s, %s\n", acc, vreg_asm(fn, ins->src1));
+                fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
                 break;
             }
             if (strcmp(op, "out") == 0 || strcmp(op, "outb") == 0) {
+                /* OUT always uses AL (byte) or AX (word) as source */
+                bool byte_out = (strcmp(op, "outb") == 0);
+                const char *acc = byte_out ? "AL" : "AX";
+                fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
                 if (ins->has_imm)
-                    fprintf(out_asm, "    out 0x%02X, %s\n",
-                            ins->imm, vreg_asm(fn, ins->src1));
+                    fprintf(out_asm, "    out 0x%02X, %s\n", ins->imm, acc);
                 else
                     fprintf(out_asm, "    out %s, %s\n",
-                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                            vreg_asm(fn, ins->dst), acc);
                 break;
             }
             if (strcmp(op, "far.off") == 0) {
