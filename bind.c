@@ -1471,8 +1471,6 @@ static void allocate_registers(func_t *fn, bool bp_available) {
     for (int i = 0; i < fn->nvregs; i++) {
         if (fn->vregs[i].prefer != PREG_NONE) {
             int preg = fn->vregs[i].prefer;
-            /* SP is never allocatable — it's the stack pointer */
-            if (preg == PREG_SP) continue;
             /* Don't honor preference if it violates addressing constraints */
             if (fn->vregs[i].needs_base &&
                 preg != PREG_BX && preg != PREG_BP) {
@@ -2630,7 +2628,8 @@ static void propagate_preferences(void) {
             for (int a = 0; a < call_edges[e].nargs && a < externs[x].nparams; a++) {
                 int caller_vreg = call_edges[e].arg_vregs[a];
                 int callee_reg = externs[x].param_pins[a].preg;
-                if (caller_vreg >= 0 && callee_reg != PREG_NONE) {
+                if (caller_vreg >= 0 && callee_reg != PREG_NONE &&
+                    callee_reg != PREG_SP) {
                     if (caller->vregs[caller_vreg].prefer == PREG_NONE)
                         caller->vregs[caller_vreg].prefer = callee_reg;
                 }
@@ -2764,7 +2763,8 @@ static void propagate_preferences(void) {
 
                 /* Set preference on the caller's vreg — but don't
                  * override an existing preference */
-                if (caller->vregs[caller_vreg].prefer == PREG_NONE) {
+                if (caller->vregs[caller_vreg].prefer == PREG_NONE &&
+                    callee_reg != PREG_SP) {
                     caller->vregs[caller_vreg].prefer = callee_reg;
                 }
                 /* Propagate is_seg from callee parameter */
@@ -2774,7 +2774,8 @@ static void propagate_preferences(void) {
             }
 
             /* Return value: set preference on caller's dst vreg */
-            if (call_edges[e].ret_vreg >= 0 && fa->return_reg != PREG_NONE) {
+            if (call_edges[e].ret_vreg >= 0 && fa->return_reg != PREG_NONE &&
+                fa->return_reg != PREG_SP) {
                 int rv = call_edges[e].ret_vreg;
                 if (caller->vregs[rv].prefer == PREG_NONE)
                     caller->vregs[rv].prefer = fa->return_reg;
@@ -2803,7 +2804,8 @@ static void propagate_preferences(void) {
 
         for (int p = 0; p < fn->nparams; p++) {
             int v = fn->param_vregs[p];
-            if (v >= 0 && fa->param_regs[p] != PREG_NONE) {
+            if (v >= 0 && fa->param_regs[p] != PREG_NONE &&
+                fa->param_regs[p] != PREG_SP) {
                 fn->vregs[v].prefer = fa->param_regs[p];
             }
         }
