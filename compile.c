@@ -856,6 +856,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (strcmp(fn_name, "memscan") == 0) {
             if (argc >= 2) {
                 fprintf(C.nir, "    ; memscan %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+                fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    repne scasb\n");
             }
             return TV(dst, mk_type(TYPE_U16));
@@ -906,8 +907,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
 
         if (strcmp(fn_name, "load") == 0) {
             /* LODSB/LODSW — load from [SI], advance SI */
-            if (argc >= 1)
+            if (argc >= 1) {
+                fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    lods %%%d, %%%d\n", dst, arg_vregs[0]);
+            }
             /* Return type matches the source type */
             type_t *src_type = (argc >= 1) ? arg_types[0] : NULL;
             type_t *elem = src_type ? type_of_element(src_type) : mk_type(TYPE_U8);
@@ -915,8 +918,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
         if (strcmp(fn_name, "store") == 0) {
             /* STOSB/STOSW — store to [DI], advance DI */
-            if (argc >= 2)
+            if (argc >= 2) {
+                fprintf(C.nir, "    setflag DF, 0\n");
                 fprintf(C.nir, "    stos %%%d, %%%d\n", arg_vregs[0], arg_vregs[1]);
+            }
             return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "extract") == 0) {
