@@ -88,27 +88,30 @@ Vregs used in LOAD/STORE instructions (memory operands) are marked
 `needs_addressable`, restricting them to {BX, BP, SI, DI}. Pre-colored
 preferences that violate addressing constraints are overridden.
 
-### Phase 5: Liveness analysis
+### Phase 5: CFG and liveness
 
-Simple linear liveness — no CFG, no SSA. Forward scan finds first def,
-backward scan finds last use. Live range is the interval [def, last_use].
-Loop-aware extension: backward jumps (loops) extend the live range of
-vregs defined before the loop and used inside it to the loop back-edge.
-This is conservative but correct for reducible control flow.
+Build a control flow graph: split IR into basic blocks at labels and
+jumps, connect successor/predecessor edges. Run standard backward
+dataflow liveness to fixpoint — loops are handled naturally without
+special-case extensions. Parameters are live-in at the entry block.
 
-### Phase 6: Register allocation
+From the live sets, build an interference graph: two vregs that are
+simultaneously live at any instruction point get an edge. MOV
+instructions get a coalescing exception (src and dst don't interfere,
+enabling future move coalescing).
 
-Linear scan with pre-coloring (not graph coloring — no interference
-graph is built; conflicts are checked pairwise during assignment):
-1. Pre-colored vregs (from `.prefer` or `in REG` pins) get their
-   assigned register first
-2. Remaining vregs are allocated in order, checking for conflicts
-   with already-assigned vregs (overlap + alias interference)
-3. Vregs that can't be colored are spilled to stack slots
+### Phase 6: Register allocation (Chaitin-Briggs)
 
-Two-pass BP reservation: first attempt uses 7 registers (BP available).
-If any spills result, BP is reserved as frame pointer and allocation
-re-runs with 6 registers.
+1. **Pressure estimate**: if any vreg's interference degree exceeds
+   its pool size, reserve BP for the frame pointer upfront
+2. **Pre-color**: vregs with `.prefer` or `in REG` pins get their
+   assigned register, respecting addressing constraints
+3. **Simplify**: repeatedly remove vregs with degree < pool_size
+   from the graph, pushing onto a stack
+4. **Potential spill**: when stuck, push the vreg with lowest spill
+   cost (use_count weighted by loop depth and const flag)
+5. **Select**: pop stack and assign colors, preferring affinities;
+   if no color fits, actually spill to a stack slot
 
 ### Phase 7: Emit .asm
 

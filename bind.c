@@ -3771,23 +3771,35 @@ int main(int argc, char **argv) {
         build_igraph(fn);
         scan_addressing_constraints(fn);
 
-        /* Phase 2: try allocation with BP available */
-        allocate_registers(fn, true);
+        /* Phase 2: estimate register pressure from interference graph.
+         * If any vreg's degree exceeds its pool size, spills are likely
+         * and we should reserve BP for the frame pointer upfront. */
+        bool bp_available = true;
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (fn->vregs[v].def_pos < 0 && fn->vregs[v].last_use < 0)
+                continue;
+            int pool[16];
+            int psz = get_vreg_pool(fn, v, true, pool);
+            if (fn->degree[v] >= psz) {
+                bp_available = false;
+                fn->needs_frame = true;
+                break;
+            }
+        }
 
-        /* Phase 3: check if we need spills */
-        if (fn->nspill_slots > 0) {
-            /* Need BP for frame pointer — re-allocate */
+        allocate_registers(fn, bp_available);
+
+        /* If spills occurred despite no pressure estimate, reserve BP */
+        if (fn->nspill_slots > 0 && bp_available) {
             fn->needs_frame = true;
-            fn->frame_size = fn->nspill_slots * 2;
-            /* Reset assignments */
             for (int v = 0; v < fn->nvregs; v++) {
                 fn->vregs[v].assigned = PREG_NONE;
                 fn->vregs[v].spill_slot = -1;
             }
             fn->nspill_slots = 0;
             allocate_registers(fn, false);
-            fn->frame_size = fn->nspill_slots * 2;
         }
+        fn->frame_size = fn->nspill_slots * 2;
 
         /* Count CL fixups: shift/rotate ops where count didn't get CL */
         fn->ncl_fixups = 0;
