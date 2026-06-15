@@ -520,6 +520,46 @@ extern fn interrupt(0x21) dos_getchar(svc: u8 in AH) -> u8 in AL
 
 For a raw INT with manual register setup, use `asm { int N }`.
 
+### Indirect calls via extern descriptors
+
+Device drivers expose APIs through jump tables (far pointer arrays).
+The caller gets a far pointer at runtime and needs to call through it
+with the correct register convention. Extern declarations serve as
+calling convention descriptors for these indirect calls.
+
+**Module side** — the driver declares a `pub extern` alongside its
+private implementation:
+
+```
+fn print_impl(str: far in ES:SI, len: u16 in CX) { ... }
+
+pub extern fn print(str: far in ES:SI, len: u16 in CX)
+    clobbers(FLAGS);
+```
+
+The `pub extern` has no body or address — it's purely an ABI descriptor
+exported to the `.nif`.
+
+**Caller side** — uses `as ... from` syntax to bind a far pointer to
+the extern's calling convention:
+
+```
+use "lcd.nif";
+
+far addr = lookup(DEV_LCD, LCD_PRINT);
+addr as print from lcd(@message, 17);
+```
+
+The `as NAME from MODULE(args...)` syntax:
+- `addr` — expression yielding a `far` value (the call target)
+- `NAME` — extern name to look up for register assignments
+- `MODULE` — which module's namespace to search
+- `(args...)` — arguments, set up per the extern's register pins
+
+The compiler sets up registers according to the extern declaration,
+then emits an indirect far call (`call far [addr]`) through the
+far pointer.
+
 
 ## Expressions
 

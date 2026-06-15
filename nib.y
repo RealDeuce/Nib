@@ -144,7 +144,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
 %token KW_PRESERVES KW_CLOBBERS
-%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT KW_CONST KW_PUB KW_WHEN KW_END
+%token KW_BITS KW_TRAP KW_GOTO KW_TAILCALL KW_AS KW_AT KW_CONST KW_PUB KW_WHEN KW_END KW_FROM
 
 /* ---- Type keywords ---- */
 %token TY_U8 TY_U16 TY_U32 TY_SEG TY_BCD TY_BOOL
@@ -241,6 +241,7 @@ top_decl
     | KW_PUB struct_def     { $$ = $2; $$->is_pub = true; }
     | KW_PUB global_decl    { $$ = $2; $$->is_pub = true; }
     | KW_PUB const_decl     { $$ = $2; $$->is_pub = true; }
+    | KW_PUB extern_decl   { $$ = $2; $$->is_pub = true; }
     | at_decl               { $$ = $1; }
     | end_at_decl           { $$ = $1; }
     ;
@@ -690,6 +691,10 @@ postfix_expr
         { $$ = mk_expr_call($1, $3, yyline); }
     | postfix_expr '(' ')'
         { $$ = mk_expr_call($1, NULL, yyline); }
+    | postfix_expr KW_AS IDENT KW_FROM IDENT '(' arg_list ')'
+        { $$ = mk_expr_indirect_call($1, $3, $5, $7, yyline); }
+    | postfix_expr KW_AS IDENT KW_FROM IDENT '(' ')'
+        { $$ = mk_expr_indirect_call($1, $3, $5, NULL, yyline); }
     | primary_expr
         { $$ = $1; }
     ;

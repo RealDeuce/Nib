@@ -91,6 +91,7 @@ typedef enum {
     IR_JZ,          /* jz %cond, label */
     IR_JMP,         /* jmp label */
     IR_CALL,        /* call %d, name, args... */
+    IR_ICALL,       /* icall %d, %addr, name, args... */
     IR_TAILCALL,    /* tailcall name, args... */
     IR_GOTO_FN,     /* goto.fn name — raw jump to function, no cleanup */
     IR_CJMP,        /* conditional jump: jcc label (flag-check blocks) */
@@ -687,6 +688,27 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
                 else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
+                ins->nargs++;
+            }
+        }
+        else if (strcmp(opname, "icall") == 0) {
+            ins->op = IR_ICALL;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);  /* addr vreg */
+            skip_comma(&p);
+            p = read_word(p, ins->name, sizeof(ins->name)); /* extern name */
+            /* Mark addr vreg as needing an addressable register */
+            if (ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+                fn->vregs[ins->src1].needs_addressable = true;
+            /* Parse args */
+            ins->nargs = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int a = parse_vreg(p, &p);
+                if (ins->nargs < 8) ins->extra_args[ins->nargs] = a;
                 ins->nargs++;
             }
         }
@@ -2040,6 +2062,20 @@ static void emit_function(func_t *fn) {
             break;
         }
 
+        case IR_ICALL: {
+            /* Indirect far call through a memory-resident far pointer.
+             * src1 = vreg holding address of the far pointer in memory. */
+            const char *addr = vreg_asm(fn, ins->src1);
+            if (is_spilled(fn, ins->src1)) {
+                /* Spilled: the spill slot IS the memory address */
+                fprintf(out_asm, "    call far %s\n", addr);
+            } else {
+                /* In a register: dereference as [reg] */
+                fprintf(out_asm, "    call far [%s]\n", addr);
+            }
+            break;
+        }
+
         case IR_TAILCALL: {
             /* Tear down frame */
             if (fn->needs_frame) {
@@ -2346,22 +2382,29 @@ static void build_call_graph(void) {
         func_t *fn = &functions[fi];
         for (int i = 0; i < fn->ninsns; i++) {
             ir_insn_t *ins = &fn->insns[i];
-            if (ins->op != IR_CALL && ins->op != IR_TAILCALL) continue;
+            if (ins->op != IR_CALL && ins->op != IR_TAILCALL &&
+                ins->op != IR_ICALL) continue;
 
             if (nedges >= MAX_EDGES) break;
             call_edge_t *e = &call_edges[nedges++];
             e->caller_fn = fi;
-            e->callee_fn = find_fn(ins->name);
+            e->callee_fn = (ins->op == IR_ICALL) ? -1 : find_fn(ins->name);
             e->insn_idx = i;
             strncpy(e->callee_name, ins->name, 63);
             e->ret_vreg = ins->dst;
             e->nargs = 0;
 
-            /* Collect argument vregs */
-            if (ins->src1 >= 0) e->arg_vregs[e->nargs++] = ins->src1;
-            if (ins->src2 >= 0) e->arg_vregs[e->nargs++] = ins->src2;
-            for (int j = 0; j < 8 && ins->extra_args[j] >= 0; j++)
-                e->arg_vregs[e->nargs++] = ins->extra_args[j];
+            if (ins->op == IR_ICALL) {
+                /* icall: args are in extra_args (src1 is addr vreg) */
+                for (int j = 0; j < 8 && ins->extra_args[j] >= 0; j++)
+                    e->arg_vregs[e->nargs++] = ins->extra_args[j];
+            } else {
+                /* call/tailcall: args in src1, src2, extra_args */
+                if (ins->src1 >= 0) e->arg_vregs[e->nargs++] = ins->src1;
+                if (ins->src2 >= 0) e->arg_vregs[e->nargs++] = ins->src2;
+                for (int j = 0; j < 8 && ins->extra_args[j] >= 0; j++)
+                    e->arg_vregs[e->nargs++] = ins->extra_args[j];
+            }
         }
     }
     fprintf(stderr, "Call graph: %d edges\n", nedges);

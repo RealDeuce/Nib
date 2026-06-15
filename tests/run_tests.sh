@@ -57,7 +57,7 @@ for f in tests/t_*.nir; do
     name=$(basename "$f" .nir)
     # Skip multi-module tests (they need special handling)
     case "$name" in
-        t_modules_app|t_const_scope) continue ;;
+        t_modules_app|t_const_scope|t_icall) continue ;;
     esac
     outasm="/tmp/${name}.asm"
     if ./nibbind "$f" -o "$outasm" >/dev/null 2>&1; then
@@ -97,6 +97,22 @@ if [ -f tests/t_const_scope_lib.nir ] && [ -f tests/t_const_scope.nir ]; then
 else
     skip "t_const_scope" "nir files not generated"
 fi
+# Indirect far call via extern descriptor
+if [ -f tests/t_icall_lib.nir ] && [ -f tests/t_icall.nir ]; then
+    outasm="/tmp/t_icall_multi.asm"
+    if ./nibbind tests/t_icall_lib.nir tests/t_icall.nir -o "$outasm" >/dev/null 2>&1; then
+        outbin="/tmp/t_icall_multi.bin"
+        if ./nibasm "$outasm" -o "$outbin" >/dev/null 2>&1; then
+            pass "t_icall (indirect far call)"
+        else
+            fail "t_icall (assemble)" "$(./nibasm "$outasm" -o "$outbin" 2>&1 | head -1)"
+        fi
+    else
+        fail "t_icall (bind)" "$(./nibbind tests/t_icall_lib.nir tests/t_icall.nir -o "$outasm" 2>&1 | tail -1)"
+    fi
+else
+    skip "t_icall" "nir files not generated"
+fi
 echo ""
 
 # Phase 5: Assemble tests — bound .asm files should assemble
@@ -106,7 +122,7 @@ for f in /tmp/t_*.asm; do
     name=$(basename "$f" .asm)
     # Skip tests that can't assemble standalone
     case "$name" in
-        t_const_scope|t_const_scope_multi) continue ;;
+        t_const_scope|t_const_scope_multi|t_icall|t_icall_multi) continue ;;
     esac
     outbin="/tmp/${name}.bin"
     if ./nibasm "$f" -o "$outbin" >/dev/null 2>&1; then

@@ -94,7 +94,8 @@ typedef enum {
     EXPR_FAR_LIT,   /* far literal: seg:off */
     EXPR_CAST,
     EXPR_PAREN,
-    EXPR_ARRAY_INIT /* array initializer: [expr, expr, ...] */
+    EXPR_ARRAY_INIT, /* array initializer: [expr, expr, ...] */
+    EXPR_INDIRECT_CALL /* addr as name from module(args...) */
 } expr_kind_t;
 
 struct expr_node {
@@ -152,6 +153,14 @@ struct expr_node {
 
         /* ARRAY_INIT — [expr, expr, ...] */
         struct { expr_t *elements; } array_init;
+
+        /* INDIRECT_CALL — addr as name from module(args...) */
+        struct {
+            expr_t *addr;           /* far pointer expression */
+            char   *extern_name;    /* function name in extern namespace */
+            char   *module_name;    /* module to look up extern in */
+            expr_t *args;           /* argument list */
+        } indirect_call;
     } u;
 
     expr_t *next;   /* for argument lists */
@@ -428,6 +437,8 @@ expr_t     *mk_expr_mem_abs(int seg, int off, int line);
 expr_t     *mk_expr_far_lit(int seg, int off, int line);
 expr_t     *mk_expr_cast(expr_t *operand, type_t *target, int line);
 expr_t     *mk_expr_array_init(expr_t *elements, int line);
+expr_t     *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
+                                   const char *module_name, expr_t *args, int line);
 
 stmt_t     *mk_stmt_vardecl(type_t *type, const char *name,
                              int pinned_reg, reg_class_t pin_class,

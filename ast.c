@@ -168,6 +168,16 @@ expr_t *mk_expr_array_init(expr_t *elements, int line) {
     return e;
 }
 
+expr_t *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
+                               const char *module_name, expr_t *args, int line) {
+    expr_t *e = mk_expr(EXPR_INDIRECT_CALL, line);
+    e->u.indirect_call.addr = addr;
+    e->u.indirect_call.extern_name = xstrdup(extern_name);
+    e->u.indirect_call.module_name = xstrdup(module_name);
+    e->u.indirect_call.args = args;
+    return e;
+}
+
 /* ---- Statements ---- */
 
 static stmt_t *mk_stmt(stmt_kind_t kind, int line) {

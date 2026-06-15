@@ -1,0 +1,12 @@
+// Test: indirect far call via extern descriptor
+// addr as name from module(args...)
+
+use "t_icall_lib.nif";
+
+fn main() {
+    // Simulated far pointer (would come from lookup in real code)
+    far addr = 0xE000:0x0100;
+
+    // Indirect call through the far pointer using greet's convention
+    addr as greet from t_icall_lib(42, 5);
+}

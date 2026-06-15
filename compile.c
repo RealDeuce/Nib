@@ -952,6 +952,62 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         fprintf(C.nir, "\n");
         return TV(dst, ret_type);
     }
+    case EXPR_INDIRECT_CALL: {
+        /* addr as name from module(args...) */
+        typed_vreg_t addr_val = emit_expr_typed(e->u.indirect_call.addr);
+        const char *ext_name = e->u.indirect_call.extern_name;
+
+        /* Emit arguments */
+        int argc = 0;
+        int arg_vregs[16];
+        for (expr_t *a = e->u.indirect_call.args; a; a = a->next) {
+            if (argc < 16) {
+                typed_vreg_t av = emit_expr_typed(a);
+                arg_vregs[argc] = av.vreg;
+            }
+            argc++;
+        }
+
+        int dst = alloc_vreg();
+        type_t *ret_type = mk_type(TYPE_VOID);
+
+        /* Look up the extern for far-splitting info and return type */
+        int fi = find_function(ext_name);
+        if (fi >= 0)
+            ret_type = C.functions[fi].return_type;
+
+        /* Build IR arg list with far splitting */
+        int ir_args[32];
+        int nir_args = 0;
+        expr_t *arg_expr = e->u.indirect_call.args;
+        for (int i = 0; i < argc && i < 16; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+            if (fi >= 0 && C.functions[fi].param_is_far[i]) {
+                symbol_t *asym = NULL;
+                if (arg_expr && arg_expr->kind == EXPR_IDENT)
+                    asym = sym_lookup(arg_expr->u.ident);
+                if (asym && asym->vreg_seg >= 0) {
+                    ir_args[nir_args++] = asym->vreg;
+                    ir_args[nir_args++] = asym->vreg_seg;
+                } else {
+                    int off_v = alloc_vreg();
+                    int seg_v = alloc_vreg();
+                    fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, arg_vregs[i]);
+                    fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, arg_vregs[i]);
+                    ir_args[nir_args++] = off_v;
+                    ir_args[nir_args++] = seg_v;
+                }
+            } else {
+                ir_args[nir_args++] = arg_vregs[i];
+            }
+        }
+
+        /* Emit icall: icall %dst, %addr, extern_name, %arg1, ... */
+        fprintf(C.nir, "    icall %%%d, %%%d, %s", dst, addr_val.vreg, ext_name);
+        for (int i = 0; i < nir_args; i++)
+            fprintf(C.nir, ", %%%d", ir_args[i]);
+        fprintf(C.nir, "\n");
+        return TV(dst, ret_type);
+    }
     case EXPR_INDEX: {
         typed_vreg_t arr = emit_expr_typed(e->u.index.array);
         typed_vreg_t idx = emit_expr_typed(e->u.index.index);

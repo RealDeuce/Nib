@@ -1,0 +1,9 @@
+// Library module: provides a function and extern descriptor
+
+fn do_greet(msg: u16 in SI, len: u16 in CX) {
+    nop();
+}
+
+// Calling convention descriptor for indirect callers
+pub extern fn greet(msg: u16 in SI, len: u16 in CX)
+    preserves(BX, DX, BP, DS, ES, SS);
