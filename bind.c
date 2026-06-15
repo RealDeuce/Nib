@@ -1658,6 +1658,8 @@ static void emit_mov(func_t *fn, int dst, int src) {
     const char *d = vreg_asm(fn, dst);
     const char *s = vreg_asm(fn, src);
     if (strcmp(d, s) == 0) return; /* skip self-moves */
+    bool dst_byte = (dst >= 0 && dst < MAX_VREGS && fn->vregs[dst].is_byte);
+    bool src_byte = (src >= 0 && src < MAX_VREGS && fn->vregs[src].is_byte);
     if (is_spilled(fn, dst) && is_spilled(fn, src)) {
         /* mem-to-mem: go through AX */
         fprintf(out_asm, "    mov AX, %s\n", s);
@@ -1666,6 +1668,37 @@ static void emit_mov(func_t *fn, int dst, int src) {
         /* seg-to-seg: go through AX */
         fprintf(out_asm, "    mov AX, %s\n", s);
         fprintf(out_asm, "    mov %s, AX\n", d);
+    } else if (dst_byte && !src_byte && !is_spilled(fn, src)) {
+        /* byte dst, word src: extract low byte through AX */
+        int src_preg = fn->vregs[src].assigned;
+        if (src_preg >= PREG_AX && src_preg <= PREG_BX) {
+            /* AX..BX have accessible low bytes */
+            fprintf(out_asm, "    mov %s, %s\n", d, preg_name[preg_alias_lo[src_preg]]);
+        } else {
+            /* SI, DI, BP — no low byte; use xchg AX to access via AL */
+            int dst_preg2 = fn->vregs[dst].assigned;
+            if (dst_preg2 == PREG_AL) {
+                /* dst is AL — mov AX,src puts low byte in AL */
+                fprintf(out_asm, "    mov AX, %s\n", s);
+            } else {
+                /* Any other byte reg — xchg AX with src, copy AL, restore */
+                fprintf(out_asm, "    xchg AX, %s\n", s);
+                fprintf(out_asm, "    mov %s, AL\n", d);
+                fprintf(out_asm, "    xchg AX, %s\n", s);
+            }
+        }
+    } else if (!dst_byte && src_byte && !is_spilled(fn, dst)) {
+        /* word dst, byte src: zero-extend or just move low byte */
+        int dst_preg = fn->vregs[dst].assigned;
+        if (dst_preg >= PREG_AX && dst_preg <= PREG_BX) {
+            fprintf(out_asm, "    mov %s, %s\n", preg_name[preg_alias_lo[dst_preg]], s);
+        } else {
+            fprintf(out_asm, "    push AX\n");
+            fprintf(out_asm, "    xor AX, AX\n");
+            fprintf(out_asm, "    mov AL, %s\n", s);
+            fprintf(out_asm, "    mov %s, AX\n", d);
+            fprintf(out_asm, "    pop AX\n");
+        }
     } else {
         fprintf(out_asm, "    mov %s, %s\n", d, s);
     }

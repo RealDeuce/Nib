@@ -830,6 +830,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 int cx = alloc_vreg();
                 fprintf(C.nir, ".prefer %%%d, DI\n", di);
                 fprintf(C.nir, ".prefer %%%d, AL\n", al);
+                fprintf(C.nir, ".byte %%%d\n", al);
                 fprintf(C.nir, ".prefer %%%d, CX\n", cx);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", di, arg_vregs[0]);
                 fprintf(C.nir, "    mov %%%d, %%%d\n", al, arg_vregs[1]);
