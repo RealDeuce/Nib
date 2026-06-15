@@ -2906,12 +2906,12 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
         val_str = vreg_asm(fn, ins->dst);
     }
     if (is_spilled(fn, ins->src1)) {
-        /* Check for alias conflict: if value is in BL/BH,
+        /* Check for conflict: if value is in BX or BL/BH,
          * loading the spilled base into BX would clobber it.
          * Save value to accumulator first. */
         if (!is_spilled(fn, ins->dst)) {
             int val_preg = fn->vregs[ins->dst].assigned;
-            if (val_preg == PREG_BL || val_preg == PREG_BH) {
+            if (val_preg == PREG_BX || val_preg == PREG_BL || val_preg == PREG_BH) {
                 bool st_byte = fn->vregs[ins->dst].is_byte;
                 const char *acc = st_byte ? "AL" : "AX";
                 fprintf(out_asm, "    mov %s, %s\n", acc, val_str);
@@ -2925,6 +2925,16 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
         base_str = vreg_asm(fn, ins->src1);
     }
     if (ins->src2 >= 0 && is_spilled(fn, ins->src2)) {
+        /* Check for conflict: if value is in SI, save to accumulator first */
+        if (!is_spilled(fn, ins->dst)) {
+            int val_preg = fn->vregs[ins->dst].assigned;
+            if (val_preg == PREG_SI) {
+                bool st_byte = fn->vregs[ins->dst].is_byte;
+                const char *acc = st_byte ? "AL" : "AX";
+                fprintf(out_asm, "    mov %s, %s\n", acc, val_str);
+                val_str = acc;
+            }
+        }
         fprintf(out_asm, "    push SI\n");
         fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src2));
         idx_str = "SI"; pushed_si = true;
