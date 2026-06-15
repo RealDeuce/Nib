@@ -2621,8 +2621,8 @@ static void emit_mov(func_t *fn, int dst, int src) {
             fprintf(out_asm, "    pop AX\n");
         } else {
             /* Word spill-to-spill: use push/pop */
-            fprintf(out_asm, "    push word %s\n", s);
-            fprintf(out_asm, "    pop word %s\n", d);
+            fprintf(out_asm, "    push %s\n", s);
+            fprintf(out_asm, "    pop %s\n", d);
         }
     } else if (fn->vregs[dst].is_seg && fn->vregs[src].is_seg) {
         /* seg-to-seg: go through AX, saving it first */
