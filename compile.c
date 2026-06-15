@@ -564,13 +564,25 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             cerr(e->line, "undefined variable '%s'", e->u.ident);
             return TV(alloc_vreg(), mk_type(TYPE_U16));
         }
-        /* Globals don't have function-scoped vregs — load address fresh */
+        /* Globals don't have function-scoped vregs — load fresh each time */
         if (sym->is_global) {
             int r = alloc_vreg();
-            if (sym->has_at) {
-                fprintf(C.nir, "    mov %%%d, 0x%04X\n", r, sym->at_off);
+            bool is_scalar = sym->type && (sym->type->kind == TYPE_U8 ||
+                             sym->type->kind == TYPE_U16 ||
+                             sym->type->kind == TYPE_U32 ||
+                             sym->type->kind == TYPE_SEG);
+            if (is_scalar) {
+                /* Scalar global: load value from memory */
+                if (sym->has_at)
+                    fprintf(C.nir, "    loadmem %%%d, [0x%04X]\n", r, sym->at_off);
+                else
+                    fprintf(C.nir, "    loadmem %%%d, [%s]\n", r, sym->name);
             } else {
-                fprintf(C.nir, "    mov %%%d, %s\n", r, sym->name);
+                /* Aggregate global: load address (passed by reference) */
+                if (sym->has_at)
+                    fprintf(C.nir, "    mov %%%d, 0x%04X\n", r, sym->at_off);
+                else
+                    fprintf(C.nir, "    mov %%%d, %s\n", r, sym->name);
             }
             return TV(r, sym->type);
         }
@@ -1392,7 +1404,19 @@ static void emit_stmt(stmt_t *s) {
                 }
             }
             if (sym) {
-                fprintf(C.nir, "    mov %%%d, %d\n", sym->vreg, val_expr->u.lit_int);
+                if (sym->is_global && sym->type &&
+                    (sym->type->kind == TYPE_U8 || sym->type->kind == TYPE_U16 ||
+                     sym->type->kind == TYPE_U32 || sym->type->kind == TYPE_SEG)) {
+                    /* Scalar global: store literal to memory */
+                    int tmp = alloc_vreg();
+                    fprintf(C.nir, "    mov %%%d, %d\n", tmp, val_expr->u.lit_int);
+                    if (sym->has_at)
+                        fprintf(C.nir, "    storemem [0x%04X], %%%d\n", sym->at_off, tmp);
+                    else
+                        fprintf(C.nir, "    storemem [%s], %%%d\n", sym->name, tmp);
+                } else {
+                    fprintf(C.nir, "    mov %%%d, %d\n", sym->vreg, val_expr->u.lit_int);
+                }
                 break;
             }
         }
@@ -1414,7 +1438,17 @@ static void emit_stmt(stmt_t *s) {
                         cerr(s->line, "assignment type mismatch: '%s' is %s, got %s",
                              t->u.ident, type_str(sym->type), type_str(val.type));
                 }
-                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
+                if (sym->is_global && sym->type &&
+                    (sym->type->kind == TYPE_U8 || sym->type->kind == TYPE_U16 ||
+                     sym->type->kind == TYPE_U32 || sym->type->kind == TYPE_SEG)) {
+                    /* Scalar global: store value to memory */
+                    if (sym->has_at)
+                        fprintf(C.nir, "    storemem [0x%04X], %%%d\n", sym->at_off, val.vreg);
+                    else
+                        fprintf(C.nir, "    storemem [%s], %%%d\n", sym->name, val.vreg);
+                } else {
+                    fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
+                }
             }
         } else if (t->kind == EXPR_REG || t->kind == EXPR_SREG) {
             const char *name = (t->kind == EXPR_REG) ?
