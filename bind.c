@@ -286,6 +286,8 @@ static int nexterns = 0;
 
 /* Forward declarations */
 static const char *fn_asm_name(func_t *fn);
+static const char *vreg_asm(func_t *fn, int v);
+static bool is_spilled(func_t *fn, int v);
 
 /* Resolved parameter register assignments per function */
 typedef struct {
@@ -2203,12 +2205,83 @@ static void rins_asm(func_t *fn, const char *fmt, ...) {
     fn->nresolved++;
 }
 
+static bool is_shift_op(const char *op) {
+    return strcmp(op, "shl") == 0 || strcmp(op, "shr") == 0 ||
+           strcmp(op, "sar") == 0 || strcmp(op, "rol") == 0 ||
+           strcmp(op, "ror") == 0 || strcmp(op, "rcl") == 0 ||
+           strcmp(op, "rcr") == 0;
+}
+
 /* Build the resolved instruction stream.
- * Currently passes through all instructions unchanged — fixup
- * categories will be added incrementally. */
+ * Inserts explicit moves for fixups that the emitter would
+ * otherwise handle with push/pop sequences. */
 static void insert_fixup_moves(func_t *fn) {
     fn->nresolved = 0;
+
     for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+
+        /* ---- CL routing for variable shifts ---- */
+        if (ins->op == IR_ALU && !ins->has_imm &&
+            is_shift_op(ins->name) &&
+            ins->src2 >= 0 && ins->src2 < fn->nvregs &&
+            fn->vregs[ins->src2].assigned != PREG_CL) {
+
+            int src2_preg = fn->vregs[ins->src2].assigned;
+            int dst_preg = fn->vregs[ins->dst].assigned;
+            bool dst_is_cx = (dst_preg == PREG_CX ||
+                              dst_preg == PREG_CL ||
+                              dst_preg == PREG_CH);
+            int blk = block_of(fn, i);
+            uint32_t free = free_regs_at(fn, blk, i);
+
+            /* Check if CX/CL is free (no live vreg using it) */
+            bool cx_free = (free >> PREG_CX) & 1;
+
+            if (cx_free && !dst_is_cx) {
+                /* CX is free — just mov CL, src2. No save needed. */
+                if (is_spilled(fn, ins->src2))
+                    rins_asm(fn, "    mov CL, %s", vreg_asm(fn, ins->src2));
+                else
+                    rins_asm(fn, "    mov CL, %s", preg_name[src2_preg]);
+                /* Mark that the emitter should use CL directly */
+                fn->vregs[ins->src2].assigned = PREG_CL;
+                rins_ir(fn, i);
+                fn->vregs[ins->src2].assigned = src2_preg; /* restore */
+            } else if (!dst_is_cx) {
+                /* CX is occupied — push/pop CX around the route */
+                rins_asm(fn, "    push CX");
+                if (is_spilled(fn, ins->src2))
+                    rins_asm(fn, "    mov CL, %s", vreg_asm(fn, ins->src2));
+                else
+                    rins_asm(fn, "    mov CL, %s", preg_name[src2_preg]);
+                fn->vregs[ins->src2].assigned = PREG_CL;
+                rins_ir(fn, i);
+                fn->vregs[ins->src2].assigned = src2_preg;
+                rins_asm(fn, "    pop CX");
+            } else {
+                /* dst aliases CX — need to route through AX */
+                bool byte_dst = fn->vregs[ins->dst].is_byte;
+                const char *acc = byte_dst ? "AL" : "AX";
+                const char *d = vreg_asm(fn, ins->dst);
+                bool ax_free = (free >> PREG_AX) & 1;
+                if (!ax_free) rins_asm(fn, "    push AX");
+                rins_asm(fn, "    mov %s, %s", acc, d);
+                rins_asm(fn, "    push CX");
+                if (is_spilled(fn, ins->src2))
+                    rins_asm(fn, "    mov CL, %s", vreg_asm(fn, ins->src2));
+                else
+                    rins_asm(fn, "    mov CL, %s", preg_name[src2_preg]);
+                rins_asm(fn, "    %s %s, CL", ins->name, acc);
+                rins_asm(fn, "    pop CX");
+                rins_asm(fn, "    mov %s, %s", d, acc);
+                if (!ax_free) rins_asm(fn, "    pop AX");
+                /* Don't emit the original IR instruction — we handled it */
+            }
+            continue;
+        }
+
+        /* Default: pass through unchanged */
         rins_ir(fn, i);
     }
 }
@@ -2390,9 +2463,16 @@ static void emit_function(func_t *fn) {
             fprintf(out_asm, "    sub sp, %d\n", fn->frame_size);
     }
 
-    /* Body */
+    /* Body — iterate resolved instruction stream */
     int last_dbg_line = 0;
-    for (int i = 0; i < fn->ninsns; i++) {
+    for (unsigned ri = 0; ri < (unsigned)fn->nresolved; ri++) {
+        /* Pre-formatted assembly from move insertion pass */
+        if (fn->resolved[ri].kind == RINS_ASM) {
+            fprintf(out_asm, "%s\n", fn->resolved[ri].asm_text);
+            continue;
+        }
+
+        int i = fn->resolved[ri].ir_idx;
         ir_insn_t *ins = &fn->insns[i];
 
         /* Emit debug line comment when source line changes */
