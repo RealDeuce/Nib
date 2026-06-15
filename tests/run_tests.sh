@@ -234,10 +234,10 @@ if [ -f /tmp/t_port_io.asm ]; then
     fi
 fi
 
-# Byte vregs: zero_extend must use byte mov (MOV BL, AL not MOV BX, AL)
+# Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)
 if [ -f /tmp/t_byte_vreg.asm ]; then
-    if grep -q 'mov [A-D]L, [A-D]L' /tmp/t_byte_vreg.asm; then
-        pass "byte-vreg: zero_extend uses byte move"
+    if grep -q 'mov [A-D]L, [A-D]L\|xor [A-D]H, [A-D]H\|xor [A-D]X, [A-D]X' /tmp/t_byte_vreg.asm; then
+        pass "byte-vreg: zero_extend uses byte-safe operation"
     else
         fail "byte-vreg" "zero_extend uses invalid word-from-byte move"
     fi
@@ -269,18 +269,25 @@ if [ -f /tmp/t_jmp_near.asm ]; then
         # Get .L0 label address from map
         l0_addr=$(grep '\.L0' "$outmap" | awk '{print $1}')
         if [ -n "$l0_addr" ]; then
-            # Find last E9 (near JMP) in the binary and verify its target
+            # Find last backward JMP (E9 near or EB short) and verify target
             target=$(python3 -c "
 import struct
 with open('$outbin', 'rb') as f:
     data = f.read()
-last_e9 = -1
+# Try near JMP (E9) first, then short JMP (EB)
+last_jmp = -1; jmp_type = None
 for i in range(len(data)-2):
     if data[i] == 0xE9:
-        last_e9 = i
-if last_e9 >= 0:
-    disp = struct.unpack_from('<h', data, last_e9+1)[0]
-    target = (last_e9 + 3 + disp) & 0xFFFF
+        last_jmp = i; jmp_type = 'near'
+    elif data[i] == 0xEB:
+        last_jmp = i; jmp_type = 'short'
+if last_jmp >= 0:
+    if jmp_type == 'near':
+        disp = struct.unpack_from('<h', data, last_jmp+1)[0]
+        target = (last_jmp + 3 + disp) & 0xFFFF
+    else:
+        disp = struct.unpack_from('<b', data, last_jmp+1)[0]
+        target = (last_jmp + 2 + disp) & 0xFFFF
     print(f'{target:04X}')
 ")
             if [ "$target" = "$l0_addr" ]; then

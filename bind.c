@@ -229,6 +229,10 @@ typedef struct {
     bblock_t    blocks[MAX_BLOCKS];
     int         nblocks;
 
+    /* Interference graph: adj[v] is bitset of vregs that interfere with v */
+    uint64_t    igraph[MAX_VREGS][VREG_WORDS];
+    int         degree[MAX_VREGS]; /* number of neighbors */
+
     /* Labels: name -> insn index */
     struct { char name[64]; int insn_idx; } labels[MAX_LABELS];
     int         nlabels;
@@ -1724,23 +1728,115 @@ static void compute_cfg_liveness(func_t *fn) {
     }
 }
 
-/* Check if two vregs have overlapping live ranges */
+/* ================================================================
+ * Interference graph construction
+ * ================================================================ */
+
+static void add_interference(func_t *fn, int a, int b) {
+    if (a == b || a < 0 || b < 0 || a >= fn->nvregs || b >= fn->nvregs)
+        return;
+    if (!vset_test(fn->igraph[a], b)) {
+        vset_set(fn->igraph[a], b);
+        vset_set(fn->igraph[b], a);
+        fn->degree[a]++;
+        fn->degree[b]++;
+    }
+}
+
+static void build_igraph(func_t *fn) {
+    /* Clear */
+    for (int v = 0; v < fn->nvregs; v++) {
+        vset_zero(fn->igraph[v]);
+        fn->degree[v] = 0;
+    }
+
+    /* Walk each block backward, maintaining a live set.
+     * At each def point, add edges between the defined vreg
+     * and everything else currently live. */
+    for (int b = 0; b < fn->nblocks; b++) {
+        bblock_t *bb = &fn->blocks[b];
+        uint64_t live[VREG_WORDS];
+        memcpy(live, bb->live_out, sizeof(live));
+
+        for (int i = bb->end - 1; i >= (int)bb->start; i--) {
+            ir_insn_t *ins = &fn->insns[i];
+
+            /* Def: the defined vreg interferes with everything
+             * currently live (except itself — handled by add_interference).
+             * For MOV, the src does NOT interfere with dst (they can
+             * share a register to eliminate the mov). */
+            int def = -1;
+            if (ins->dst >= 0 && ins->op != IR_STORE &&
+                ins->op != IR_STOREMEM && ins->op != IR_STOREFIELD)
+                def = ins->dst;
+
+            if (def >= 0 && def < fn->nvregs) {
+                for (int w = 0; w < VREG_WORDS; w++) {
+                    uint64_t bits = live[w];
+                    while (bits) {
+                        int bit = __builtin_ctzll(bits);
+                        int v = w * 64 + bit;
+                        /* For MOV: don't add edge between dst and src1
+                         * (enables move coalescing later) */
+                        if (ins->op == IR_MOV && !ins->has_imm &&
+                            v == ins->src1) {
+                            bits &= bits - 1;
+                            continue;
+                        }
+                        add_interference(fn, def, v);
+                        bits &= bits - 1;
+                    }
+                }
+                /* Def kills the vreg from the live set */
+                vset_clear(live, def);
+            }
+
+            /* Uses: add to live set */
+            if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+                vset_set(live, ins->src1);
+            if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
+                vset_set(live, ins->src2);
+            for (int j = 0; j < 8; j++)
+                if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
+                    vset_set(live, ins->extra_args[j]);
+            /* Store dst is a use (address is read) */
+            if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
+                 ins->op == IR_STOREFIELD) &&
+                ins->dst >= 0 && ins->dst < fn->nvregs)
+                vset_set(live, ins->dst);
+        }
+
+        /* After walking to block top, add interference between all
+         * remaining live vregs. This catches parameters and other
+         * vregs that are live_in but not defined in this block. */
+        for (int w1 = 0; w1 < VREG_WORDS; w1++) {
+            uint64_t bits1 = live[w1];
+            while (bits1) {
+                int b1 = w1 * 64 + __builtin_ctzll(bits1);
+                /* Add edges with all other live vregs */
+                for (int w2 = w1; w2 < VREG_WORDS; w2++) {
+                    uint64_t bits2 = (w2 == w1) ?
+                        (live[w2] & ~(1ULL << (b1 & 63))) : live[w2];
+                    /* Only process pairs where b2 > b1 to avoid double-counting */
+                    if (w2 == w1)
+                        bits2 &= ~((1ULL << (b1 & 63)) | ((1ULL << (b1 & 63)) - 1));
+                    while (bits2) {
+                        int b2 = w2 * 64 + __builtin_ctzll(bits2);
+                        add_interference(fn, b1, b2);
+                        bits2 &= bits2 - 1;
+                    }
+                }
+                bits1 &= bits1 - 1;
+            }
+        }
+    }
+}
+
+/* Check if two vregs interfere (graph lookup) */
 static bool vregs_interfere(func_t *fn, int a, int b) {
-    int a_start = fn->vregs[a].def_pos;
-    int a_end   = fn->vregs[a].last_use;
-    int b_start = fn->vregs[b].def_pos;
-    int b_end   = fn->vregs[b].last_use;
-
-    /* Unused vregs don't interfere */
-    if ((a_start < 0 && a_end < 0) || (b_start < 0 && b_end < 0))
+    if (a < 0 || b < 0 || a >= fn->nvregs || b >= fn->nvregs)
         return false;
-
-    /* Parameters have def_pos=-1 (before first insn); treat as valid */
-    if (a_end < 0 || b_end < 0)
-        return false;
-
-    /* Ranges overlap if one starts before the other ends */
-    return !(a_end < b_start || b_end < a_start);
+    return vset_test(fn->igraph[a], b);
 }
 
 /* ================================================================
@@ -3648,10 +3744,11 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nfunctions; i++) {
         func_t *fn = &functions[i];
 
-        /* Phase 1: build CFG, compute liveness, scan constraints */
+        /* Phase 1: build CFG, compute liveness, build interference graph */
         build_cfg(fn);
         compute_cfg_liveness(fn);
         compute_liveness(fn);  /* derives def_pos/last_use from CFG */
+        build_igraph(fn);
         scan_addressing_constraints(fn);
 
         /* Phase 2: try allocation with BP available */
