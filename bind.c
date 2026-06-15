@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
 #include <ctype.h>
 #include <stdarg.h>
 
@@ -1884,199 +1885,218 @@ static void scan_addressing_constraints(func_t *fn) {
     }
 }
 
+/* Get the register pool for a vreg based on its constraints */
+static int get_vreg_pool(func_t *fn, int v, bool bp_available, int *pool) {
+    vreg_info_t *vr = &fn->vregs[v];
+    int n = 0;
+    if (vr->is_seg) {
+        pool[n++] = PREG_ES;
+    } else if (vr->needs_cl) {
+        pool[n++] = PREG_CL;
+    } else if (vr->is_byte) {
+        pool[n++] = PREG_AL; pool[n++] = PREG_AH;
+        pool[n++] = PREG_BL; pool[n++] = PREG_BH;
+        pool[n++] = PREG_CL; pool[n++] = PREG_CH;
+        pool[n++] = PREG_DL; pool[n++] = PREG_DH;
+    } else if (vr->needs_base) {
+        pool[n++] = PREG_BX;
+        if (bp_available) pool[n++] = PREG_BP;
+    } else if (vr->needs_index) {
+        pool[n++] = PREG_SI; pool[n++] = PREG_DI;
+    } else if (vr->needs_addressable) {
+        pool[n++] = PREG_BX;
+        if (bp_available) pool[n++] = PREG_BP;
+        pool[n++] = PREG_SI; pool[n++] = PREG_DI;
+    } else {
+        pool[n++] = PREG_AX; pool[n++] = PREG_BX;
+        pool[n++] = PREG_CX; pool[n++] = PREG_DX;
+        pool[n++] = PREG_SI; pool[n++] = PREG_DI;
+        if (bp_available) pool[n++] = PREG_BP;
+    }
+    return n;
+}
+
+/* Chaitin-Briggs register allocation using the interference graph.
+ *
+ * 1. Pre-color: assign vregs with preferences (params, propagated)
+ * 2. Simplify: push vregs with degree < pool_size onto stack
+ * 3. Potential spill: when stuck, push lowest spill_cost vreg
+ * 4. Select: pop stack, assign colors respecting interference
+ */
 static void allocate_registers(func_t *fn, bool bp_available) {
-    /* Build list of allocatable word registers */
-    int word_pool[8];
-    int nword = 0;
-    word_pool[nword++] = PREG_AX;
-    word_pool[nword++] = PREG_BX;
-    word_pool[nword++] = PREG_CX;
-    word_pool[nword++] = PREG_DX;
-    word_pool[nword++] = PREG_SI;
-    word_pool[nword++] = PREG_DI;
-    if (bp_available) word_pool[nword++] = PREG_BP;
+    int nv = fn->nvregs;
 
-    int byte_pool[] = { PREG_AL, PREG_AH, PREG_BL, PREG_BH,
-                        PREG_CL, PREG_CH, PREG_DL, PREG_DH };
-    int nbyte = 8;
+    /* Compute effective degree per vreg (only counting active neighbors
+     * with the same register class — byte vregs don't compete with
+     * word vregs for the same pool slots, but they DO alias) */
 
-    /* First pass: assign pre-colored (preferred) vregs */
-    for (int i = 0; i < fn->nvregs; i++) {
-        if (fn->vregs[i].prefer != PREG_NONE) {
-            int preg = fn->vregs[i].prefer;
-            /* Don't honor preference if it violates addressing constraints */
-            if (fn->vregs[i].needs_base &&
-                preg != PREG_BX && preg != PREG_BP) {
-                continue;
-            }
-            if (fn->vregs[i].needs_index &&
-                preg != PREG_SI && preg != PREG_DI) {
-                continue;
-            }
-            if (fn->vregs[i].needs_addressable &&
-                (preg == PREG_AX || preg == PREG_CX || preg == PREG_DX)) {
-                continue;
-            }
-            if (fn->vregs[i].needs_cl && preg != PREG_CL) {
-                continue;
-            }
-            /* Check for conflicts with already-assigned vregs */
-            bool conflict = false;
-            for (int j = 0; j < i; j++) {
-                if (fn->vregs[j].assigned == PREG_NONE) continue;
-                if (!vregs_interfere(fn, i, j)) continue;
-                if (fn->vregs[j].assigned == preg ||
-                    pregs_alias(fn->vregs[j].assigned, preg)) {
-                    conflict = true;
-                    break;
+    /* Phase 1: Pre-color — assign preferred registers where possible.
+     * A byte preference (AH, DL, etc.) on a word vreg is valid —
+     * the vreg adapts to the preference's register class. But
+     * addressing constraints must still be respected. */
+    for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].prefer == PREG_NONE) continue;
+        int preg = fn->vregs[i].prefer;
+        /* Segment preference must match segment vreg */
+        if (fn->vregs[i].is_seg && !(preg >= PREG_ES && preg <= PREG_DS))
+            continue;
+        if (!fn->vregs[i].is_seg && preg >= PREG_ES && preg <= PREG_DS)
+            continue;
+        /* Addressing constraints override preferences */
+        if (fn->vregs[i].needs_base && preg != PREG_BX && preg != PREG_BP)
+            continue;
+        if (fn->vregs[i].needs_index && preg != PREG_SI && preg != PREG_DI)
+            continue;
+        if (fn->vregs[i].needs_addressable &&
+            preg != PREG_BX && preg != PREG_BP &&
+            preg != PREG_SI && preg != PREG_DI)
+            continue;
+        if (fn->vregs[i].needs_cl && preg != PREG_CL)
+            continue;
+        /* Check for conflicts with already-assigned vregs */
+        bool conflict = false;
+        for (int j = 0; j < nv; j++) {
+            if (j == i || fn->vregs[j].assigned == PREG_NONE) continue;
+            if (!vregs_interfere(fn, i, j)) continue;
+            if (fn->vregs[j].assigned == preg || pregs_alias(fn->vregs[j].assigned, preg))
+                { conflict = true; break; }
+        }
+        if (!conflict) fn->vregs[i].assigned = preg;
+    }
+
+    /* Phase 2: Simplify/Select (Chaitin-Briggs)
+     *
+     * Build a work stack by repeatedly removing nodes that can be
+     * trivially colored (degree < pool_size). When stuck, push the
+     * node with lowest spill cost as a potential spill. Then pop
+     * and assign colors. */
+
+    int stack[MAX_VREGS];
+    bool potential_spill[MAX_VREGS];
+    bool removed[MAX_VREGS];
+    int sp = 0;
+
+    memset(potential_spill, 0, sizeof(potential_spill));
+    memset(removed, 0, sizeof(removed));
+
+    /* Mark already-handled vregs */
+    for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].assigned != PREG_NONE) removed[i] = true;
+        if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0)
+            removed[i] = true;
+    }
+
+    /* Simplify loop */
+    int remaining = 0;
+    for (int i = 0; i < nv; i++) if (!removed[i]) remaining++;
+
+    while (remaining > 0) {
+        bool progress = false;
+
+        /* Find a node with effective degree < pool_size */
+        for (int i = 0; i < nv; i++) {
+            if (removed[i]) continue;
+            int pool[16]; int psz = get_vreg_pool(fn, i, bp_available, pool);
+
+            /* Count active (non-removed) interfering neighbors */
+            int active_deg = 0;
+            for (int w = 0; w < VREG_WORDS; w++) {
+                uint64_t bits = fn->igraph[i][w];
+                while (bits) {
+                    int nb = w * 64 + __builtin_ctzll(bits);
+                    if (nb < nv && !removed[nb]) active_deg++;
+                    bits &= bits - 1;
                 }
             }
-            if (conflict) continue;
-            fn->vregs[i].assigned = preg;
+
+            if (active_deg < psz) {
+                stack[sp++] = i;
+                removed[i] = true;
+                remaining--;
+                progress = true;
+            }
+        }
+
+        if (!progress) {
+            /* Stuck — pick lowest spill cost node as potential spill */
+            int best = -1;
+            int best_cost = INT_MAX;
+            for (int i = 0; i < nv; i++) {
+                if (removed[i]) continue;
+                int cost = fn->vregs[i].use_count;
+                if (fn->vregs[i].in_loop) cost *= 10;
+                if (fn->vregs[i].is_const) cost /= 2;
+                if (cost < best_cost) { best_cost = cost; best = i; }
+            }
+            if (best >= 0) {
+                stack[sp++] = best;
+                potential_spill[best] = true;
+                removed[best] = true;
+                remaining--;
+            }
         }
     }
 
-    /* Pre-spill: const vregs with few accesses outside loops don't
-     * justify occupying a register for their entire live range.
-     * Only applies on the second allocation pass (bp_available=false),
-     * when we already know there's register pressure. */
-    if (!bp_available)
-    for (int i = 0; i < fn->nvregs; i++) {
-        if (fn->vregs[i].assigned != PREG_NONE) continue;
-        if (!fn->vregs[i].is_const) continue;
-        if (fn->vregs[i].in_loop) continue;
-        if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0) continue;
-        /* Don't pre-spill vregs with register constraints */
-        if (fn->vregs[i].prefer != PREG_NONE) continue;
-        if (fn->vregs[i].needs_cl) continue;
-        if (fn->vregs[i].needs_addressable) continue;
-        if (fn->vregs[i].is_seg) continue;
-        if (fn->vregs[i].use_count <= 2) {
-            fn->vregs[i].spill_slot = fn->nspill_slots++;
-        }
-    }
+    /* Phase 3: Select — pop stack and assign colors */
+    while (sp > 0) {
+        int v = stack[--sp];
+        int pool[16]; int psz = get_vreg_pool(fn, v, bp_available, pool);
 
-    /* Second pass: assign remaining vregs */
-    for (int i = 0; i < fn->nvregs; i++) {
-        if (fn->vregs[i].assigned != PREG_NONE) continue;
-        if (fn->vregs[i].spill_slot >= 0) continue;  /* already pre-spilled */
-        if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0) continue;
-
-        int *pool;
-        int poolsz;
-        if (fn->vregs[i].is_seg) {
-            /* Segment registers: only ES is freely allocatable.
-             * DS and SS are critical (data segment, stack segment). */
-            static int seg_pool[] = { PREG_ES };
-            pool = seg_pool;
-            poolsz = 1;
-        } else if (fn->vregs[i].needs_cl) {
-            /* Shift/rotate count: must be CL */
-            static int cl_pool[] = { PREG_CL };
-            pool = cl_pool;
-            poolsz = 1;
-        } else if (fn->vregs[i].is_byte) {
-            pool = byte_pool;
-            poolsz = nbyte;
-        } else if (fn->vregs[i].needs_base) {
-            /* Base register: must be BX or BP */
-            static int base_pool[2];
-            int nbase = 0;
-            base_pool[nbase++] = PREG_BX;
-            if (bp_available) base_pool[nbase++] = PREG_BP;
-            pool = base_pool;
-            poolsz = nbase;
-        } else if (fn->vregs[i].needs_index) {
-            /* Index register: must be SI or DI */
-            static int idx_pool[] = { PREG_SI, PREG_DI };
-            pool = idx_pool;
-            poolsz = 2;
-        } else if (fn->vregs[i].needs_addressable) {
-            /* General addressable (single-reg memory operand) */
-            static int addr_pool[4];
-            int naddr = 0;
-            addr_pool[naddr++] = PREG_BX;
-            if (bp_available) addr_pool[naddr++] = PREG_BP;
-            addr_pool[naddr++] = PREG_SI;
-            addr_pool[naddr++] = PREG_DI;
-            pool = addr_pool;
-            poolsz = naddr;
-        } else {
-            pool = word_pool;
-            poolsz = nword;
-        }
-
-        /* Try each register in the pool */
-        bool assigned = false;
-        for (int r = 0; r < poolsz; r++) {
-            int preg = pool[r];
-            bool conflict = false;
-
-            /* Check against all already-assigned vregs */
-            for (int j = 0; j < fn->nvregs; j++) {
-                if (j == i) continue;
-                if (fn->vregs[j].assigned == PREG_NONE) continue;
-                if (!vregs_interfere(fn, i, j)) continue;
-
-                /* Direct conflict */
-                if (fn->vregs[j].assigned == preg) {
-                    conflict = true;
-                    break;
-                }
-                /* Alias conflict */
-                if (pregs_alias(fn->vregs[j].assigned, preg)) {
-                    conflict = true;
-                    break;
+        /* Try to assign a color that doesn't conflict */
+        bool colored = false;
+        /* Prefer the preference register if available */
+        if (fn->vregs[v].prefer != PREG_NONE) {
+            int preg = fn->vregs[v].prefer;
+            bool ok = true;
+            for (int w = 0; w < VREG_WORDS && ok; w++) {
+                uint64_t bits = fn->igraph[v][w];
+                while (bits) {
+                    int nb = w * 64 + __builtin_ctzll(bits);
+                    if (nb < nv && fn->vregs[nb].assigned != PREG_NONE &&
+                        (fn->vregs[nb].assigned == preg ||
+                         pregs_alias(fn->vregs[nb].assigned, preg)))
+                        ok = false;
+                    bits &= bits - 1;
                 }
             }
-
-            if (!conflict) {
-                fn->vregs[i].assigned = preg;
-                assigned = true;
-                break;
-            }
-        }
-
-        if (!assigned) {
-            /* Before spilling this vreg, check if we can evict a
-             * const vreg from a register instead.  Const vregs are
-             * cheaper to spill because they don't need write-back. */
-            if (!fn->vregs[i].is_const) {
-                for (int r = 0; r < poolsz && !assigned; r++) {
-                    int preg = pool[r];
-                    /* Find a const vreg in this register that conflicts */
-                    for (int j = 0; j < fn->nvregs; j++) {
-                        if (j == i) continue;
-                        if (fn->vregs[j].assigned != preg) continue;
-                        if (!fn->vregs[j].is_const) continue;
-                        if (!vregs_interfere(fn, i, j)) continue;
-                        /* Check no OTHER non-const conflict blocks us */
-                        bool other_conflict = false;
-                        for (int k = 0; k < fn->nvregs; k++) {
-                            if (k == i || k == j) continue;
-                            if (fn->vregs[k].assigned == PREG_NONE) continue;
-                            if (!vregs_interfere(fn, i, k)) continue;
-                            if (fn->vregs[k].assigned == preg ||
-                                pregs_alias(fn->vregs[k].assigned, preg)) {
-                                other_conflict = true;
-                                break;
-                            }
-                        }
-                        if (!other_conflict) {
-                            /* Evict the const vreg */
-                            fn->vregs[j].assigned = PREG_NONE;
-                            fn->vregs[j].spill_slot = fn->nspill_slots++;
-                            fn->vregs[i].assigned = preg;
-                            assigned = true;
-                            break;
-                        }
+            if (ok) {
+                /* Verify it's in the pool */
+                for (int r = 0; r < psz; r++) {
+                    if (pool[r] == preg) {
+                        fn->vregs[v].assigned = preg;
+                        colored = true;
+                        break;
                     }
                 }
             }
-            if (!assigned) {
-                /* Spill this vreg */
-                fn->vregs[i].spill_slot = fn->nspill_slots++;
+        }
+
+        if (!colored) {
+            for (int r = 0; r < psz; r++) {
+                int preg = pool[r];
+                bool conflict = false;
+                for (int w = 0; w < VREG_WORDS && !conflict; w++) {
+                    uint64_t bits = fn->igraph[v][w];
+                    while (bits) {
+                        int nb = w * 64 + __builtin_ctzll(bits);
+                        if (nb < nv && fn->vregs[nb].assigned != PREG_NONE &&
+                            (fn->vregs[nb].assigned == preg ||
+                             pregs_alias(fn->vregs[nb].assigned, preg)))
+                            { conflict = true; break; }
+                        bits &= bits - 1;
+                    }
+                }
+                if (!conflict) {
+                    fn->vregs[v].assigned = preg;
+                    colored = true;
+                    break;
+                }
             }
+        }
+
+        if (!colored) {
+            /* Actual spill */
+            fn->vregs[v].spill_slot = fn->nspill_slots++;
         }
     }
 }
