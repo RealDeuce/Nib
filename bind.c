@@ -1426,7 +1426,7 @@ static void parse_nir(const char *path) {
  * Liveness analysis
  * ================================================================ */
 
-/* Simple linear liveness — no CFG, just scan backward */
+/* Derive vreg liveness intervals from CFG dataflow results */
 static void compute_liveness(func_t *fn) {
     /* Derive vreg liveness info from CFG dataflow results.
      * The CFG liveness (live_in/live_out per block) handles loops,
@@ -1554,7 +1554,8 @@ static void build_cfg(func_t *fn) {
             is_leader[i] = true;
         }
         if (ins->op == IR_JMP || ins->op == IR_JZ || ins->op == IR_CJMP ||
-            ins->op == IR_RET || ins->op == IR_LOOP) {
+            ins->op == IR_RET || ins->op == IR_TAILCALL ||
+            ins->op == IR_GOTO_FN || ins->op == IR_LOOP) {
             /* Instruction after a branch starts a new block */
             if (i + 1 < fn->ninsns)
                 is_leader[i + 1] = true;
