@@ -2542,11 +2542,25 @@ static const char *vreg_asm(func_t *fn, int v) {
     }
     if (fn->vregs[v].spill_slot >= 0) {
         int off = -(fn->vregs[v].spill_slot + 1) * 2;
-        const char *sz = fn->vregs[v].is_byte ? "byte" : "word";
-        snprintf(b, 32, "%s [BP%+d]", sz, off);
+        snprintf(b, 32, "[BP%+d]", off);
         return b;
     }
     snprintf(b, 32, "%%_%d", v); /* shouldn't happen */
+    return b;
+}
+
+/* Like vreg_asm but with size prefix for spilled memory operands.
+ * Use when the instruction has no register operand to disambiguate size
+ * (e.g., shl [BP-N], imm or cmp [BP-N], imm). */
+static const char *vreg_asm_sized(func_t *fn, int v) {
+    if (v < 0 || v >= fn->nvregs) return vreg_asm(fn, v);
+    if (fn->vregs[v].spill_slot < 0) return vreg_asm(fn, v);
+    static char buf[4][40];
+    static int idx = 0;
+    char *b = buf[idx++ & 3];
+    int off = -(fn->vregs[v].spill_slot + 1) * 2;
+    const char *sz = fn->vregs[v].is_byte ? "byte" : "word";
+    snprintf(b, 40, "%s [BP%+d]", sz, off);
     return b;
 }
 
@@ -2828,11 +2842,11 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     } else {
         emit_mov(fn, ins->dst, ins->src1);
         if (ins->has_imm) {
-            fprintf(out_asm, "    %s %s, %d\n", op, vreg_asm(fn, ins->dst), ins->imm);
+            fprintf(out_asm, "    %s %s, %d\n", op, vreg_asm_sized(fn, ins->dst), ins->imm);
         } else if (is_shift_op(op)) {
             /* Shift: count should be in CL (move insertion pass handles routing).
              * Fallback: if src2 is already CL, emit directly. */
-            fprintf(out_asm, "    %s %s, CL\n", op, vreg_asm(fn, ins->dst));
+            fprintf(out_asm, "    %s %s, CL\n", op, vreg_asm_sized(fn, ins->dst));
         } else if (is_spilled(fn, ins->dst) && is_spilled(fn, ins->src2)) {
             bool alu_byte = fn->vregs[ins->dst].is_byte;
             const char *acc = alu_byte ? "AL" : "AX";
@@ -3141,7 +3155,7 @@ static void emit_function(func_t *fn) {
                 fprintf(out_asm, "    mov %s, AL\n", vreg_asm(fn, ins->dst));
                 fprintf(out_asm, "    pop AX\n");
             } else {
-                fprintf(out_asm, "    %s %s\n", mnem, vreg_asm(fn, ins->dst));
+                fprintf(out_asm, "    %s %s\n", mnem, vreg_asm_sized(fn, ins->dst));
             }
             break;
         }
