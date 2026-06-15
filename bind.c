@@ -1885,33 +1885,51 @@ static void emit_function(func_t *fn) {
                         int src_preg = fn->vregs[ins->src1].assigned;
                         int parent = (src_preg >= PREG_AL && src_preg <= PREG_BH)
                                      ? preg_alias_parent[src_preg] : -1;
-                        if (parent == PREG_AX) {
-                            /* src is AL or AH — zero-extend in place */
-                            if (src_preg == PREG_AH) {
-                                fprintf(out_asm, "    mov AL, AH\n");
-                                fprintf(out_asm, "    xor AH, AH\n");
-                            } else {
-                                fprintf(out_asm, "    xor AH, AH\n");
+                        /* Use a word register for the zero-extend + multiply.
+                         * Pick the parent of the source byte reg.
+                         * Save/restore the other byte half if it's live. */
+                        {
+                            int wd_preg = (parent >= 0) ? parent : PREG_AX;
+                            const char *wd = preg_name[wd_preg];
+                            const char *lo = preg_name[preg_alias_lo[wd_preg]];
+                            const char *hi = preg_name[preg_alias_hi[wd_preg]];
+                            int other_half = (src_preg == preg_alias_lo[wd_preg])
+                                             ? preg_alias_hi[wd_preg]
+                                             : preg_alias_lo[wd_preg];
+                            /* Check if the other half is live */
+                            bool save_other = false;
+                            for (int v2 = 0; v2 < fn->nvregs; v2++) {
+                                if (fn->vregs[v2].assigned == other_half &&
+                                    fn->vregs[v2].def_pos <= (int)i &&
+                                    fn->vregs[v2].last_use > (int)i) {
+                                    save_other = true;
+                                    break;
+                                }
                             }
-                            fprintf(out_asm, "    imul AX, %d\n", ins->imm);
-                        } else {
-                            /* src is BL/BH/CL/CH/DL/DH — use parent word */
-                            const char *lo = preg_name[preg_alias_lo[parent]];
-                            const char *hi = preg_name[preg_alias_hi[parent]];
-                            const char *wd = preg_name[parent];
-                            if (src_preg == preg_alias_hi[parent]) {
+                            if (save_other)
+                                fprintf(out_asm, "    push %s\n", wd);
+                            if (src_preg == preg_alias_hi[wd_preg]) {
                                 fprintf(out_asm, "    mov %s, %s\n", lo, s);
                                 fprintf(out_asm, "    xor %s, %s\n", hi, hi);
                             } else {
                                 fprintf(out_asm, "    xor %s, %s\n", hi, hi);
                             }
                             fprintf(out_asm, "    imul %s, %d\n", wd, ins->imm);
+                            if (save_other) {
+                                /* Result is in word reg. Move to dst first,
+                                 * then restore. */
+                                emit_mov(fn, ins->dst, ins->src1);
+                                fprintf(out_asm, "    pop %s\n", wd);
+                                /* Skip the emit_mov after the if block */
+                                goto imul_done;
+                            }
                         }
                     } else {
                         fprintf(out_asm, "    imul %s, %d\n",
                                 vreg_asm(fn, ins->src1), ins->imm);
                     }
                     emit_mov(fn, ins->dst, ins->src1);
+                    imul_done:;
                 } else {
                     fprintf(out_asm, "    %s %s\n", op, vreg_asm(fn, ins->src2));
                 }
