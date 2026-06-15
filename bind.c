@@ -1471,6 +1471,8 @@ static void allocate_registers(func_t *fn, bool bp_available) {
     for (int i = 0; i < fn->nvregs; i++) {
         if (fn->vregs[i].prefer != PREG_NONE) {
             int preg = fn->vregs[i].prefer;
+            /* SP is never allocatable — it's the stack pointer */
+            if (preg == PREG_SP) continue;
             /* Don't honor preference if it violates addressing constraints */
             if (fn->vregs[i].needs_base &&
                 preg != PREG_BX && preg != PREG_BP) {
