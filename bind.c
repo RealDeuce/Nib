@@ -503,13 +503,19 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 }
                 if (e) p = e + 1;
             }
-            /* Check for ", in REG" */
+            /* Check for "pin=REG" (new) or "in REG" (legacy) */
+            char *pin_ptr = strstr(p, "pin=");
             char *in_ptr = strstr(p, " in ");
-            if (in_ptr && pidx < 16) {
+            if (pin_ptr && pidx < 16) {
+                char reg[16];
+                read_word(pin_ptr + 4, reg, sizeof(reg));
+                fn->param_pins[pidx].preg = parse_preg(reg);
+                if (v < MAX_VREGS && fn->param_pins[pidx].preg != PREG_NONE)
+                    fn->vregs[v].prefer = fn->param_pins[pidx].preg;
+            } else if (in_ptr && pidx < 16) {
                 char reg[16];
                 read_word(in_ptr + 4, reg, sizeof(reg));
                 fn->param_pins[pidx].preg = parse_preg(reg);
-                /* Set as hard preference on the vreg */
                 if (v < MAX_VREGS && fn->param_pins[pidx].preg != PREG_NONE)
                     fn->vregs[v].prefer = fn->param_pins[pidx].preg;
             }
@@ -527,9 +533,14 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             p = skip_ws(p);
             p = read_word(p, fn->return_type, sizeof(fn->return_type));
             fn->has_return = true;
-            /* Check for ", in REG" */
+            /* Check for "pin=REG" (new) or "in REG" (legacy) */
+            char *pin_ptr = strstr(p, "pin=");
             char *in_ptr = strstr(p, "in ");
-            if (in_ptr) {
+            if (pin_ptr) {
+                char reg[16];
+                read_word(pin_ptr + 4, reg, sizeof(reg));
+                fn->ret_pin = parse_preg(reg);
+            } else if (in_ptr) {
                 char reg[16];
                 read_word(in_ptr + 3, reg, sizeof(reg));
                 fn->ret_pin = parse_preg(reg);
@@ -1311,7 +1322,16 @@ static void parse_nir(const char *path) {
                     ext->int_vector = (int)strtol(word + 10, NULL, 0);
                     p = skip_ws(p); if (*p == ')') p++;
                 }
+                else if (strncmp(word, "addr_seg=", 9) == 0) {
+                    ext->has_address = true;
+                    ext->addr_seg = (int)strtol(word + 9, NULL, 0);
+                }
+                else if (strncmp(word, "addr_off=", 9) == 0) {
+                    ext->has_address = true;
+                    ext->addr_off = (int)strtol(word + 9, NULL, 0);
+                }
                 else if (strncmp(word, "addr(", 5) == 0) {
+                    /* Legacy format: addr(seg:off) */
                     ext->has_address = true;
                     char *colon = strchr(word + 5, ':');
                     if (colon) {
@@ -1329,9 +1349,14 @@ static void parse_nir(const char *path) {
                 while (*ep == ' ' || *ep == '\t') ep++;
                 if (strncmp(ep, ".endextern", 10) == 0) break;
                 if (strncmp(ep, ".eparam", 7) == 0) {
-                    /* Parse "in REG" if present */
+                    /* Parse "pin=REG" (new) or "in REG" (legacy) */
+                    char *pin_ptr = strstr(ep, "pin=");
                     char *in_ptr = strstr(ep, " in ");
-                    if (in_ptr && pi < 16) {
+                    if (pin_ptr && pi < 16) {
+                        char reg[16];
+                        read_word(pin_ptr + 4, reg, sizeof(reg));
+                        ext->param_pins[pi].preg = parse_preg(reg);
+                    } else if (in_ptr && pi < 16) {
                         char reg[16];
                         read_word(in_ptr + 4, reg, sizeof(reg));
                         ext->param_pins[pi].preg = parse_preg(reg);

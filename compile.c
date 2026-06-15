@@ -2053,19 +2053,19 @@ static void compile_fn(decl_t *d) {
             /* Offset vreg (sym->vreg) */
             fprintf(C.nir, ".param %%%d, u16, \"%s_off\"", sym->vreg, p->name);
             if (p->has_pin)
-                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
             fprintf(C.nir, "\n");
             /* Segment vreg */
             sym->vreg_seg = C.next_vreg++;
             fprintf(C.nir, ".param %%%d, seg, \"%s_seg\"", sym->vreg_seg, p->name);
             if (p->has_seg_pin)
-                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
+                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
             fprintf(C.nir, "\n");
             /* .nif: emit as far with pin */
             if (nif) {
                 fprintf(C.nif, ".param %%%d, far, \"%s\"", sym->vreg, p->name);
                 if (p->has_pin && p->has_seg_pin)
-                    fprintf(C.nif, ", in %s:%s",
+                    fprintf(C.nif, ", pin=%s:%s",
                             reg_name_str(p->pinned_seg, REGCLASS_SEG),
                             reg_name_str(p->pinned_reg, p->pin_class));
                 fprintf(C.nif, "\n");
@@ -2082,7 +2082,7 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, ir_type, p->name);
         if (p->is_value) fprintf(C.nir, ", value");
         if (p->has_pin)
-            fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+            fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
         if (is_ref && !p->is_value)
             fprintf(C.nir, " ; ref %s", type_str(p->type));
         fprintf(C.nir, "\n");
@@ -2092,7 +2092,7 @@ static void compile_fn(decl_t *d) {
             fprintf(C.nif, ".param %%%d, %s, \"%s\"", sym->vreg, type_str(p->type), p->name);
             if (p->is_value) fprintf(C.nif, ", value");
             if (p->has_pin)
-                fprintf(C.nif, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(C.nif, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
             fprintf(C.nif, "\n");
         }
     }
@@ -2100,14 +2100,14 @@ static void compile_fn(decl_t *d) {
     if (d->u.fn.return_type) {
         fprintf(C.nir, ".returns %s", type_str(d->u.fn.return_type));
         if (d->u.fn.mods.has_ret_pin)
-            fprintf(C.nir, ", in %s",
+            fprintf(C.nir, ", pin=%s",
                     reg_name_str(d->u.fn.mods.ret_pinned_reg,
                                  d->u.fn.mods.ret_pin_class));
         fprintf(C.nir, "\n");
         if (nif) {
             fprintf(C.nif, ".returns %s", type_str(d->u.fn.return_type));
             if (d->u.fn.mods.has_ret_pin)
-                fprintf(C.nif, ", in %s",
+                fprintf(C.nif, ", pin=%s",
                         reg_name_str(d->u.fn.mods.ret_pinned_reg,
                                      d->u.fn.mods.ret_pin_class));
             fprintf(C.nif, "\n");
@@ -2311,7 +2311,7 @@ static void compile_extern_fn(decl_t *d) {
     if (d->u.extern_fn.mods.is_interrupt)
         fprintf(C.nir, ", interrupt(0x%02X)", d->u.extern_fn.mods.interrupt_vector);
     if (d->u.extern_fn.has_address)
-        fprintf(C.nir, ", addr(0x%04X:0x%04X)",
+        fprintf(C.nir, ", addr_seg=0x%04X, addr_off=0x%04X",
                 d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
     else
         fprintf(C.nir, " ; WARNING: no address — unbindable");
@@ -2321,16 +2321,16 @@ static void compile_extern_fn(decl_t *d) {
             /* Far param splits into offset + segment */
             fprintf(C.nir, ".eparam u16, \"%s_off\"", p->name);
             if (p->has_pin)
-                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
             fprintf(C.nir, "\n");
             fprintf(C.nir, ".eparam seg, \"%s_seg\"", p->name);
             if (p->has_seg_pin)
-                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
+                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
             fprintf(C.nir, "\n");
         } else {
             fprintf(C.nir, ".eparam %s, \"%s\"", type_str(p->type), p->name);
             if (p->has_pin)
-                fprintf(C.nir, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
             fprintf(C.nir, "\n");
         }
     }
@@ -2342,7 +2342,7 @@ static void compile_extern_fn(decl_t *d) {
     if (d->u.extern_fn.mods.is_interrupt)
         fprintf(C.nif, ", interrupt(0x%02X)", d->u.extern_fn.mods.interrupt_vector);
     if (d->u.extern_fn.has_address)
-        fprintf(C.nif, ", addr(0x%04X:0x%04X)",
+        fprintf(C.nif, ", addr_seg=0x%04X, addr_off=0x%04X",
                 d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
     fprintf(C.nif, "\n");
 
@@ -2351,7 +2351,7 @@ static void compile_extern_fn(decl_t *d) {
         for (param_t *p = d->u.extern_fn.params; p; p = p->next, pn++) {
             fprintf(C.nif, ".param %%%d, %s, \"%s\"", pn, type_str(p->type), p->name);
             if (p->has_pin)
-                fprintf(C.nif, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(C.nif, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
             if (p->type && p->type->kind == TYPE_FAR && p->has_seg_pin)
                 fprintf(C.nif, ":%s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
             fprintf(C.nif, "\n");
@@ -2361,7 +2361,7 @@ static void compile_extern_fn(decl_t *d) {
     if (d->u.extern_fn.return_type) {
         fprintf(C.nif, ".returns %s", type_str(d->u.extern_fn.return_type));
         if (d->u.extern_fn.has_ret_pin)
-            fprintf(C.nif, ", in %s",
+            fprintf(C.nif, ", pin=%s",
                     reg_name_str(d->u.extern_fn.ret_pinned_reg,
                                  d->u.extern_fn.ret_pin_class));
         fprintf(C.nif, "\n");
