@@ -210,6 +210,21 @@ if [ -f /tmp/t_shift_overlap.asm ]; then
     fi
 fi
 
+# Unused call return must not clobber live byte vreg via aliasing
+if [ -f /tmp/t_call_clobber.asm ]; then
+    # If the unused return got AX, it would clobber AL (the parameter)
+    # The caller should NOT have mov AX as a result of the call
+    if grep -q 'caller:' /tmp/t_call_clobber.asm; then
+        if grep -A5 'caller:' /tmp/t_call_clobber.asm | grep -q 'push AL\|push AX'; then
+            pass "unused-call-ret: AL saved across call"
+        elif ! grep -q '%1=AX' /tmp/t_call_clobber.asm 2>/dev/null; then
+            pass "unused-call-ret: return vreg avoids AX"
+        else
+            fail "unused-call-ret" "unused call return clobbers live AL via AX alias"
+        fi
+    fi
+fi
+
 # Scalar globals: must use memory-indirect loads, not address loads
 if [ -f /tmp/t_globals_rw.asm ]; then
     if grep -q '\[counter\]' /tmp/t_globals_rw.asm && grep -q '\[flag\]' /tmp/t_globals_rw.asm; then

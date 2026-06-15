@@ -1,0 +1,14 @@
+// Test: unused call return value must not clobber a live byte vreg.
+// The call's return vreg is assigned AX even though it's never read,
+// and AX aliases AL where ch lives.
+
+fn side_effect() {
+    nop();
+}
+
+fn caller(ch: u8) -> u8 {
+    side_effect();
+    // ch (in AL) must survive the call — the unused return
+    // value in AX must not clobber AL
+    return ch;
+}

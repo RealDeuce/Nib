@@ -110,6 +110,7 @@ typedef enum {
     IR_LOOP,        /* loop label */
     IR_BREAK,       /* break */
     IR_CONTINUE,    /* continue */
+    IR_FAR_LIT,     /* far.lit %d, seg, off — store far literal on stack */
     IR_ASM,         /* asm block (opaque) */
     IR_PREFER,      /* .prefer %v, REG (directive, not real insn) */
     IR_LABEL,       /* label: */
@@ -837,19 +838,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->dst = parse_vreg(p, &p);
             skip_comma(&p);
             if (strcmp(opname, "far.lit") == 0) {
-                /* far.lit %d, seg, off — store 4 bytes on stack */
-                ins->op = IR_ASM;
+                /* far.lit %d, seg, off — store far literal on stack */
+                ins->op = IR_FAR_LIT;
                 p = skip_ws(p);
                 int seg_val = (int)strtol(p, (char **)&p, 0);
                 skip_comma(&p);
                 int off_val = (int)strtol(p, (char **)&p, 0);
-                snprintf(ins->asm_body, sizeof(ins->asm_body),
-                    "    sub sp, 4\n"
-                    "    mov word [sp], 0x%04X\n"
-                    "    mov word [sp+2], 0x%04X\n"
-                    "    mov %%_%d, sp",
-                    off_val, seg_val, ins->dst);
-                ins->asm_ann[0] = '\0';
+                ins->imm = seg_val;
+                ins->extra_args[0] = off_val;
+                ins->has_imm = true;
             } else {
                 /* far.off / far.seg — load word from [ptr] or [ptr+2] */
                 ins->op = IR_ALU;
@@ -1372,6 +1369,14 @@ static void compute_liveness(func_t *fn) {
         int v = fn->param_vregs[i];
         if (v >= 0) fn->vregs[v].def_pos = -1;
     }
+
+    /* Vregs that are defined but never read still occupy a register
+     * at the def point (e.g. unused call return values clobber AX).
+     * Give them a minimal range so they participate in interference. */
+    for (int i = 0; i < fn->nvregs; i++) {
+        if (fn->vregs[i].def_pos >= 0 && fn->vregs[i].last_use < 0)
+            fn->vregs[i].last_use = fn->vregs[i].def_pos;
+    }
 }
 
 /* Check if two vregs have overlapping live ranges */
@@ -1489,8 +1494,10 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         int *pool;
         int poolsz;
         if (fn->vregs[i].is_seg) {
-            /* Segment regs handled separately */
-            continue;
+            /* Segment registers: ES, DS, SS (CS not allocatable) */
+            static int seg_pool[] = { PREG_ES, PREG_DS, PREG_SS };
+            pool = seg_pool;
+            poolsz = 3;
         } else if (fn->vregs[i].needs_cl) {
             /* Shift/rotate count: must be CL */
             static int cl_pool[] = { PREG_CL };
@@ -2330,6 +2337,18 @@ static void emit_function(func_t *fn) {
                 fprintf(out_asm, "    ; asm %s\n", ins->asm_ann);
             fprintf(out_asm, "%s\n", ins->asm_body);
             break;
+
+        case IR_FAR_LIT: {
+            /* Store far literal (seg:off) on stack, point dst at it */
+            int seg_val = ins->imm;
+            int off_val = ins->extra_args[0];
+            const char *d = vreg_asm(fn, ins->dst);
+            fprintf(out_asm, "    sub sp, 4\n");
+            fprintf(out_asm, "    mov word [sp], 0x%04X\n", off_val);
+            fprintf(out_asm, "    mov word [sp+2], 0x%04X\n", seg_val);
+            fprintf(out_asm, "    mov %s, sp\n", d);
+            break;
+        }
 
         case IR_BOUND:
             fprintf(out_asm, "    ; bound check\n");
