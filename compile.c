@@ -746,6 +746,23 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             result_type = check_arith(l.type, r.type, op, e->line);
         }
 
+        /* Byte multiply: IMUL only operates on word registers, so
+         * zero-extend operands to word, do word multiply, truncate. */
+        if ((op == NIB_MUL || op == NIB_SMUL) &&
+            l.type && l.type->kind == TYPE_U8) {
+            int wd = alloc_vreg();
+            fprintf(C.nir, "    zext %%%d, %%%d\n", wd, l.vreg);
+            if (right_is_imm) {
+                fprintf(C.nir, "    %s %%%d, %%%d, %d\n", op_str(op), wd, wd, right_imm);
+            } else {
+                int wd2 = alloc_vreg();
+                fprintf(C.nir, "    zext %%%d, %%%d\n", wd2, r.vreg);
+                fprintf(C.nir, "    %s %%%d, %%%d, %%%d\n", op_str(op), wd, wd, wd2);
+            }
+            fprintf(C.nir, ".vreg %%%d, u8\n", dst);
+            fprintf(C.nir, "    mov %%%d, %%%d\n", dst, wd);
+            return TV(dst, result_type);
+        }
         if (right_is_imm) {
             fprintf(C.nir, "    %s %%%d, %%%d, %d\n", op_str(op), dst, l.vreg, right_imm);
         } else {
