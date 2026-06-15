@@ -225,6 +225,15 @@ if [ -f /tmp/t_call_clobber.asm ]; then
     fi
 fi
 
+# Byte vregs: zero_extend must use byte mov (MOV BL, AL not MOV BX, AL)
+if [ -f /tmp/t_byte_vreg.asm ]; then
+    if grep -q 'mov [A-D]L, [A-D]L' /tmp/t_byte_vreg.asm; then
+        pass "byte-vreg: zero_extend uses byte move"
+    else
+        fail "byte-vreg" "zero_extend uses invalid word-from-byte move"
+    fi
+fi
+
 # memset/memcopy must set up DI, AL/SI, CX before string ops
 if [ -f /tmp/t_memops.asm ]; then
     if grep -q 'mov DI' /tmp/t_memops.asm && grep -q 'mov CX' /tmp/t_memops.asm && grep -q 'rep stosb' /tmp/t_memops.asm; then

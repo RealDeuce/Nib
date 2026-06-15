@@ -1,0 +1,19 @@
+// Test: byte vregs must get byte registers (AL, BL, etc.)
+// and zero_extend must emit correct byte-to-word conversion.
+
+u8 global_byte;
+
+fn test_zext(val: u8) -> u16 {
+    u16 wide = zero_extend(val);
+    return wide;
+}
+
+fn test_global_byte() -> u8 {
+    u8 b = global_byte;
+    return b;
+}
+
+fn test_byte_alu(a: u8, b: u8) -> u8 {
+    u8 c = a + b;
+    return c;
+}

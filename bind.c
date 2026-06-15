@@ -570,6 +570,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             continue;
         }
 
+        if (strncmp(p, ".byte", 5) == 0) {
+            p += 5;
+            int v = parse_vreg(p, &p);
+            if (v >= 0 && v < MAX_VREGS)
+                fn->vregs[v].is_byte = true;
+            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            continue;
+        }
+
         if (strncmp(p, ".preserves", 10) == 0) {
             p += 10;
             /* Parse comma-separated register list */
@@ -1967,10 +1976,23 @@ static void emit_function(func_t *fn) {
                 break;
             }
             if (strcmp(mnem, "zext") == 0) {
-                /* Zero-extend: clear upper byte */
-                emit_mov(fn, ins->dst, ins->src1);
+                /* Zero-extend u8 -> u16: clear word, then mov low byte.
+                 * dst is a word reg, src is a byte reg. */
+                int dst_preg = fn->vregs[ins->dst].assigned;
                 fprintf(out_asm, "    xor %s, %s\n", d, d);
-                fprintf(out_asm, "    mov %s, %s\n", d, s);
+                /* Get the low-byte name of dst's word register */
+                if (dst_preg >= PREG_AX && dst_preg <= PREG_BX) {
+                    const char *lo = preg_name[preg_alias_lo[dst_preg]];
+                    fprintf(out_asm, "    mov %s, %s\n", lo, s);
+                } else {
+                    /* dst is SI/DI/BP — can't access low byte directly.
+                     * Use AX as scratch: xor dst,dst; mov AL,src; add dst,AX */
+                    fprintf(out_asm, "    push AX\n");
+                    fprintf(out_asm, "    xor AX, AX\n");
+                    fprintf(out_asm, "    mov AL, %s\n", s);
+                    fprintf(out_asm, "    mov %s, AX\n", d);
+                    fprintf(out_asm, "    pop AX\n");
+                }
                 break;
             }
             emit_mov(fn, ins->dst, ins->src1);

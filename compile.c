@@ -522,6 +522,8 @@ static int emit_expr(expr_t *e) {
 
 static typed_vreg_t TV(int vreg, type_t *type) {
     typed_vreg_t tv = { vreg, type };
+    if (type && type->kind == TYPE_U8 && C.nir)
+        fprintf(C.nir, ".byte %%%d\n", vreg);
     return tv;
 }
 
