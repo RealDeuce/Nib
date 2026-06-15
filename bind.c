@@ -762,12 +762,22 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 ins->src1 = parse_vreg(p, &p);
             } else if (*p == '_' || isalpha(*p)) {
                 /* Label reference (e.g., _C0 for constant pool) */
-                ins->has_imm = false;
-                p = read_word(p, ins->name, sizeof(ins->name));
-                /* Constant pool refs live in CS (code segment) */
-                if (ins->name[0] == '_' && ins->name[1] == 'C' &&
-                    ins->dst >= 0 && ins->dst < MAX_VREGS)
-                    fn->vregs[ins->dst].is_cs_ref = true;
+                char word[64];
+                read_word(p, word, sizeof(word));
+                if (strcmp(word, "SEG") == 0) {
+                    /* SEG label — segment of a label, passed through to asm */
+                    p += 3;
+                    p = skip_ws(p);
+                    snprintf(ins->name, sizeof(ins->name), "SEG ");
+                    p = read_word(p, ins->name + 4, sizeof(ins->name) - 4);
+                } else {
+                    ins->has_imm = false;
+                    p = read_word(p, ins->name, sizeof(ins->name));
+                    /* Constant pool refs live in CS (code segment) */
+                    if (ins->name[0] == '_' && ins->name[1] == 'C' &&
+                        ins->dst >= 0 && ins->dst < MAX_VREGS)
+                        fn->vregs[ins->dst].is_cs_ref = true;
+                }
             } else {
                 ins->has_imm = true;
                 ins->imm = (int)strtol(p, (char **)&p, 0);
@@ -3018,15 +3028,25 @@ static void emit_function(func_t *fn) {
             } else if (ins->name[0]) {
                 /* Label reference — load address of constant or function */
                 const char *d = vreg_asm(fn, ins->dst);
-                const char *clbl = resolve_const_label(fn, ins->name);
-                const char *label = clbl ? clbl : resolve_fn_name(ins->name);
-                /* Segment registers can't take label refs either */
+                const char *resolved;
+                bool is_seg_op = (strncmp(ins->name, "SEG ", 4) == 0);
+                if (is_seg_op) {
+                    /* SEG label — resolve the label part, keep SEG prefix */
+                    static char segbuf[128];
+                    const char *lbl = resolve_fn_name(ins->name + 4);
+                    snprintf(segbuf, sizeof(segbuf), "SEG %s", lbl);
+                    resolved = segbuf;
+                } else {
+                    const char *clbl = resolve_const_label(fn, ins->name);
+                    resolved = clbl ? clbl : resolve_fn_name(ins->name);
+                }
+                /* Segment registers can't take immediates — use AX */
                 if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                     fn->vregs[ins->dst].is_seg) {
-                    fprintf(out_asm, "    mov AX, %s\n", label);
+                    fprintf(out_asm, "    mov AX, %s\n", resolved);
                     fprintf(out_asm, "    mov %s, AX\n", d);
                 } else {
-                    fprintf(out_asm, "    mov %s, %s\n", d, label);
+                    fprintf(out_asm, "    mov %s, %s\n", d, resolved);
                 }
             } else {
                 emit_mov(fn, ins->dst, ins->src1);

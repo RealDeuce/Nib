@@ -91,6 +91,10 @@ typedef struct {
         int  value;
     } constants[512];
     int nconstants;
+
+    /* Interrupt handler names (far32 constants, not callable) */
+    char isr_names[64][64];
+    int  nisr;
 } compiler_t;
 
 static compiler_t C;
@@ -241,6 +245,13 @@ static bool eval_const_expr(expr_t *e, int *result) {
 }
 
 /* ---- Function lookup ---- */
+
+static bool is_isr(const char *name) {
+    for (int i = 0; i < C.nisr; i++)
+        if (strcmp(C.isr_names[i], name) == 0)
+            return true;
+    return false;
+}
 
 static int find_function(const char *name) {
     for (int i = 0; i < C.nfunctions; i++)
@@ -617,6 +628,15 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(r, mk_type_array(mk_type(TYPE_U8), slen));
     }
     case EXPR_IDENT: {
+        /* Interrupt handler name — far32 constant via far.ref */
+        if (is_isr(e->u.ident)) {
+            int r = alloc_vreg();
+            int cid = C.next_const++;
+            fprintf(C.nir, ".const _C%d, far.ref %s\n", cid, e->u.ident);
+            fprintf(C.nir, "    mov %%%d, _C%d\n", r, cid);
+            fprintf(C.nir, ".vreg %%%d, u16, csref\n", r);
+            return TV(r, mk_type(TYPE_FAR));
+        }
         symbol_t *sym = sym_lookup(e->u.ident);
         if (!sym) {
             cerr(e->line, "undefined variable '%s'", e->u.ident);
@@ -2039,15 +2059,7 @@ static void compile_fn(decl_t *d) {
     C.cur_fn_ret = d->u.fn.return_type;
     C.cur_fn_mods = d->u.fn.mods;
 
-    /* Count params */
-    int nparams = 0;
-    for (param_t *p = d->u.fn.params; p; p = p->next) nparams++;
-
-    /* Register this function */
-    register_function(d->u.fn.name, nparams, d->u.fn.return_type,
-                       d->u.fn.params);
-
-    /* Validate interrupt handler constraints */
+    /* Validate and register */
     if (d->u.fn.mods.is_interrupt) {
         if (d->is_pub)
             cerr(d->line, "interrupt handlers cannot be pub");
@@ -2059,6 +2071,14 @@ static void compile_fn(decl_t *d) {
             cerr(d->line, "interrupt handlers cannot have parameters");
         if (d->u.fn.return_type)
             cerr(d->line, "interrupt handlers cannot have a return type");
+        /* Record as far32 constant, not a callable function */
+        if (C.nisr < 64)
+            strncpy(C.isr_names[C.nisr++], d->u.fn.name, 63);
+    } else {
+        int nparams = 0;
+        for (param_t *p = d->u.fn.params; p; p = p->next) nparams++;
+        register_function(d->u.fn.name, nparams, d->u.fn.return_type,
+                           d->u.fn.params);
     }
 
     /* Emit .nir function header */

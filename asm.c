@@ -595,6 +595,19 @@ static operand_t parse_operand(void) {
     }
 
     if (t.type == T_IDENT) {
+        /* SEG operator: returns the segment a label was defined in */
+        if (strcasecmp(t.sval, "SEG") == 0) {
+            consume();
+            token_t lt = peek_token();
+            if (lt.type == T_IDENT) {
+                consume();
+                op.type = OP_IMM;
+                label_t *l = find_label(lt.sval);
+                op.imm = (l && l->defined) ? l->segment : 0;
+                op.size = size_pfx ? size_pfx : 2;
+                return op;
+            }
+        }
         consume();
         op.type = OP_IMM;
         op.imm = lookup_label(t.sval);
