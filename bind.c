@@ -994,6 +994,11 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         else if (strcmp(opname, "loop") == 0) {
             ins->op = IR_LOOP;
             read_word(p, ins->name, sizeof(ins->name));
+            /* Parse optional CX vreg: loop .label, %cx_vreg */
+            skip_comma(&p);
+            p = skip_ws(p);
+            if (*p == '%')
+                ins->src1 = parse_vreg(p, &p);
         }
         else if (strcmp(opname, "break") == 0) {
             ins->op = IR_BREAK;

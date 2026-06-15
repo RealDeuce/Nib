@@ -326,6 +326,17 @@ if [ -f /tmp/t_byte_array.asm ]; then
     fi
 fi
 
+# Loop body CX: CX must not be modified between loop top and LOOP instruction
+if [ -f /tmp/t_loop_body.asm ]; then
+    # Between the .L0 label and "loop", CX should only appear as a source (read), never as destination
+    loop_body=$(sed -n '/\.L0:/,/loop /p' /tmp/t_loop_body.asm | grep -v '\.L0:' | grep -v 'loop ')
+    if echo "$loop_body" | grep -q 'sub CX\|mov CX\|add CX\|dec CX'; then
+        fail "loop-body" "CX modified inside loop body before LOOP instruction"
+    else
+        pass "loop-body: CX not modified before LOOP"
+    fi
+fi
+
 # Pointer deref: near [var] must use DS-default addressable register (BX, SI, DI)
 if [ -f /tmp/t_deref.asm ]; then
     if grep -q '\[BX\]\|mov \[SI\]\|mov \[DI\]' /tmp/t_deref.asm && ! grep -q '\[AX\]\|\[CX\]\|\[DX\]' /tmp/t_deref.asm; then

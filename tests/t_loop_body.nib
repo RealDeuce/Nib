@@ -1,0 +1,11 @@
+// Test: for (CX in N..0) with CX used in body expression.
+// CX must only be decremented once per iteration (by LOOP),
+// not also by the expression evaluation.
+
+fn use_cx() -> u16 {
+    u16 sum = 0;
+    for (CX in 4..0) {
+        sum := sum + CX;
+    }
+    return sum;
+}

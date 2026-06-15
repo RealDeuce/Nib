@@ -1728,8 +1728,22 @@ static void emit_stmt(stmt_t *s) {
                 sidx = alloc_vreg();
                 fprintf(C.nir, "    shl %%%d, %%%d, %d\n", sidx, idx, es);
             }
-            const char *sop = (elem && elem->kind == TYPE_U8) ? "storeb" : "store";
-            fprintf(C.nir, "    %s %%%d[%%%d], %%%d\n", sop, arr_tv.vreg, sidx, val.vreg);
+            if (elem && elem->kind == TYPE_FAR) {
+                /* Far32 element: store both offset and segment halves */
+                int off_v = alloc_vreg();
+                int seg_v = alloc_vreg();
+                fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, val.vreg);
+                fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, val.vreg);
+                fprintf(C.nir, "    store %%%d[%%%d], %%%d\n",
+                        arr_tv.vreg, sidx, off_v);
+                int sidx2 = alloc_vreg();
+                fprintf(C.nir, "    add %%%d, %%%d, 2\n", sidx2, sidx);
+                fprintf(C.nir, "    store %%%d[%%%d], %%%d\n",
+                        arr_tv.vreg, sidx2, seg_v);
+            } else {
+                const char *sop = (elem && elem->kind == TYPE_U8) ? "storeb" : "store";
+                fprintf(C.nir, "    %s %%%d[%%%d], %%%d\n", sop, arr_tv.vreg, sidx, val.vreg);
+            }
         } else if (t->kind == EXPR_FIELD) {
             int obj = emit_expr(t->u.field.object);
             fprintf(C.nir, "    storefield %%%d, %s, %%%d\n",
@@ -1827,10 +1841,23 @@ static void emit_stmt(stmt_t *s) {
         fprintf(C.nir, ".L%d:\n", lbl_top);
         C.loop_depth++;
         push_scope();
+        /* Add CX as a scoped symbol so body refs to CX use the loop vreg */
+        {
+            symbol_t *cx_sym = &C.scope->syms[C.scope->nsyms++];
+            memset(cx_sym, 0, sizeof(*cx_sym));
+            strncpy(cx_sym->name, "CX", 63);
+            cx_sym->type = mk_type(TYPE_U16);
+            cx_sym->vreg = cx_vreg;
+            cx_sym->vreg_seg = -1;
+            cx_sym->is_pinned = true;
+            cx_sym->pinned_reg = 1; /* REG_CX */
+            cx_sym->pin_class = REGCLASS_WORD;
+        }
         emit_stmts(s->u.for_stmt.body);
         pop_scope();
         C.loop_depth--;
-        fprintf(C.nir, "    loop .L%d\n", lbl_top);
+        /* loop references the CX vreg so the binder extends its liveness */
+        fprintf(C.nir, "    loop .L%d, %%%d\n", lbl_top, cx_vreg);
         fprintf(C.nir, ".L%d:\n", lbl_end);
         C.loop_break_label = save_break;
         C.loop_continue_label = save_continue;
