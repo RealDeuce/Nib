@@ -1457,17 +1457,35 @@ static void assemble_instruction(const char *mnemonic) {
         const char *save = line_ptr;
         token_t peek = next_token();
         if (peek.type == T_COMMA) {
-            /* IMUL reg, imm (186+): 0x6B for byte imm, 0x69 for word */
-            operand_t imm_op = parse_operand();
-            int imm = imm_op.imm;
-            if (imm >= -128 && imm <= 127) {
-                emit(0x6B);
-                emit(0xC0 | (dst.reg << 3) | dst.reg); /* modrm: reg, reg */
-                emit(imm & 0xFF);
+            operand_t src = parse_operand();
+            const char *save2 = line_ptr;
+            token_t peek2 = next_token();
+            if (peek2.type == T_COMMA) {
+                /* IMUL dst, src, imm (186+ three-operand form) */
+                operand_t imm_op = parse_operand();
+                int imm = imm_op.imm;
+                if (imm >= -128 && imm <= 127) {
+                    emit(0x6B);
+                    emit(0xC0 | (dst.reg << 3) | src.reg);
+                    emit(imm & 0xFF);
+                } else {
+                    emit(0x69);
+                    emit(0xC0 | (dst.reg << 3) | src.reg);
+                    emit16(imm & 0xFFFF);
+                }
             } else {
-                emit(0x69);
-                emit(0xC0 | (dst.reg << 3) | dst.reg);
-                emit16(imm & 0xFFFF);
+                /* IMUL dst, imm (186+ two-operand, dst=src) */
+                line_ptr = save2;
+                int imm = src.imm;
+                if (imm >= -128 && imm <= 127) {
+                    emit(0x6B);
+                    emit(0xC0 | (dst.reg << 3) | dst.reg);
+                    emit(imm & 0xFF);
+                } else {
+                    emit(0x69);
+                    emit(0xC0 | (dst.reg << 3) | dst.reg);
+                    emit16(imm & 0xFFFF);
+                }
             }
         } else {
             /* IMUL r/m (single operand) */
