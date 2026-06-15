@@ -2171,43 +2171,74 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_CALL: {
-            /* Check if this is a chain call */
-            if (fn->has_chain && strcmp(ins->name, fn->chain_name) == 0) {
-                fprintf(out_asm, "    pushf\n");
-                fprintf(out_asm, "    call far [%s_vec]\n", fn->chain_name);
-                break;
-            }
-            /* Check if calling an extern */
-            bool found_extern = false;
-            for (int e = 0; e < nexterns; e++) {
-                if (strcmp(externs[e].name, ins->name) == 0) {
-                    if (externs[e].is_interrupt) {
-                        fprintf(out_asm, "    int 0x%02X\n", externs[e].int_vector);
-                    } else if (externs[e].has_address) {
-                        fprintf(out_asm, "    call far 0x%04X:0x%04X\n",
-                                externs[e].addr_seg, externs[e].addr_off);
-                    } else {
-                        fprintf(out_asm, "    ; ERROR: extern '%s' has no address\n",
-                                ins->name);
-                    }
-                    found_extern = true;
+            /* Caller-save: push live registers that the callee may clobber */
+            bool callee_preserves[NUM_PREGS] = {0};
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, ins->name) == 0) {
+                    for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
+                        callee_preserves[functions[fi2].fn_preserves[pp]] = true;
                     break;
                 }
             }
-            if (!found_extern) {
-                /* Check if callee is a far function */
-                bool callee_far = false;
-                for (int fi2 = 0; fi2 < nfunctions; fi2++) {
-                    if (strcmp(functions[fi2].name, ins->name) == 0) {
-                        callee_far = functions[fi2].is_far;
+            int call_saved[8];
+            int call_nsaved = 0;
+            for (int v = 0; v < fn->nvregs; v++) {
+                int preg = fn->vregs[v].assigned;
+                if (preg == PREG_NONE || preg == PREG_SP) continue;
+                if (fn->vregs[v].is_seg) continue;
+                if (fn->vregs[v].last_use <= (int)i) continue;
+                if (fn->vregs[v].def_pos > (int)i) continue;
+                int push_reg = preg;
+                if (preg >= PREG_AL && preg <= PREG_BH)
+                    push_reg = preg_alias_parent[preg];
+                if (callee_preserves[push_reg]) continue;
+                bool dup = false;
+                for (int s = 0; s < call_nsaved; s++)
+                    if (call_saved[s] == push_reg) { dup = true; break; }
+                if (dup) continue;
+                if (call_nsaved < 8)
+                    call_saved[call_nsaved++] = push_reg;
+                fprintf(out_asm, "    push %s\n", preg_name[push_reg]);
+            }
+
+            /* Emit the actual call instruction */
+            if (fn->has_chain && strcmp(ins->name, fn->chain_name) == 0) {
+                fprintf(out_asm, "    pushf\n");
+                fprintf(out_asm, "    call far [%s_vec]\n", fn->chain_name);
+            } else {
+                bool found_extern = false;
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, ins->name) == 0) {
+                        if (externs[e].is_interrupt) {
+                            fprintf(out_asm, "    int 0x%02X\n", externs[e].int_vector);
+                        } else if (externs[e].has_address) {
+                            fprintf(out_asm, "    call far 0x%04X:0x%04X\n",
+                                    externs[e].addr_seg, externs[e].addr_off);
+                        } else {
+                            fprintf(out_asm, "    ; ERROR: extern '%s' has no address\n",
+                                    ins->name);
+                        }
+                        found_extern = true;
                         break;
                     }
                 }
-                if (callee_far)
-                    fprintf(out_asm, "    call far %s\n", resolve_fn_name(ins->name));
-                else
-                    fprintf(out_asm, "    call %s\n", resolve_fn_name(ins->name));
+                if (!found_extern) {
+                    bool callee_far = false;
+                    for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                        if (strcmp(functions[fi2].name, ins->name) == 0) {
+                            callee_far = functions[fi2].is_far;
+                            break;
+                        }
+                    }
+                    if (callee_far)
+                        fprintf(out_asm, "    call far %s\n", resolve_fn_name(ins->name));
+                    else
+                        fprintf(out_asm, "    call %s\n", resolve_fn_name(ins->name));
+                }
             }
+            /* Caller-restore: pop saved registers (reverse order) */
+            for (int s = call_nsaved - 1; s >= 0; s--)
+                fprintf(out_asm, "    pop %s\n", preg_name[call_saved[s]]);
             break;
         }
 
