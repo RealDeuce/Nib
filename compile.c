@@ -1033,7 +1033,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (!elem) elem = mk_type(TYPE_U8);
 
         int dst = alloc_vreg();
-        fprintf(C.nir, "    load %%%d, %%%d[%%%d]\n", dst, arr.vreg, idx.vreg);
+        const char *op = (elem && elem->kind == TYPE_U8) ? "loadb" : "load";
+        fprintf(C.nir, "    %s %%%d, %%%d[%%%d]\n", op, dst, arr.vreg, idx.vreg);
         return TV(dst, elem);
     }
     case EXPR_CHECKED_INDEX: {
@@ -1049,8 +1050,9 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (!elem) elem = mk_type(TYPE_U8);
 
         int dst = alloc_vreg();
+        const char *lop = (elem && elem->kind == TYPE_U8) ? "loadb" : "load";
         fprintf(C.nir, "    bound %%%d, %%%d\n", idx.vreg, arr.vreg);
-        fprintf(C.nir, "    load %%%d, %%%d[%%%d]\n", dst, arr.vreg, idx.vreg);
+        fprintf(C.nir, "    %s %%%d, %%%d[%%%d]\n", lop, dst, arr.vreg, idx.vreg);
         return TV(dst, elem);
     }
     case EXPR_FIELD: {
@@ -1504,9 +1506,11 @@ static void emit_stmt(stmt_t *s) {
             }
             fprintf(C.nir, "], %%%d\n", val.vreg);
         } else if (t->kind == EXPR_INDEX) {
-            int arr = emit_expr(t->u.index.array);
+            typed_vreg_t arr_tv = emit_expr_typed(t->u.index.array);
             int idx = emit_expr(t->u.index.index);
-            fprintf(C.nir, "    store %%%d[%%%d], %%%d\n", arr, idx, val.vreg);
+            type_t *elem = type_of_element(arr_tv.type);
+            const char *sop = (elem && elem->kind == TYPE_U8) ? "storeb" : "store";
+            fprintf(C.nir, "    %s %%%d[%%%d], %%%d\n", sop, arr_tv.vreg, idx, val.vreg);
         } else if (t->kind == EXPR_FIELD) {
             int obj = emit_expr(t->u.field.object);
             fprintf(C.nir, "    storefield %%%d, %s, %%%d\n",

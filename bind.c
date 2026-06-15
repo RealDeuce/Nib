@@ -736,15 +736,17 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 ins->nargs++;
             }
         }
-        else if (strcmp(opname, "load") == 0) {
+        else if (strcmp(opname, "load") == 0 || strcmp(opname, "loadb") == 0) {
             ins->op = IR_LOAD;
             ins->dst = parse_vreg(p, &p);
             skip_comma(&p);
             ins->src1 = parse_vreg(p, &p); /* array */
             p = skip_ws(p);
             if (*p == '[') { p++; ins->src2 = parse_vreg(p, &p); } /* index */
+            if (strcmp(opname, "loadb") == 0 && ins->dst >= 0 && ins->dst < MAX_VREGS)
+                fn->vregs[ins->dst].is_byte = true;
         }
-        else if (strcmp(opname, "store") == 0) {
+        else if (strcmp(opname, "store") == 0 || strcmp(opname, "storeb") == 0) {
             ins->op = IR_STORE;
             ins->src1 = parse_vreg(p, &p); /* array */
             p = skip_ws(p);
@@ -755,6 +757,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             if (*p == ']') p++;
             skip_comma(&p);
             ins->dst = parse_vreg(p, &p); /* value — stored as "dst" but really src */
+            if (strcmp(opname, "storeb") == 0 && ins->dst >= 0 && ins->dst < MAX_VREGS)
+                fn->vregs[ins->dst].is_byte = true;
         }
         else if (strcmp(opname, "loadmem") == 0) {
             ins->op = IR_LOADMEM;
