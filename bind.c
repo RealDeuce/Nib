@@ -600,6 +600,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             continue;
         }
 
+        if (strncmp(p, ".csref", 6) == 0) {
+            p += 6;
+            int v = parse_vreg(p, &p);
+            if (v >= 0 && v < MAX_VREGS)
+                fn->vregs[v].is_cs_ref = true;
+            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            continue;
+        }
+
         if (strncmp(p, ".preserves", 10) == 0) {
             p += 10;
             /* Parse comma-separated register list */
@@ -1525,6 +1534,15 @@ static void scan_addressing_constraints(func_t *fn) {
                 fn->vregs[ins->src2].needs_index = true;
             }
         }
+    }
+    /* Propagate is_cs_ref through mov chains */
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->op == IR_MOV && !ins->has_imm &&
+            ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+            ins->dst >= 0 && ins->dst < MAX_VREGS &&
+            fn->vregs[ins->src1].is_cs_ref)
+            fn->vregs[ins->dst].is_cs_ref = true;
     }
 }
 
@@ -2532,12 +2550,15 @@ static void emit_function(func_t *fn) {
             /* Indirect far call through a memory-resident far pointer.
              * src1 = vreg holding address of the far pointer in memory. */
             const char *addr = vreg_asm(fn, ins->src1);
+            bool ic_cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                          fn->vregs[ins->src1].is_cs_ref);
+            const char *ic_seg = ic_cs ? "CS:" : "";
             if (is_spilled(fn, ins->src1)) {
                 /* Spilled: the spill slot IS the memory address */
                 fprintf(out_asm, "    call far %s\n", addr);
             } else {
                 /* In a register: dereference as [reg] */
-                fprintf(out_asm, "    call far [%s]\n", addr);
+                fprintf(out_asm, "    call far [%s%s]\n", ic_seg, addr);
             }
             break;
         }
@@ -2604,6 +2625,9 @@ static void emit_function(func_t *fn) {
             const char *base_str;
             const char *idx_str = NULL;
             bool pushed_bx = false, pushed_si = false;
+            bool cs_ref = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                           fn->vregs[ins->src1].is_cs_ref);
+            const char *seg_pfx = cs_ref ? "CS:" : "";
             /* Load spilled base/index into scratch regs */
             if (is_spilled(fn, ins->src1)) {
                 fprintf(out_asm, "    push BX\n");
@@ -2625,19 +2649,19 @@ static void emit_function(func_t *fn) {
                 bool ld_byte = fn->vregs[ins->dst].is_byte;
                 const char *acc = ld_byte ? "AL" : "AX";
                 if (idx_str)
-                    fprintf(out_asm, "    mov %s, [%s+%s]\n", acc, base_str, idx_str);
+                    fprintf(out_asm, "    mov %s, [%s%s+%s]\n", acc, seg_pfx, base_str, idx_str);
                 else
-                    fprintf(out_asm, "    mov %s, [%s]\n", acc, base_str);
+                    fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg_pfx, base_str);
                 if (pushed_si) fprintf(out_asm, "    pop SI\n");
                 if (pushed_bx) fprintf(out_asm, "    pop BX\n");
                 fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
             } else {
                 if (idx_str)
-                    fprintf(out_asm, "    mov %s, [%s+%s]\n",
-                            vreg_asm(fn, ins->dst), base_str, idx_str);
+                    fprintf(out_asm, "    mov %s, [%s%s+%s]\n",
+                            vreg_asm(fn, ins->dst), seg_pfx, base_str, idx_str);
                 else
-                    fprintf(out_asm, "    mov %s, [%s]\n",
-                            vreg_asm(fn, ins->dst), base_str);
+                    fprintf(out_asm, "    mov %s, [%s%s]\n",
+                            vreg_asm(fn, ins->dst), seg_pfx, base_str);
                 if (pushed_si) fprintf(out_asm, "    pop SI\n");
                 if (pushed_bx) fprintf(out_asm, "    pop BX\n");
             }

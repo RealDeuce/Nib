@@ -136,14 +136,14 @@ Unsized arrays without an initializer are a compile error.
 
 | Type  | Size    | Hardware mapping                          |
 |-------|---------|-------------------------------------------|
-| `far` | 4 bytes | Segment:offset pair (two word registers)  |
+| `far32` | 4 bytes | Segment:offset pair (two word registers)  |
 
-A `far` value holds a 20-bit segmented address as a segment:offset pair.
+A `far32` value holds a 20-bit segmented address as a segment:offset pair.
 
 Far literals use colon syntax:
 
 ```
-far entry = 0xF000:0x0100;
+far32 entry = 0xF000:0x0100;
 ```
 
 Component access uses the backtick operator:
@@ -153,7 +153,7 @@ u16 s = entry`seg;          // segment half
 u16 o = entry`off;          // offset half
 ```
 
-Applying `@` to a function or global name returns `far` (see
+Applying `@` to a function or global name returns `far32` (see
 Address-of in Expressions). `&` returns the near offset (`u16`).
 
 
@@ -180,8 +180,26 @@ are zero-filled to the declared size.
 ```
 u8[8] buf = {0x41, 0x42, 0x43};    // 3 bytes + 5 zero bytes
 u16[4] table = {100, 200, 300, 400};
-far[4] ivt = {@handler_a, @handler_b, @handler_c, @handler_d};
+far32[4] ivt = {@handler_a, @handler_b, @handler_c, @handler_d};
 ```
+
+Array indexing scales automatically by element size: `u8[]` uses byte
+offsets, `u16[]` scales by 2, `far32[]` scales by 4.
+
+### CS-resident globals
+
+The `far` storage qualifier marks a global as living in the code
+segment (CS/ROM). All accesses use a `CS:` segment override:
+
+```
+pub far far32[5] lcd_table = {@blit, @print, @cursor, @setpos, @clear};
+
+far32 entry = lcd_table[1];   // reads from [CS:base+idx*4]
+```
+
+The qualifier is exported to the `.nif` so importing modules also
+use CS-relative addressing. Without `far`, globals are accessed
+through DS (RAM).
 
 ### Constants
 
@@ -336,24 +354,24 @@ fn api_read(port: u16 in DX) -> u8 in AL {
 }
 ```
 
-For `far` parameters, the pin specifies both the segment register and
+For `far32` parameters, the pin specifies both the segment register and
 the offset register with `in SEG:REG`:
 
 ```
-fn blit(src: far in ES:SI, x: u16, y: u8) {
+fn blit(src: far32 in ES:SI, x: u16, y: u8) {
     seg ES = src`seg;       // direct register access, no load
     u16 SI = src`off;
     // ...
 }
 ```
 
-A `far` parameter is split into two registers internally — one segment
+A `far32` parameter is split into two registers internally — one segment
 and one word. The binder treats them as independent register assignments
 that propagate through the call graph like any other parameter. Without
 a pin, the binder picks the pair automatically:
 
 ```
-fn internal(ptr: far) {     // binder chooses seg + word regs
+fn internal(ptr: far32) {     // binder chooses seg + word regs
     seg ES = ptr`seg;
     u16 BX = ptr`off;
 }
@@ -395,7 +413,7 @@ fn boot() { ... }               // placed at E000:0000
 fn init() { ... }               // follows boot sequentially
 
 at(0x0000:0x0000);              // push: detour to 0000:0000
-far[256] ivt;                   // placed at 0000:0000
+far32[256] ivt;                   // placed at 0000:0000
 u16 next_vector;                // follows ivt at 0000:0400
 end at;                         // pop: back to E000:xxxx
 
@@ -483,14 +501,24 @@ extern fn interrupt(0x21) dos_putchar(svc: u8 in AH, char: u8 in DL)
     preserves(BX, CX, SI, DI, BP, DS, ES, SS);
 ```
 
-**Implementation form** — a `pub extern` that describes the calling
-convention of a private function accessed through a jump table. It
-has no body or address — it's purely an ABI descriptor exported to
-the `.nif` for use with indirect calls (see Indirect calls below):
+**Implementation form** — a `pub extern fn` with a body defines the
+calling convention AND provides the implementation. The extern
+signature is exported to the `.nif` for indirect calls, and the
+function body is compiled normally:
 
 ```
-// In lcd.nib, alongside the private fn print_impl(...):
-pub extern fn print(str: far in ES:SI, len: u16 in CX)
+pub extern fn far print(str: far32 in ES:SI, len: u16 in CX)
+    clobbers(FLAGS) {
+    // function body — compiled as a regular function
+    u8 ch = [str];
+    ...
+}
+```
+
+A `pub extern` without a body is also valid as a pure ABI descriptor:
+
+```
+pub extern fn print(str: far32 in ES:SI, len: u16 in CX)
     clobbers(FLAGS);
 ```
 
@@ -578,9 +606,9 @@ calling convention descriptors for these indirect calls.
 private implementation:
 
 ```
-fn print_impl(str: far in ES:SI, len: u16 in CX) { ... }
+fn print_impl(str: far32 in ES:SI, len: u16 in CX) { ... }
 
-pub extern fn print(str: far in ES:SI, len: u16 in CX)
+pub extern fn print(str: far32 in ES:SI, len: u16 in CX)
     clobbers(FLAGS);
 ```
 
@@ -593,12 +621,12 @@ the extern's calling convention:
 ```
 use "lcd.nif";
 
-far addr = lookup(DEV_LCD, LCD_PRINT);
+far32 addr = lookup(DEV_LCD, LCD_PRINT);
 addr as print from lcd(@message, 17);
 ```
 
 The `as NAME from MODULE(args...)` syntax:
-- `addr` — expression yielding a `far` value (the call target)
+- `addr` — expression yielding a `far32` value (the call target)
 - `NAME` — extern name to look up for register assignments
 - `MODULE` — which module's namespace to search
 - `(args...)` — arguments, set up per the extern's register pins
@@ -685,11 +713,11 @@ u16 addr = &record.field    // LEA with displacement
 #### Address-of (far)
 
 ```
-far handler_addr = @my_handler  // seg:off pointer to function
-far data_ptr = @my_global       // seg:off pointer to global
+far32 handler_addr = @my_handler  // seg:off pointer to function
+far32 data_ptr = @my_global       // seg:off pointer to global
 ```
 
-`@` returns a `far` address (segment:offset) resolved at link time by
+`@` returns a `far32` address (segment:offset) resolved at link time by
 the binder. Works on function names and global variables. The result
 is a 4-byte seg:off pair stored in the constant pool.
 
@@ -754,14 +782,14 @@ Note: register names in memory expressions are always uppercase.
 
 #### Pointer dereference
 
-Variables of type `u16` or `far` can be used as pointers inside brackets:
+Variables of type `u16` or `far32` can be used as pointers inside brackets:
 
 ```
 fn read_byte(ptr: u16) -> u8 {
     return [ptr];               // loads from [ptr]
 }
 
-fn read_far(src: far) -> u8 {
+fn read_far(src: far32) -> u8 {
     return [src];               // loads from src`seg:src`off
 }
 
@@ -770,7 +798,7 @@ fn read_far(src: far) -> u8 {
 u8 ch = [ES:my_offset];        // segment override with variable
 ```
 
-For `far` pointers, the compiler sets up ES:SI from the pointer's
+For `far32` pointers, the compiler sets up ES:SI from the pointer's
 segment and offset components. For `u16` pointers, SI is set up and
 DS is used as the implicit segment. A segment override prefix can be
 specified with `[SEG:var]`.
@@ -1359,7 +1387,7 @@ seg ES = 0xB800;            // MOV AX, 0xB800; MOV ES, AX
 
 ### Far calls
 
-Functions in a different code segment are declared `far`:
+Functions in a different code segment are declared `far32`:
 
 ```
 fn far rom_routine(arg: u16) -> u16;    // external declaration
@@ -1667,7 +1695,7 @@ Global variables can be placed at specific far addresses using the
 segment — it refers to the given absolute address.
 
 ```
-far[4] ivt at(0x0000:0x0000) = {@handler_0, @handler_1, @handler_2, @handler_3};
+far32[4] ivt at(0x0000:0x0000) = {@handler_0, @handler_1, @handler_2, @handler_3};
 u8 keyboard_reg at(0x0000:0x00B0);
 ```
 
@@ -1888,7 +1916,7 @@ all .nir files         →  [nibbind]  →  .asm
 
 ### Types
 
-`u8`, `u16`, `u32`, `seg`, `far`, `bool`, `bcd`, `bits`
+`u8`, `u16`, `u32`, `seg`, `far32`, `bool`, `bcd`, `bits`
 
 ### Control flow
 
@@ -1898,7 +1926,7 @@ all .nir files         →  [nibbind]  →  .asm
 ### Functions
 
 `clobbers`, `preserves`, `interrupt`, `reentrant`, `chain`, `at`, `in`,
-`far` (call convention)
+`far32` (call convention)
 
 ### Assembly
 

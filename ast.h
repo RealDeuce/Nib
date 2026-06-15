@@ -381,6 +381,7 @@ struct decl_node {
             bool    has_at;
             int     at_seg;
             int     at_off;
+            bool    is_cs_data;  /* far qualifier: lives in CS, needs CS: override */
         } global;
 
         /* EXTERN_FN */
@@ -397,6 +398,8 @@ struct decl_node {
             bool           has_address;
             int            addr_seg;
             int            addr_off;
+            /* Implementation body (NULL for declaration-only externs) */
+            stmt_t        *body;
         } extern_fn;
 
         /* USE */

@@ -6,7 +6,7 @@ CFLAGS = -Wall -g
 all: nib nibasm nibdis nibbind nibbuild
 
 nib.tab.c nib.tab.h: nib.y
-	$(BISON) -d -v -Wcounterexamples nib.y
+	$(BISON) -d -v nib.y
 
 lex.yy.c: nib.l nib.tab.h
 	$(FLEX) nib.l
@@ -27,7 +27,7 @@ nibdis: dis.cpp
 	c++ $(CFLAGS) -o nibdis dis.cpp
 
 check: nib.y
-	$(BISON) -d -v -Wcounterexamples nib.y 2>&1 | tee bison_report.txt
+	$(BISON) -d -v nib.y 2>&1 | tee bison_report.txt
 	@echo "---"
 	@echo "Conflict summary from nib.output:"
 	@head -5 nib.output

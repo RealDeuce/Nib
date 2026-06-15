@@ -17,7 +17,7 @@ fn handler3() {
 }
 
 // IVT-style: placed far array with function references
-far[4] ivt at(0x0000:0x0000) = {@handler0, @handler1, @handler2, @handler3};
+far32[4] ivt at(0x0000:0x0000) = {@handler0, @handler1, @handler2, @handler3};
 
 // Simple global (no placement, no init)
 u16 counter;

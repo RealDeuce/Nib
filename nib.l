@@ -54,6 +54,7 @@ static int asm_pending = 0;     /* set after KW_ASM or clobbers/preserves clause
 "aligned"               { return KW_ALIGNED; }
 "extern"                { return KW_EXTERN; }
 "far"                   { return KW_FAR; }
+"far32"                 { return KW_FAR32; }
 "interrupt"             { return KW_INTERRUPT; }
 "chain"                 { return KW_CHAIN; }
 "reentrant"             { return KW_REENTRANT; }

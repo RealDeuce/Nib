@@ -30,6 +30,7 @@ typedef struct symbol {
     reg_class_t pin_class;
     bool        is_global;
     bool        is_const;       /* const qualifier — prevents reassignment */
+    bool        is_cs_data;     /* far-qualified global: lives in CS segment */
     bool        has_at;         /* global with at() placement */
     int         at_seg;
     int         at_off;
@@ -141,6 +142,7 @@ static symbol_t *sym_add(const char *name, type_t *type, bool is_global) {
     sym->vreg_seg = -1;
     sym->is_global = is_global;
     sym->is_const = false;
+    sym->is_cs_data = false;
     sym->is_pinned = false;
     sym->pinned_reg = REG_NONE;
     return sym;
@@ -335,7 +337,7 @@ static const char *type_str(type_t *t) {
         return buf;
     case TYPE_BCD:      snprintf(buf, 64, "bcd[%d]", t->array_size); return buf;
     case TYPE_STRUCT:   return t->struct_name ? t->struct_name : "struct";
-    case TYPE_FAR:      return "far";
+    case TYPE_FAR:      return "far32";
     case TYPE_VOID:     return "void";
     }
     return "?";
@@ -635,6 +637,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                     fprintf(C.nir, "    mov %%%d, 0x%04X\n", r, sym->at_off);
                 else
                     fprintf(C.nir, "    mov %%%d, %s\n", r, sym->name);
+                if (sym->is_cs_data)
+                    fprintf(C.nir, ".csref %%%d\n", r);
             }
             return TV(r, sym->type);
         }
@@ -1136,9 +1140,30 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         type_t *elem = type_of_element(arr.type);
         if (!elem) elem = mk_type(TYPE_U8);
 
+        /* Scale index by element size for non-byte elements */
+        int elem_shift = 0;
+        if (elem->kind == TYPE_U16 || elem->kind == TYPE_SEG) elem_shift = 1;
+        else if (elem->kind == TYPE_FAR || elem->kind == TYPE_U32) elem_shift = 2;
+        int scaled_idx = idx.vreg;
+        if (elem_shift > 0) {
+            scaled_idx = alloc_vreg();
+            fprintf(C.nir, "    shl %%%d, %%%d, %d\n", scaled_idx, idx.vreg, elem_shift);
+        }
+
         int dst = alloc_vreg();
-        const char *op = (elem && elem->kind == TYPE_U8) ? "loadb" : "load";
-        fprintf(C.nir, "    %s %%%d, %%%d[%%%d]\n", op, dst, arr.vreg, idx.vreg);
+        if (elem->kind == TYPE_FAR || type_is_aggregate(elem)) {
+            /* Aggregate/far elements: return address of element (by reference).
+             * The caller uses far.off/far.seg or field access to read. */
+            fprintf(C.nir, "    add %%%d, %%%d, %%%d\n", dst, arr.vreg, scaled_idx);
+            /* Propagate CS-ref from the array base */
+            symbol_t *arr_sym = (e->u.index.array->kind == EXPR_IDENT)
+                ? sym_lookup(e->u.index.array->u.ident) : NULL;
+            if (arr_sym && arr_sym->is_cs_data)
+                fprintf(C.nir, ".csref %%%d\n", dst);
+            return TV(dst, elem);
+        }
+        const char *op = (elem->kind == TYPE_U8) ? "loadb" : "load";
+        fprintf(C.nir, "    %s %%%d, %%%d[%%%d]\n", op, dst, arr.vreg, scaled_idx);
         return TV(dst, elem);
     }
     case EXPR_CHECKED_INDEX: {
@@ -1153,10 +1178,20 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         type_t *elem = type_of_element(arr.type);
         if (!elem) elem = mk_type(TYPE_U8);
 
+        /* Scale index by element size for non-byte elements */
+        int elem_shift2 = 0;
+        if (elem->kind == TYPE_U16 || elem->kind == TYPE_SEG) elem_shift2 = 1;
+        else if (elem->kind == TYPE_FAR || elem->kind == TYPE_U32) elem_shift2 = 2;
+        int scaled_idx2 = idx.vreg;
+        if (elem_shift2 > 0) {
+            scaled_idx2 = alloc_vreg();
+            fprintf(C.nir, "    shl %%%d, %%%d, %d\n", scaled_idx2, idx.vreg, elem_shift2);
+        }
+
         int dst = alloc_vreg();
         const char *lop = (elem && elem->kind == TYPE_U8) ? "loadb" : "load";
         fprintf(C.nir, "    bound %%%d, %%%d\n", idx.vreg, arr.vreg);
-        fprintf(C.nir, "    %s %%%d, %%%d[%%%d]\n", lop, dst, arr.vreg, idx.vreg);
+        fprintf(C.nir, "    %s %%%d, %%%d[%%%d]\n", lop, dst, arr.vreg, scaled_idx2);
         return TV(dst, elem);
     }
     case EXPR_FIELD: {
@@ -1684,8 +1719,17 @@ static void emit_stmt(stmt_t *s) {
             typed_vreg_t arr_tv = emit_expr_typed(t->u.index.array);
             int idx = emit_expr(t->u.index.index);
             type_t *elem = type_of_element(arr_tv.type);
+            /* Scale index by element size */
+            int es = 0;
+            if (elem && (elem->kind == TYPE_U16 || elem->kind == TYPE_SEG)) es = 1;
+            else if (elem && (elem->kind == TYPE_FAR || elem->kind == TYPE_U32)) es = 2;
+            int sidx = idx;
+            if (es > 0) {
+                sidx = alloc_vreg();
+                fprintf(C.nir, "    shl %%%d, %%%d, %d\n", sidx, idx, es);
+            }
             const char *sop = (elem && elem->kind == TYPE_U8) ? "storeb" : "store";
-            fprintf(C.nir, "    %s %%%d[%%%d], %%%d\n", sop, arr_tv.vreg, idx, val.vreg);
+            fprintf(C.nir, "    %s %%%d[%%%d], %%%d\n", sop, arr_tv.vreg, sidx, val.vreg);
         } else if (t->kind == EXPR_FIELD) {
             int obj = emit_expr(t->u.field.object);
             fprintf(C.nir, "    storefield %%%d, %s, %%%d\n",
@@ -2126,10 +2170,15 @@ static void compile_global(decl_t *d) {
         gsym->at_seg = d->u.global.at_seg;
         gsym->at_off = d->u.global.at_off;
     }
+    if (d->u.global.is_cs_data)
+        gsym->is_cs_data = true;
 
-    /* Emit .nif entry (always simple) */
-    if (d->is_pub)
-        fprintf(C.nif, ".global %s, %s\n", name, type_str(d->u.global.type));
+    /* Emit .nif entry */
+    if (d->is_pub) {
+        fprintf(C.nif, ".global %s, %s", name, type_str(d->u.global.type));
+        if (d->u.global.is_cs_data) fprintf(C.nif, ", cs");
+        fprintf(C.nif, "\n");
+    }
 
     /* Check for array initializer */
     if (d->u.global.init && d->u.global.init->kind == EXPR_ARRAY_INIT) {
@@ -2297,11 +2346,17 @@ static void compile_extern_fn(decl_t *d) {
                 d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
     fprintf(C.nif, "\n");
 
-    for (param_t *p = d->u.extern_fn.params; p; p = p->next) {
-        fprintf(C.nif, ".param %s, \"%s\"", type_str(p->type), p->name);
-        if (p->has_pin)
-            fprintf(C.nif, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
-        fprintf(C.nif, "\n");
+    {
+        int pn = 0;
+        for (param_t *p = d->u.extern_fn.params; p; p = p->next, pn++) {
+            fprintf(C.nif, ".param %%%d, %s, \"%s\"", pn, type_str(p->type), p->name);
+            if (p->has_pin)
+                fprintf(C.nif, ", in %s", reg_name_str(p->pinned_reg, p->pin_class));
+            if (p->type && p->type->kind == TYPE_FAR && p->has_seg_pin)
+                fprintf(C.nif, ":%s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
+            fprintf(C.nif, "\n");
+            if (p->type && p->type->kind == TYPE_FAR) pn++; /* far splits */
+        }
     }
     if (d->u.extern_fn.return_type) {
         fprintf(C.nif, ".returns %s", type_str(d->u.extern_fn.return_type));
@@ -2323,6 +2378,29 @@ static void compile_extern_fn(decl_t *d) {
         fprintf(C.nif, "\n");
     }
     fprintf(C.nif, ".endextern\n\n");
+
+    /* If this extern has a body, compile it as a regular function.
+     * This is the "implementation form" — defines calling convention
+     * (extern signature above) AND provides the implementation. */
+    if (d->u.extern_fn.body) {
+        decl_t fn_decl;
+        memset(&fn_decl, 0, sizeof(fn_decl));
+        fn_decl.kind = DECL_FN;
+        fn_decl.line = d->line;
+        fn_decl.is_pub = d->is_pub;
+        fn_decl.u.fn.name = d->u.extern_fn.name;
+        fn_decl.u.fn.mods = d->u.extern_fn.mods;
+        fn_decl.u.fn.params = d->u.extern_fn.params;
+        fn_decl.u.fn.return_type = d->u.extern_fn.return_type;
+        fn_decl.u.fn.body = d->u.extern_fn.body;
+        /* Transfer return pin to fn mods */
+        if (d->u.extern_fn.has_ret_pin) {
+            fn_decl.u.fn.mods.has_ret_pin = true;
+            fn_decl.u.fn.mods.ret_pinned_reg = d->u.extern_fn.ret_pinned_reg;
+            fn_decl.u.fn.mods.ret_pin_class = d->u.extern_fn.ret_pin_class;
+        }
+        compile_fn(&fn_decl);
+    }
 }
 
 /* ================================================================
@@ -2349,13 +2427,18 @@ static type_t *nif_parse_type(const char *s) {
     if (strcmp(s, "u32") == 0) return mk_type(TYPE_U32);
     if (strcmp(s, "seg") == 0) return mk_type(TYPE_SEG);
     if (strcmp(s, "bool") == 0) return mk_type(TYPE_BOOL);
-    /* u8[N], u16[N], bcd[N] */
+    if (strcmp(s, "far") == 0 || strcmp(s, "far32") == 0) return mk_type(TYPE_FAR);
+    /* u8[N], u16[N], bcd[N], far[N] */
     if (strncmp(s, "u8[", 3) == 0)
         return mk_type_array(mk_type(TYPE_U8), atoi(s + 3));
     if (strncmp(s, "u16[", 4) == 0)
         return mk_type_array(mk_type(TYPE_U16), atoi(s + 4));
     if (strncmp(s, "bcd[", 4) == 0)
         return mk_type_array(mk_type(TYPE_BCD), atoi(s + 4));
+    if (strncmp(s, "far[", 4) == 0)
+        return mk_type_array(mk_type(TYPE_FAR), atoi(s + 4));
+    if (strncmp(s, "far32[", 6) == 0)
+        return mk_type_array(mk_type(TYPE_FAR), atoi(s + 6));
     /* struct name */
     return mk_type_struct(s);
 }
@@ -2421,7 +2504,8 @@ static void import_nif(const char *path, int use_line) {
             char ptype[32];
             nif_read_word(p, ptype, sizeof(ptype));
             if (cur_nparams < 16)
-                cur_param_is_far[cur_nparams] = (strcmp(ptype, "far") == 0);
+                cur_param_is_far[cur_nparams] = (strcmp(ptype, "far") == 0 ||
+                                                  strcmp(ptype, "far32") == 0);
             cur_nparams++;
             continue;
         }
@@ -2473,7 +2557,7 @@ static void import_nif(const char *path, int use_line) {
             continue;
         }
 
-        /* .global name, type */
+        /* .global name, type [, cs] */
         if (strncmp(p, ".global ", 8) == 0) {
             p += 8;
             char name[64];
@@ -2482,9 +2566,19 @@ static void import_nif(const char *path, int use_line) {
             p = nif_skip_ws(p);
             if (*p == ',') p++;
             char type[64];
-            nif_read_word(p, type, sizeof(type));
+            p = nif_read_word(p, type, sizeof(type));
+            /* Check for cs qualifier */
+            bool cs_data = false;
+            p = nif_skip_ws(p);
+            if (*p == ',') {
+                p++;
+                char qual[16];
+                nif_read_word(p, qual, sizeof(qual));
+                if (strcmp(qual, "cs") == 0) cs_data = true;
+            }
             /* Add to global scope */
-            sym_add(name, nif_parse_type(type), true);
+            symbol_t *gsym = sym_add(name, nif_parse_type(type), true);
+            gsym->is_cs_data = cs_data;
             continue;
         }
 

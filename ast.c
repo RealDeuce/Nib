@@ -485,6 +485,7 @@ decl_t *mk_decl_global(type_t *type, const char *name,
     d->u.global.has_at = has_at;
     d->u.global.at_seg = at_seg;
     d->u.global.at_off = at_off;
+    d->u.global.is_cs_data = false;
     return d;
 }
 
@@ -515,6 +516,7 @@ decl_t *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
     d->u.extern_fn.has_address = has_addr;
     d->u.extern_fn.addr_seg = addr_seg;
     d->u.extern_fn.addr_off = addr_off;
+    d->u.extern_fn.body = NULL;
     return d;
 }
 

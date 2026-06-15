@@ -1,3 +1,4 @@
+%expect 2  /* far IN: shift wins for far-specific pin form (far in ES:SI) */
 %{
 #include <stdio.h>
 #include <stdlib.h>
@@ -138,7 +139,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 %token <sval> ASM_BODY
 
 /* ---- Keywords ---- */
-%token KW_FN KW_STRUCT KW_ALIGNED KW_EXTERN KW_FAR
+%token KW_FN KW_STRUCT KW_ALIGNED KW_EXTERN KW_FAR KW_FAR32
 %token KW_INTERRUPT KW_CHAIN KW_REENTRANT
 %token KW_IF KW_ELSE KW_WHILE KW_FOR KW_IN
 %token KW_RETURN KW_BREAK KW_CONTINUE
@@ -282,6 +283,15 @@ global_decl
         { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, $5, $3.has_at, $3.seg, $3.off, yyline); }
     | type reg_name at_clause ';'
         { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, NULL, $3.has_at, $3.seg, $3.off, yyline); }
+    | KW_FAR type IDENT at_clause '=' expr ';'
+        { $$ = mk_decl_global($2, $3, REG_NONE, REGCLASS_WORD, $6, $4.has_at, $4.seg, $4.off, yyline);
+          $$->u.global.is_cs_data = true; }
+    | KW_FAR type IDENT at_clause '=' '{' arg_list '}' ';'
+        { $$ = mk_decl_global($2, $3, REG_NONE, REGCLASS_WORD, mk_expr_array_init($7, yyline), $4.has_at, $4.seg, $4.off, yyline);
+          $$->u.global.is_cs_data = true; }
+    | KW_FAR type IDENT at_clause ';'
+        { $$ = mk_decl_global($2, $3, REG_NONE, REGCLASS_WORD, NULL, $4.has_at, $4.seg, $4.off, yyline);
+          $$->u.global.is_cs_data = true; }
     | KW_EXTERN type IDENT ';'
         { $$ = mk_decl_extern_global($2, $3, yyline); }
     | KW_EXTERN type reg_name ';'
@@ -398,6 +408,16 @@ extern_decl
         { $$ = mk_decl_extern_fn($8, current_mods, NULL, $11,
               $12.reg, $12.rclass, ($12.reg != REG_NONE),
               $13, true, $4, $6, yyline); }
+    | extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern_type return_clause_extern_pin preserves_clause '{' stmt_list '}'
+        { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
+              $8.reg, $8.rclass, ($8.reg != REG_NONE),
+              $9, false, 0, 0, yyline);
+          $$->u.extern_fn.body = $11; }
+    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern_type return_clause_extern_pin preserves_clause '{' stmt_list '}'
+        { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
+              $7.reg, $7.rclass, ($7.reg != REG_NONE),
+              $8, false, 0, 0, yyline);
+          $$->u.extern_fn.body = $10; }
     ;
 
 extern_modifiers
@@ -423,6 +443,9 @@ return_clause_extern_pin
 preserves_clause
     : /* empty */                               { $$ = NULL; }
     | KW_PRESERVES '(' reg_flag_list ')'        { $$ = $3; }
+    | KW_CLOBBERS '(' reg_flag_list ')'
+        { $$ = $3;
+          current_mods.is_clobbers = true; }
     ;
 
 /* ==== Parameters ==== */
@@ -439,7 +462,7 @@ param
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
     | KW_VALUE IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($2, $4, $6.reg, $6.rclass); $$->is_value = true; }
-    | IDENT ':' KW_FAR KW_IN seg_reg ':' word_reg
+    | IDENT ':' KW_FAR32 KW_IN seg_reg ':' word_reg
         { $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     ;
 
@@ -451,7 +474,7 @@ extern_param_list
 extern_param
     : IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
-    | IDENT ':' KW_FAR KW_IN seg_reg ':' word_reg
+    | IDENT ':' KW_FAR32 KW_IN seg_reg ':' word_reg
         { $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     ;
 
@@ -718,9 +741,9 @@ mem_access
     : '[' mem_inner ']'
         { $$ = $2; }
     | '[' seg_reg ':' mem_inner ']'
-        { $$ = $4; $$->u.mem.seg = $2.reg; }
-    | '[' seg_reg ':' IDENT ']'
-        { $$ = mk_expr_deref($4, yyline); $$->u.deref.seg = $2.reg; }
+        { $$ = $4;
+          if ($$->kind == EXPR_DEREF) $$->u.deref.seg = $2.reg;
+          else $$->u.mem.seg = $2.reg; }
     | '[' LIT_INT ':' LIT_INT ']'
         { $$ = mk_expr_mem_abs($2, $4, yyline); }
     ;
@@ -833,13 +856,13 @@ type
     | TY_U32                    { $$ = mk_type(TYPE_U32); }
     | TY_SEG                    { $$ = mk_type(TYPE_SEG); }
     | TY_BOOL                   { $$ = mk_type(TYPE_BOOL); }
-    | KW_FAR                    { $$ = mk_type(TYPE_FAR); }
+    | KW_FAR32                  { $$ = mk_type(TYPE_FAR); }
     | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(mk_type(TYPE_U8), $3); }
     | TY_U8 '[' ']'            { $$ = mk_type_array(mk_type(TYPE_U8), 0); }
     | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_U16), $3); }
     | TY_U16 '[' ']'           { $$ = mk_type_array(mk_type(TYPE_U16), 0); }
     | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_BCD), $3); }
-    | KW_FAR '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_FAR), $3); }
+    | KW_FAR32 '[' LIT_INT ']' { $$ = mk_type_array(mk_type(TYPE_FAR), $3); }
     | KW_STRUCT IDENT '[' LIT_INT ']' { $$ = mk_type_array(mk_type_struct($2), $4); }
     | KW_STRUCT IDENT           { $$ = mk_type_struct($2); }
     ;

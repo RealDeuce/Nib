@@ -2,20 +2,20 @@
 // Access components with backtick: ptr`seg, ptr`off
 
 struct ivt_entry {
-    far handler;
+    far32 handler;
 }
 
 fn read_ivt_seg(entry: struct ivt_entry) -> u16 {
-    far handler = entry.handler;
+    far32 handler = entry.handler;
     seg ES = handler`seg;
     return handler`off;
 }
 
-fn test_far_param(addr: far) -> u16 {
+fn test_far_param(addr: far32) -> u16 {
     return addr`off;
 }
 
-fn get_seg(addr: far) -> u16 {
+fn get_seg(addr: far32) -> u16 {
     // Returns raw u16 of the segment
     // (can't return seg type from a u16-returning function)
     return 0;
@@ -26,7 +26,7 @@ fn my_handler() {
     return;
 }
 
-fn get_handler_addr() -> far {
+fn get_handler_addr() -> far32 {
     return @my_handler;
 }
 

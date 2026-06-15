@@ -834,14 +834,22 @@ static void asm_push_pop(int is_pop, operand_t *op) {
 static void asm_mov(operand_t *dst, operand_t *src) {
     /* MOV sreg, r/m16 */
     if (dst->type == OP_SREG && (src->type == OP_REG || src->type == OP_MEM)) {
+        if (src->type == OP_MEM) emit_seg_override(src);
         emit(0x8E);
-        emit_modrm(src, dst->reg);
+        if (src->type == OP_REG)
+            emit(0xC0 | (dst->reg << 3) | src->reg);
+        else
+            emit_modrm_mem(src, dst->reg);
         return;
     }
     /* MOV r/m16, sreg */
     if (src->type == OP_SREG && (dst->type == OP_REG || dst->type == OP_MEM)) {
+        if (dst->type == OP_MEM) emit_seg_override(dst);
         emit(0x8C);
-        emit_modrm(dst, src->reg);
+        if (dst->type == OP_REG)
+            emit(0xC0 | (src->reg << 3) | dst->reg);
+        else
+            emit_modrm_mem(dst, src->reg);
         return;
     }
     /* MOV reg, imm */
@@ -944,7 +952,6 @@ static void asm_jmp_call(const char *mnemonic, operand_t *op) {
 
         /* Near relative */
         int target = op->imm;
-        int next_ip = (out_pos + org_base) + (is_call ? 3 : 2);
 
         if (!is_call) {
             /* JMP short or near — use same relaxation as Jcc to
@@ -969,9 +976,16 @@ static void asm_jmp_call(const char *mnemonic, operand_t *op) {
     }
 
     if (op->type == OP_REG || op->type == OP_MEM) {
-        /* Indirect */
+        /* Indirect: /2=near call, /3=far call, /4=near jmp, /5=far jmp */
+        int reg_field;
+        if (is_call) reg_field = op->is_far ? 3 : 2;
+        else         reg_field = op->is_far ? 5 : 4;
+        if (op->type == OP_MEM) emit_seg_override(op);
         emit(0xFF);
-        emit_modrm(op, is_call ? 2 : 4);
+        if (op->type == OP_REG)
+            emit(0xC0 | (reg_field << 3) | op->reg);
+        else
+            emit_modrm_mem(op, reg_field);
         return;
     }
 

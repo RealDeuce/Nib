@@ -1,14 +1,14 @@
 // Test: far parameters with in SEG:REG pin syntax
 // Far params split into two vregs: offset (word) + segment
 
-fn load_byte(src: far in ES:SI) -> u8 {
+fn load_byte(src: far32 in ES:SI) -> u8 {
     seg ES = src`seg;
     u16 SI = src`off;
     u8 val = [ES:SI];
     return val;
 }
 
-fn copy_far(dst: far in ES:DI, src: far in DS:SI, len: u16 in CX) {
+fn copy_far(dst: far32 in ES:DI, src: far32 in DS:SI, len: u16 in CX) {
     seg ES = dst`seg;
     u16 DI = dst`off;
     seg DS = src`seg;   // DS is tricky but valid for the test
@@ -20,6 +20,6 @@ fn copy_far(dst: far in ES:DI, src: far in DS:SI, len: u16 in CX) {
 }
 
 // Unpinned far param — binder picks the registers
-fn read_offset(ptr: far) -> u16 {
+fn read_offset(ptr: far32) -> u16 {
     return ptr`off;
 }
