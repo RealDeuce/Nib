@@ -1423,7 +1423,10 @@ static void parse_nir(const char *path) {
 
 /* Simple linear liveness — no CFG, just scan backward */
 static void compute_liveness(func_t *fn) {
-    /* Initialize */
+    /* Derive vreg liveness info from CFG dataflow results.
+     * The CFG liveness (live_in/live_out per block) handles loops,
+     * parameters, and dead defs correctly without special cases. */
+
     for (int i = 0; i < fn->nvregs; i++) {
         fn->vregs[i].def_pos = -1;
         fn->vregs[i].last_use = -1;
@@ -1431,32 +1434,68 @@ static void compute_liveness(func_t *fn) {
         fn->vregs[i].in_loop = false;
     }
 
-    /* Forward pass: find first def */
+    /* def_pos: first instruction that defines each vreg */
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
-        if (ins->dst >= 0 && fn->vregs[ins->dst].def_pos < 0)
+        if (ins->dst >= 0 && ins->dst < fn->nvregs &&
+            ins->op != IR_STORE && ins->op != IR_STOREMEM &&
+            ins->op != IR_STOREFIELD &&
+            fn->vregs[ins->dst].def_pos < 0)
             fn->vregs[ins->dst].def_pos = i;
     }
 
-    /* Backward pass: find last use */
-    for (int i = fn->ninsns - 1; i >= 0; i--) {
-        ir_insn_t *ins = &fn->insns[i];
-        if (ins->src1 >= 0 && fn->vregs[ins->src1].last_use < 0)
-            fn->vregs[ins->src1].last_use = i;
-        if (ins->src2 >= 0 && fn->vregs[ins->src2].last_use < 0)
-            fn->vregs[ins->src2].last_use = i;
-        /* Call args */
-        for (int j = 0; j < 8; j++)
-            if (ins->extra_args[j] >= 0 && fn->vregs[ins->extra_args[j]].last_use < 0)
-                fn->vregs[ins->extra_args[j]].last_use = i;
-        /* dst is also a "use" for stores */
-        if ((ins->op == IR_STORE || ins->op == IR_STOREMEM || ins->op == IR_STOREFIELD) &&
-            ins->dst >= 0 && fn->vregs[ins->dst].last_use < 0)
-            fn->vregs[ins->dst].last_use = i;
+    /* Parameters: def before first instruction */
+    for (int i = 0; i < fn->nparams; i++) {
+        int v = fn->param_vregs[i];
+        if (v >= 0 && v < fn->nvregs)
+            fn->vregs[v].def_pos = -1;
     }
 
-    /* Count accesses: every reference as src or dst.
-     * Excludes the first def (every vreg has one). */
+    /* last_use: derived from CFG liveness.
+     * A vreg's last use is the latest instruction where it's still
+     * live. Walk blocks and find the latest point. */
+    for (int b = 0; b < fn->nblocks; b++) {
+        bblock_t *bb = &fn->blocks[b];
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (vset_test(bb->live_out, v)) {
+                /* Live at block exit — last_use is at least end-1 */
+                if (bb->end - 1 > fn->vregs[v].last_use)
+                    fn->vregs[v].last_use = bb->end - 1;
+            }
+            if (vset_test(bb->live_in, v)) {
+                /* Live at block entry — last_use is at least start */
+                if (bb->start > fn->vregs[v].last_use)
+                    fn->vregs[v].last_use = bb->start;
+            }
+        }
+        /* Also check actual use points within the block */
+        for (int i = bb->start; i < bb->end; i++) {
+            ir_insn_t *ins = &fn->insns[i];
+            if (ins->src1 >= 0 && ins->src1 < fn->nvregs &&
+                i > fn->vregs[ins->src1].last_use)
+                fn->vregs[ins->src1].last_use = i;
+            if (ins->src2 >= 0 && ins->src2 < fn->nvregs &&
+                i > fn->vregs[ins->src2].last_use)
+                fn->vregs[ins->src2].last_use = i;
+            for (int j = 0; j < 8; j++)
+                if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs &&
+                    i > fn->vregs[ins->extra_args[j]].last_use)
+                    fn->vregs[ins->extra_args[j]].last_use = i;
+            if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
+                 ins->op == IR_STOREFIELD) &&
+                ins->dst >= 0 && ins->dst < fn->nvregs &&
+                i > fn->vregs[ins->dst].last_use)
+                fn->vregs[ins->dst].last_use = i;
+        }
+    }
+
+    /* Dead defs: defined but never live anywhere — minimal range */
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (fn->vregs[v].def_pos >= 0 && fn->vregs[v].last_use < 0)
+            fn->vregs[v].last_use = fn->vregs[v].def_pos;
+    }
+
+    /* use_count: count all references (reads + re-definitions) */
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
         if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
@@ -1466,60 +1505,23 @@ static void compute_liveness(func_t *fn) {
         for (int j = 0; j < 8; j++)
             if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
                 fn->vregs[ins->extra_args[j]].use_count++;
-        /* Count re-definitions (assignments after the initial def) */
         if (ins->dst >= 0 && ins->dst < fn->nvregs &&
             fn->vregs[ins->dst].def_pos >= 0 &&
             fn->vregs[ins->dst].def_pos < i)
             fn->vregs[ins->dst].use_count++;
     }
 
-    /* Parameters are defined at position -1 (before first insn) */
-    for (int i = 0; i < fn->nparams; i++) {
-        int v = fn->param_vregs[i];
-        if (v >= 0) fn->vregs[v].def_pos = -1;
-    }
-
-    /* Vregs that are defined but never read still occupy a register
-     * at the def point (e.g. unused call return values clobber AX).
-     * Give them a minimal range so they participate in interference. */
-    for (int i = 0; i < fn->nvregs; i++) {
-        if (fn->vregs[i].def_pos >= 0 && fn->vregs[i].last_use < 0)
-            fn->vregs[i].last_use = fn->vregs[i].def_pos;
-    }
-
-    /* Loop-aware liveness: find backward jumps (loops) and extend
-     * liveness of vregs used inside the loop body.
-     * A vreg defined before the loop and used inside it must be live
-     * for the entire loop (since the back-edge re-enters). */
-    for (int i = 0; i < fn->ninsns; i++) {
-        ir_insn_t *ins = &fn->insns[i];
-        if (ins->op != IR_JMP) continue;
-        /* Find the label this jumps to */
-        int target = -1;
-        for (int j = 0; j < fn->nlabels; j++) {
-            if (strcmp(fn->labels[j].name, ins->name) == 0) {
-                target = fn->labels[j].insn_idx;
-                break;
-            }
-        }
-        if (target < 0 || target >= i) continue; /* not a back-edge */
-        /* Loop from target..i — extend liveness of vregs used in this range */
-        int loop_end = i;
+    /* in_loop: true if the vreg is live in any block that has a
+     * predecessor with a higher block index (back-edge = loop) */
+    for (int b = 0; b < fn->nblocks; b++) {
+        bool block_in_loop = false;
+        for (int p = 0; p < fn->blocks[b].npreds; p++)
+            if (fn->blocks[b].preds[p] >= b) { block_in_loop = true; break; }
+        if (!block_in_loop) continue;
         for (int v = 0; v < fn->nvregs; v++) {
-            int def = fn->vregs[v].def_pos;
-            int use = fn->vregs[v].last_use;
-            if (def < 0 || use < 0) continue;
-            /* Only extend vregs defined BEFORE the loop and used inside it.
-             * Vregs defined inside the loop are re-created each iteration. */
-            if (def < target && use >= target && use < loop_end) {
-                fn->vregs[v].last_use = loop_end;
+            if (vset_test(fn->blocks[b].live_in, v) ||
+                vset_test(fn->blocks[b].live_out, v))
                 fn->vregs[v].in_loop = true;
-            }
-            /* Also mark vregs defined AND used inside the loop body */
-            if (def >= target && def < loop_end &&
-                use >= target && use <= loop_end) {
-                fn->vregs[v].in_loop = true;
-            }
         }
     }
 }
@@ -3646,13 +3648,11 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nfunctions; i++) {
         func_t *fn = &functions[i];
 
-        /* Phase 1: scan constraints and liveness */
-        scan_addressing_constraints(fn);
-        compute_liveness(fn);
-
-        /* Build CFG and run dataflow liveness (new infrastructure) */
+        /* Phase 1: build CFG, compute liveness, scan constraints */
         build_cfg(fn);
         compute_cfg_liveness(fn);
+        compute_liveness(fn);  /* derives def_pos/last_use from CFG */
+        scan_addressing_constraints(fn);
 
         /* Phase 2: try allocation with BP available */
         allocate_registers(fn, true);
