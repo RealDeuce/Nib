@@ -2542,7 +2542,8 @@ static const char *vreg_asm(func_t *fn, int v) {
     }
     if (fn->vregs[v].spill_slot >= 0) {
         int off = -(fn->vregs[v].spill_slot + 1) * 2;
-        snprintf(b, 32, "[BP%+d]", off);
+        const char *sz = fn->vregs[v].is_byte ? "byte" : "word";
+        snprintf(b, 32, "%s [BP%+d]", sz, off);
         return b;
     }
     snprintf(b, 32, "%%_%d", v); /* shouldn't happen */
