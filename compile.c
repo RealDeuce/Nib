@@ -673,6 +673,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             }
             return TV(r, sym->type);
         }
+        if (sym->vreg_seg >= 0)
+            return TV_FAR(sym->vreg, sym->vreg_seg);
         return TV(sym->vreg, sym->type);
     }
     case EXPR_REG: {
@@ -1124,10 +1126,13 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* Emit arguments */
         int argc = 0;
         int arg_vregs[16];
+        int arg_seg_vregs[16];
+        memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
         for (expr_t *a = e->u.indirect_call.args; a; a = a->next) {
             if (argc < 16) {
                 typed_vreg_t av = emit_expr_typed(a);
                 arg_vregs[argc] = av.vreg;
+                arg_seg_vregs[argc] = av.vreg_seg;
             }
             argc++;
         }
@@ -1149,7 +1154,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 symbol_t *asym = NULL;
                 if (arg_expr && arg_expr->kind == EXPR_IDENT)
                     asym = sym_lookup(arg_expr->u.ident);
-                if (asym && asym->vreg_seg >= 0) {
+                if (arg_seg_vregs[i] >= 0) {
+                    ir_args[nir_args++] = arg_vregs[i];
+                    ir_args[nir_args++] = arg_seg_vregs[i];
+                } else if (asym && asym->vreg_seg >= 0) {
                     ir_args[nir_args++] = asym->vreg;
                     ir_args[nir_args++] = asym->vreg_seg;
                 } else {
@@ -1388,6 +1396,16 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                         cerr(e->line, "far type only has `seg and `off");
                     return TV(sym->vreg, mk_type(TYPE_U16));
                 }
+            }
+            /* Check if expression itself returned a register pair */
+            if (obj.vreg_seg >= 0) {
+                if (strcmp(e->u.field.field_name, "off") == 0)
+                    return TV(obj.vreg, mk_type(TYPE_U16));
+                else if (strcmp(e->u.field.field_name, "seg") == 0)
+                    return TV(obj.vreg_seg, mk_type(TYPE_SEG));
+                else
+                    cerr(e->line, "far type only has `seg and `off");
+                return TV(obj.vreg, mk_type(TYPE_U16));
             }
             /* Memory-based far value — load from [ptr] or [ptr+2] */
             int dst = alloc_vreg();
@@ -1788,10 +1806,18 @@ static void emit_stmt(stmt_t *s) {
             }
             if (elem && elem->kind == TYPE_FAR) {
                 /* Far32 element: store both offset and segment halves */
-                int off_v = alloc_vreg();
-                int seg_v = alloc_vreg();
-                fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, val.vreg);
-                fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, val.vreg);
+                int off_v, seg_v;
+                if (val.vreg_seg >= 0) {
+                    /* Register pair — use directly */
+                    off_v = val.vreg;
+                    seg_v = val.vreg_seg;
+                } else {
+                    /* Memory-based — extract via far.off/far.seg */
+                    off_v = alloc_vreg();
+                    seg_v = alloc_vreg();
+                    fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, val.vreg);
+                    fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, val.vreg);
+                }
                 fprintf(C.nir, "    store %%%d[%%%d], %%%d\n",
                         arr_tv.vreg, sidx, off_v);
                 int sidx2 = alloc_vreg();
