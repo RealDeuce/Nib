@@ -2051,11 +2051,8 @@ static void compile_fn(decl_t *d) {
     fprintf(C.nir, "\n.fn %s", d->u.fn.name);
     if (d->is_pub) fprintf(C.nir, ", pub");
     if (d->u.fn.mods.is_far) fprintf(C.nir, ", far");
-    if (d->u.fn.mods.is_interrupt) {
-        fprintf(C.nir, ", interrupt(0x%02X)", d->u.fn.mods.interrupt_vector);
-        if (d->u.fn.mods.has_chain)
-            fprintf(C.nir, ", chain(%s)", d->u.fn.mods.chain_name);
-    }
+    if (d->u.fn.mods.is_interrupt)
+        fprintf(C.nir, ", interrupt");
     if (d->u.fn.mods.is_reentrant) fprintf(C.nir, ", reentrant");
     if (d->u.fn.mods.has_at)
         fprintf(C.nir, ", at(0x%04X:0x%04X)", d->u.fn.mods.at_seg, d->u.fn.mods.at_off);
@@ -2069,7 +2066,7 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nif, ".fn %s", d->u.fn.name);
         if (d->u.fn.mods.is_far) fprintf(C.nif, ", far");
         if (d->u.fn.mods.is_interrupt)
-            fprintf(C.nif, ", interrupt(0x%02X)", d->u.fn.mods.interrupt_vector);
+            fprintf(C.nif, ", interrupt");
         if (d->u.fn.mods.is_reentrant) fprintf(C.nif, ", reentrant");
         fprintf(C.nif, "\n");
 
@@ -2149,10 +2146,6 @@ static void compile_fn(decl_t *d) {
     }
 
     /* Add chain variable if present */
-    if (d->u.fn.mods.has_chain) {
-        sym_add(d->u.fn.mods.chain_name, mk_type(TYPE_VOID), false);
-    }
-
     /* Resolve all constant references to literals before emission */
     resolve_constants_stmt(d->u.fn.body);
 

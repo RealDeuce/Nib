@@ -205,10 +205,7 @@ typedef struct {
     bool        is_pub;
     bool        is_far;
     bool        is_interrupt;
-    int         int_vector;
     bool        is_reentrant;
-    bool        has_chain;
-    char        chain_name[64];
     bool        has_at;
     int         at_seg;
     int         at_off;
@@ -421,10 +418,12 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (strcmp(word, "pub") == 0) fn->is_pub = true;
         else if (strcmp(word, "far") == 0) fn->is_far = true;
         else if (strcmp(word, "reentrant") == 0) fn->is_reentrant = true;
-        else if (strncmp(word, "interrupt(", 10) == 0) {
+        else if (strcmp(word, "interrupt") == 0) {
             fn->is_interrupt = true;
-            fn->int_vector = (int)strtol(word + 10, NULL, 0);
-            /* Skip the ) that read_word left behind */
+        }
+        else if (strncmp(word, "interrupt(", 10) == 0) {
+            /* Legacy: interrupt(N) — vector number ignored */
+            fn->is_interrupt = true;
             p = skip_ws(p);
             if (*p == ')') p++;
         }
@@ -440,12 +439,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             if (*p == ')') p++;
         }
         else if (strncmp(word, "chain(", 6) == 0) {
-            fn->has_chain = true;
-            /* read_word stops at ), so the name is everything after "chain(" */
-            int len = strlen(word + 6);
-            memcpy(fn->chain_name, word + 6, len);
-            fn->chain_name[len] = '\0';
-            /* Skip the ) that read_word left behind */
+            /* chain() is deprecated — _vec always exists.
+             * Skip the argument for backward compat. */
             p = skip_ws(p);
             if (*p == ')') p++;
         }
@@ -2988,7 +2983,7 @@ static void emit_function(func_t *fn) {
 
     /* Prologue */
     if (fn->is_interrupt) {
-        fprintf(out_asm, "; interrupt handler vector 0x%02X\n", fn->int_vector);
+        fprintf(out_asm, "; interrupt handler\n");
         fprintf(out_asm, "    pusha\n");
         if (fn->is_reentrant)
             fprintf(out_asm, "    sti\n");
@@ -3256,10 +3251,7 @@ static void emit_function(func_t *fn) {
              * The emitter just emits the call instruction itself. */
 
             /* Emit the actual call instruction */
-            if (fn->has_chain && strcmp(ins->name, fn->chain_name) == 0) {
-                fprintf(out_asm, "    pushf\n");
-                fprintf(out_asm, "    call far [%s_vec]\n", fn->chain_name);
-            } else {
+            {
                 bool found_extern = false;
                 for (int e = 0; e < nexterns; e++) {
                     if (strcmp(externs[e].name, ins->name) == 0) {
@@ -3602,10 +3594,11 @@ static void emit_function(func_t *fn) {
         }
     }
 
-    /* Emit chain vector storage for interrupt handlers */
-    if (fn->has_chain) {
-        fprintf(out_asm, "%s_vec dw 0, 0 ; saved vector for chaining\n",
-                fn->chain_name);
+    /* Emit saved vector storage for interrupt handlers.
+     * Uses the bare function name so Nib code can reference it
+     * with @name_vec or &name_vec. */
+    if (fn->is_interrupt) {
+        fprintf(out_asm, "%s_vec dw 0, 0\n", fn->name);
     }
 
     /* Emit per-function constant pool (strings, far refs) */

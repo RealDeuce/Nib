@@ -141,7 +141,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 
 /* ---- Keywords ---- */
 %token KW_FN KW_STRUCT KW_ALIGNED KW_EXTERN KW_FAR KW_FAR32
-%token KW_INTERRUPT KW_CHAIN KW_REENTRANT
+%token KW_INTERRUPT KW_REENTRANT
 %token KW_IF KW_ELSE KW_WHILE KW_FOR KW_IN
 %token KW_RETURN KW_BREAK KW_CONTINUE
 %token KW_ASM KW_VALUE KW_USE
@@ -369,11 +369,10 @@ fn_modifier
     ;
 
 interrupt_clause
-    : KW_INTERRUPT '(' LIT_INT ')'
+    : KW_INTERRUPT '(' ')'
+        { current_mods.is_interrupt = true; }
+    | KW_INTERRUPT '(' LIT_INT ')'
         { current_mods.is_interrupt = true; current_mods.interrupt_vector = $3; }
-    | KW_INTERRUPT '(' LIT_INT ',' KW_CHAIN IDENT ')'
-        { current_mods.is_interrupt = true; current_mods.interrupt_vector = $3;
-          current_mods.has_chain = true; current_mods.chain_name = $6; }
     ;
 
 return_clause

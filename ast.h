@@ -336,8 +336,7 @@ typedef struct {
     bool is_reentrant;
     bool is_interrupt;
     int  interrupt_vector;
-    bool has_chain;
-    char *chain_name;
+    /* chain removed — _vec always emitted for interrupt handlers */
     bool has_preserves;
     bool is_clobbers;       /* true if clobbers() used instead of preserves() */
     reg_list_t *preserves;
