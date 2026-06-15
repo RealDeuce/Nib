@@ -2281,6 +2281,40 @@ static void insert_fixup_moves(func_t *fn) {
             continue;
         }
 
+        /* ---- Loadmem/storemem address register fixup ---- */
+        if (ins->op == IR_LOADMEM || ins->op == IR_STOREMEM) {
+            /* If address references a physical register (e.g., [ES:SI])
+             * and the vreg preferring that register got assigned elsewhere,
+             * insert a mov to place the value in the expected register. */
+            for (int preg = 0; preg < NUM_PREGS; preg++) {
+                const char *rn = preg_name[preg];
+                const char *p2 = ins->name;
+                bool found = false;
+                while ((p2 = strstr(p2, rn)) != NULL) {
+                    char before = (p2 > ins->name) ? p2[-1] : '[';
+                    char after = p2[strlen(rn)];
+                    if (!isalpha(before) && !isalpha(after))
+                        { found = true; break; }
+                    p2++;
+                }
+                if (!found) continue;
+                int best_v = -1, best_def = -1;
+                for (int v = 0; v < fn->nvregs; v++) {
+                    if (fn->vregs[v].prefer != preg) continue;
+                    if (fn->vregs[v].assigned == preg) continue;
+                    if (fn->vregs[v].assigned == PREG_NONE) continue;
+                    if (fn->vregs[v].def_pos > (int)i) continue;
+                    if (fn->vregs[v].def_pos > best_def)
+                        { best_def = fn->vregs[v].def_pos; best_v = v; }
+                }
+                if (best_v >= 0)
+                    rins_asm(fn, "    mov %s, %s",
+                             rn, preg_name[fn->vregs[best_v].assigned]);
+            }
+            rins_ir(fn, i);
+            continue;
+        }
+
         /* ---- Call argument fixup + BP caller-save ---- */
         if (ins->op == IR_CALL) {
             /* Build callee preserves set */
@@ -3259,47 +3293,7 @@ static void emit_function(func_t *fn) {
 
         case IR_LOADMEM:
         case IR_STOREMEM: {
-            /* Fix up address registers: if the address expression
-             * references a physical register (e.g., [ES:SI]) and a
-             * vreg with .prefer for that register ended up elsewhere,
-             * emit a mov to place the value in the expected register. */
-            for (int preg = 0; preg < NUM_PREGS; preg++) {
-                const char *rn = preg_name[preg];
-                /* Check if this register name appears in the address */
-                const char *p2 = ins->name;
-                bool found = false;
-                while ((p2 = strstr(p2, rn)) != NULL) {
-                    /* Verify it's a whole word (not a substring) */
-                    char before = (p2 > ins->name) ? p2[-1] : '[';
-                    char after = p2[strlen(rn)];
-                    if (!isalpha(before) && !isalpha(after)) {
-                        found = true;
-                        break;
-                    }
-                    p2++;
-                }
-                if (!found) continue;
-                /* Find the most recently defined vreg that prefers
-                 * this register but isn't assigned to it.  The vreg
-                 * may appear dead (last_use < i) because the loadmem/
-                 * storemem address uses the physical register without
-                 * referencing the vreg, so we search by def_pos. */
-                int best_v = -1, best_def = -1;
-                for (int v = 0; v < fn->nvregs; v++) {
-                    if (fn->vregs[v].prefer != preg) continue;
-                    if (fn->vregs[v].assigned == preg) continue;
-                    if (fn->vregs[v].assigned == PREG_NONE) continue;
-                    if (fn->vregs[v].def_pos > (int)i) continue;
-                    if (fn->vregs[v].def_pos > best_def) {
-                        best_def = fn->vregs[v].def_pos;
-                        best_v = v;
-                    }
-                }
-                if (best_v >= 0) {
-                    fprintf(out_asm, "    mov %s, %s\n",
-                            rn, preg_name[fn->vregs[best_v].assigned]);
-                }
-            }
+            /* Address register fixup handled by move insertion pass */
 
             if (ins->op == IR_LOADMEM) {
                 bool dst_byte = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
