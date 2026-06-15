@@ -2069,6 +2069,7 @@ static void import_nif(const char *path, int use_line) {
     char cur_fn[64] = "";
     int cur_nparams = 0;
     type_t *cur_ret = NULL;
+    bool cur_param_is_far[16] = {0};
     while (fgets(line, sizeof(line), fp)) {
         int len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
@@ -2085,6 +2086,7 @@ static void import_nif(const char *path, int use_line) {
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
             cur_ret = NULL;
+            memset(cur_param_is_far, 0, sizeof(cur_param_is_far));
             continue;
         }
 
@@ -2096,11 +2098,22 @@ static void import_nif(const char *path, int use_line) {
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
             cur_ret = NULL;
+            memset(cur_param_is_far, 0, sizeof(cur_param_is_far));
             continue;
         }
 
-        /* .param */
+        /* .param %N, type, "name" */
         if (strncmp(p, ".param", 6) == 0) {
+            p += 6;
+            /* Skip vreg */
+            while (*p && *p != ',') p++;
+            if (*p == ',') p++;
+            p = nif_skip_ws(p);
+            /* Read type */
+            char ptype[32];
+            nif_read_word(p, ptype, sizeof(ptype));
+            if (cur_nparams < 16)
+                cur_param_is_far[cur_nparams] = (strcmp(ptype, "far") == 0);
             cur_nparams++;
             continue;
         }
@@ -2117,7 +2130,18 @@ static void import_nif(const char *path, int use_line) {
         /* .endfn / .endextern — register the function */
         if (strncmp(p, ".endfn", 6) == 0 || strncmp(p, ".endextern", 10) == 0) {
             if (cur_fn[0]) {
+                int fi = C.nfunctions;
                 register_function(cur_fn, cur_nparams, cur_ret, NULL);
+                /* Apply far flags parsed from .param lines */
+                if (fi < C.nfunctions) {
+                    int ir_count = 0;
+                    for (int pi = 0; pi < cur_nparams && pi < 16; pi++) {
+                        C.functions[fi].param_is_far[pi] = cur_param_is_far[pi];
+                        ir_count++;
+                        if (cur_param_is_far[pi]) ir_count++;
+                    }
+                    C.functions[fi].nparams_ir = ir_count;
+                }
             }
             cur_fn[0] = '\0';
             continue;
