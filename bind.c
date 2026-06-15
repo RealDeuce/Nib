@@ -141,6 +141,7 @@ typedef struct {
     bool    needs_base;        /* true if used as base: must be BX or BP */
     bool    needs_index;       /* true if used as index: must be SI or DI */
     bool    needs_cl;          /* true if used as shift/rotate count: must be CL */
+    bool    is_cs_ref;         /* true if this vreg points to constant pool (CS segment) */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
     /* Liveness */
@@ -651,6 +652,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 /* Label reference (e.g., _C0 for constant pool) */
                 ins->has_imm = false;
                 p = read_word(p, ins->name, sizeof(ins->name));
+                /* Constant pool refs live in CS (code segment) */
+                if (ins->name[0] == '_' && ins->name[1] == 'C' &&
+                    ins->dst >= 0 && ins->dst < MAX_VREGS)
+                    fn->vregs[ins->dst].is_cs_ref = true;
             } else {
                 ins->has_imm = true;
                 ins->imm = (int)strtol(p, (char **)&p, 0);
@@ -1762,14 +1767,26 @@ static void emit_function(func_t *fn) {
             }
             if (strcmp(op, "far.off") == 0) {
                 /* Load offset word from [ptr+0] */
-                fprintf(out_asm, "    mov %s, [%s]\n",
-                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                const char *seg = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                                   fn->vregs[ins->src1].is_cs_ref) ? "CS:" : "";
+                fprintf(out_asm, "    mov %s, %s[%s]\n",
+                        vreg_asm(fn, ins->dst), seg, vreg_asm(fn, ins->src1));
                 break;
             }
             if (strcmp(op, "far.seg") == 0) {
                 /* Load segment word from [ptr+2] */
-                fprintf(out_asm, "    mov %s, [%s+2]\n",
-                        vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                const char *seg = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                                   fn->vregs[ins->src1].is_cs_ref) ? "CS:" : "";
+                const char *d = vreg_asm(fn, ins->dst);
+                if (seg[0] && fn->vregs[ins->dst].is_seg) {
+                    /* seg reg can't load from seg-overridden mem directly */
+                    fprintf(out_asm, "    mov AX, %s[%s+2]\n",
+                            seg, vreg_asm(fn, ins->src1));
+                    fprintf(out_asm, "    mov %s, AX\n", d);
+                } else {
+                    fprintf(out_asm, "    mov %s, %s[%s+2]\n",
+                            d, seg, vreg_asm(fn, ins->src1));
+                }
                 break;
             }
             if (strcmp(op, "xlat") == 0) {
