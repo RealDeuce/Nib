@@ -1767,25 +1767,29 @@ static void emit_function(func_t *fn) {
             }
             if (strcmp(op, "far.off") == 0) {
                 /* Load offset word from [ptr+0] */
-                const char *seg = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                                   fn->vregs[ins->src1].is_cs_ref) ? "CS:" : "";
-                fprintf(out_asm, "    mov %s, %s[%s]\n",
-                        vreg_asm(fn, ins->dst), seg, vreg_asm(fn, ins->src1));
+                bool cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                           fn->vregs[ins->src1].is_cs_ref);
+                if (cs)
+                    fprintf(out_asm, "    mov %s, [CS:%s]\n",
+                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
+                else
+                    fprintf(out_asm, "    mov %s, [%s]\n",
+                            vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
                 break;
             }
             if (strcmp(op, "far.seg") == 0) {
                 /* Load segment word from [ptr+2] */
-                const char *seg = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                                   fn->vregs[ins->src1].is_cs_ref) ? "CS:" : "";
+                bool cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                           fn->vregs[ins->src1].is_cs_ref);
                 const char *d = vreg_asm(fn, ins->dst);
-                if (seg[0] && fn->vregs[ins->dst].is_seg) {
-                    /* seg reg can't load from seg-overridden mem directly */
-                    fprintf(out_asm, "    mov AX, %s[%s+2]\n",
-                            seg, vreg_asm(fn, ins->src1));
+                const char *s = vreg_asm(fn, ins->src1);
+                if (cs && fn->vregs[ins->dst].is_seg) {
+                    fprintf(out_asm, "    mov AX, [CS:%s+2]\n", s);
                     fprintf(out_asm, "    mov %s, AX\n", d);
+                } else if (cs) {
+                    fprintf(out_asm, "    mov %s, [CS:%s+2]\n", d, s);
                 } else {
-                    fprintf(out_asm, "    mov %s, %s[%s+2]\n",
-                            d, seg, vreg_asm(fn, ins->src1));
+                    fprintf(out_asm, "    mov %s, [%s+2]\n", d, s);
                 }
                 break;
             }
