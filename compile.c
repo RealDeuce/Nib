@@ -864,6 +864,22 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             fprintf(C.nir, "    nop\n");
             return TV(dst, mk_type(TYPE_VOID));
         }
+        if (strcmp(fn_name, "pushf") == 0) {
+            fprintf(C.nir, "    pushf\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "popf") == 0) {
+            fprintf(C.nir, "    popf\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "cli") == 0) {
+            fprintf(C.nir, "    cli\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+        if (strcmp(fn_name, "sti") == 0) {
+            fprintf(C.nir, "    sti\n");
+            return TV(dst, mk_type(TYPE_VOID));
+        }
         if (strcmp(fn_name, "salc") == 0) {
             fprintf(C.nir, "    salc %%%d\n", dst);
             return TV(dst, mk_type(TYPE_U8));

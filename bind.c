@@ -1026,6 +1026,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                  strcmp(opname, "rep") == 0 || strcmp(opname, "repe") == 0 ||
                  strcmp(opname, "repne") == 0 ||
                  strcmp(opname, "push") == 0 || strcmp(opname, "pop") == 0 ||
+                 strcmp(opname, "pushf") == 0 || strcmp(opname, "popf") == 0 ||
+                 strcmp(opname, "cli") == 0 || strcmp(opname, "sti") == 0 ||
                  /* Conditional jumps from flag-check blocks */
                  strcmp(opname, "int") == 0) {
             /* Pass-through: emit as literal assembly */

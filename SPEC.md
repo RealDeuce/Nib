@@ -1076,6 +1076,10 @@ single-bit struct fields.
 halt()                      // HLT — halt until next interrupt
 nop()                       // NOP — no operation
 salc() -> u8                // SALC — AL = CF ? 0xFF : 0x00
+cli()                       // CLI — disable maskable interrupts
+sti()                       // STI — enable maskable interrupts
+pushf()                     // PUSHF — push FLAGS onto stack
+popf()                      // POPF — pop FLAGS from stack
 emulate(seg, entry)         // BRKEM — enter 8080 emulation mode
 ```
 
