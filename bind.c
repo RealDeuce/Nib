@@ -2771,35 +2771,26 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             bool src_is_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
                                 fn->vregs[ins->src1].is_byte);
             if (src_is_byte) {
-                int src_preg = fn->vregs[ins->src1].assigned;
-                int parent = (src_preg >= PREG_AL && src_preg <= PREG_BH)
-                             ? preg_alias_parent[src_preg] : -1;
-                int wd_preg = (parent >= 0) ? parent : PREG_AX;
+                /* Byte IMUL: zero-extend src into dst's parent word,
+                 * then use three-operand IMUL to keep src untouched.
+                 * dst's parent word is safe since dst is being defined. */
+                int dst_preg = fn->vregs[ins->dst].assigned;
+                int dst_parent = (dst_preg >= PREG_AL && dst_preg <= PREG_BH)
+                                 ? preg_alias_parent[dst_preg] : -1;
+                int wd_preg = (dst_parent >= 0) ? dst_parent : PREG_AX;
                 const char *wd = preg_name[wd_preg];
                 const char *lo = preg_name[preg_alias_lo[wd_preg]];
                 const char *hi = preg_name[preg_alias_hi[wd_preg]];
-                int other_half = (src_preg == preg_alias_lo[wd_preg])
-                                 ? preg_alias_hi[wd_preg] : preg_alias_lo[wd_preg];
-                bool save_other = false;
-                for (int v2 = 0; v2 < fn->nvregs; v2++) {
-                    if (fn->vregs[v2].assigned == other_half &&
-                        fn->vregs[v2].def_pos <= (int)i &&
-                        fn->vregs[v2].last_use > (int)i)
-                        { save_other = true; break; }
-                }
-                if (save_other) fprintf(out_asm, "    push %s\n", wd);
-                if (src_preg == preg_alias_hi[wd_preg]) {
-                    fprintf(out_asm, "    mov %s, %s\n", lo, vreg_asm(fn, ins->src1));
-                    fprintf(out_asm, "    xor %s, %s\n", hi, hi);
-                } else {
-                    fprintf(out_asm, "    xor %s, %s\n", hi, hi);
-                }
-                fprintf(out_asm, "    imul %s, %d\n", wd, ins->imm);
-                /* Result is in lo byte of the word register, not src1 */
+                const char *s = vreg_asm(fn, ins->src1);
+                /* Zero-extend src into the word register */
+                if (strcmp(s, lo) != 0)
+                    fprintf(out_asm, "    mov %s, %s\n", lo, s);
+                fprintf(out_asm, "    xor %s, %s\n", hi, hi);
+                fprintf(out_asm, "    imul %s, %s, %d\n", wd, wd, ins->imm);
+                /* Result low byte is in lo — move to dst if different */
                 const char *d = vreg_asm(fn, ins->dst);
                 if (strcmp(d, lo) != 0)
                     fprintf(out_asm, "    mov %s, %s\n", d, lo);
-                if (save_other) fprintf(out_asm, "    pop %s\n", wd);
                 return;
             } else {
                 fprintf(out_asm, "    imul %s, %d\n", vreg_asm(fn, ins->src1), ins->imm);
