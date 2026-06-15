@@ -1873,10 +1873,44 @@ static void emit_function(func_t *fn) {
             if (strcmp(op, "mul") == 0 || strcmp(op, "imul") == 0) {
                 /* MUL/IMUL: AX * src -> DX:AX */
                 if (ins->has_imm) {
-                    /* IMUL reg, imm (186+ three-operand form)
-                     * Result goes into src1's register. Move to dst. */
-                    fprintf(out_asm, "    imul %s, %d\n",
-                            vreg_asm(fn, ins->src1), ins->imm);
+                    /* IMUL reg, imm (186+ three-operand form).
+                     * Only works with word registers. For byte regs,
+                     * zero-extend to word, multiply, result in word. */
+                    bool src_is_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                                        fn->vregs[ins->src1].is_byte);
+                    if (src_is_byte) {
+                        /* Zero-extend byte to AX, multiply as word.
+                         * Use AX as scratch — push/pop to preserve. */
+                        const char *s = vreg_asm(fn, ins->src1);
+                        int src_preg = fn->vregs[ins->src1].assigned;
+                        int parent = (src_preg >= PREG_AL && src_preg <= PREG_BH)
+                                     ? preg_alias_parent[src_preg] : -1;
+                        if (parent == PREG_AX) {
+                            /* src is AL or AH — zero-extend in place */
+                            if (src_preg == PREG_AH) {
+                                fprintf(out_asm, "    mov AL, AH\n");
+                                fprintf(out_asm, "    xor AH, AH\n");
+                            } else {
+                                fprintf(out_asm, "    xor AH, AH\n");
+                            }
+                            fprintf(out_asm, "    imul AX, %d\n", ins->imm);
+                        } else {
+                            /* src is BL/BH/CL/CH/DL/DH — use parent word */
+                            const char *lo = preg_name[preg_alias_lo[parent]];
+                            const char *hi = preg_name[preg_alias_hi[parent]];
+                            const char *wd = preg_name[parent];
+                            if (src_preg == preg_alias_hi[parent]) {
+                                fprintf(out_asm, "    mov %s, %s\n", lo, s);
+                                fprintf(out_asm, "    xor %s, %s\n", hi, hi);
+                            } else {
+                                fprintf(out_asm, "    xor %s, %s\n", hi, hi);
+                            }
+                            fprintf(out_asm, "    imul %s, %d\n", wd, ins->imm);
+                        }
+                    } else {
+                        fprintf(out_asm, "    imul %s, %d\n",
+                                vreg_asm(fn, ins->src1), ins->imm);
+                    }
                     emit_mov(fn, ins->dst, ins->src1);
                 } else {
                     fprintf(out_asm, "    %s %s\n", op, vreg_asm(fn, ins->src2));
