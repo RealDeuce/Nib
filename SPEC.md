@@ -438,17 +438,33 @@ address in a binder-chosen register.
 
 ### Extern functions
 
-Functions not written in Nib (ROM routines, hand-written assembly) are
-declared `extern`. Since the binder cannot analyze their bodies, the
-declaration must fully specify register assignments and clobbers.
+Extern declarations describe calling conventions for functions whose
+bodies the binder cannot analyze. There are two forms:
+
+**Declaration form** — for ROM routines, BIOS calls, third-party
+binaries. Includes a fixed address or interrupt vector:
 
 ```
-extern fn far rom_read(port: u16 in DX) -> u16 in AX
+extern fn far [0xF000:0x0100] rom_init()
+    preserves(BP, DS, ES, SS);
+
+extern fn interrupt(0x21) dos_putchar(svc: u8 in AH, char: u8 in DL)
     preserves(BX, CX, SI, DI, BP, DS, ES, SS);
 ```
 
-The `in REG` clause pins a parameter or return value to a specific
-register. The binder treats these as fixed constraints — non-negotiable
+**Implementation form** — a `pub extern` that describes the calling
+convention of a private function accessed through a jump table. It
+has no body or address — it's purely an ABI descriptor exported to
+the `.nif` for use with indirect calls (see Indirect calls below):
+
+```
+// In lcd.nib, alongside the private fn print_impl(...):
+pub extern fn print(str: far in ES:SI, len: u16 in CX)
+    clobbers(FLAGS);
+```
+
+Both forms require `in REG` on each parameter and return value.
+The binder treats these as fixed constraints — non-negotiable
 assignments that the rest of the call graph must work around.
 
 The `preserves` clause lists which registers the function guarantees
