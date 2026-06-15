@@ -154,16 +154,37 @@ typedef struct {
     bool    live;           /* currently live in analysis */
 } vreg_info_t;
 
-/* Basic block */
+/* Basic block — CFG node for dataflow liveness */
+#define VREG_WORDS ((MAX_VREGS + 63) / 64)
+
 typedef struct {
-    int     start, end;     /* insn index range [start, end) */
-    int     succs[4];       /* successor block indices */
-    int     nsuccs;
-    int     preds[16];      /* predecessor block indices */
-    int     npreds;
-    uint64_t live_in;       /* bitset of live vregs at block entry */
-    uint64_t live_out;      /* bitset of live vregs at block exit */
+    int      start, end;            /* insn index range [start, end) */
+    int      succs[4];              /* successor block indices */
+    int      nsuccs;
+    int      preds[16];             /* predecessor block indices */
+    int      npreds;
+    uint64_t live_in[VREG_WORDS];   /* vregs live at block entry */
+    uint64_t live_out[VREG_WORDS];  /* vregs live at block exit */
+    uint64_t defs[VREG_WORDS];     /* vregs defined in this block */
+    uint64_t uses[VREG_WORDS];     /* vregs used before def in this block */
 } bblock_t;
+
+/* Bitset helpers for vreg sets */
+static inline void vset_set(uint64_t *s, int v)   { s[v >> 6] |= (1ULL << (v & 63)); }
+static inline void vset_clear(uint64_t *s, int v) { s[v >> 6] &= ~(1ULL << (v & 63)); }
+static inline bool vset_test(const uint64_t *s, int v) { return (s[v >> 6] >> (v & 63)) & 1; }
+static inline void vset_zero(uint64_t *s) { memset(s, 0, VREG_WORDS * sizeof(uint64_t)); }
+static inline void vset_or(uint64_t *dst, const uint64_t *src) {
+    for (int i = 0; i < VREG_WORDS; i++) dst[i] |= src[i];
+}
+static inline void vset_diff(uint64_t *dst, const uint64_t *a, const uint64_t *b) {
+    /* dst = a & ~b */
+    for (int i = 0; i < VREG_WORDS; i++) dst[i] = a[i] & ~b[i];
+}
+static inline bool vset_equal(const uint64_t *a, const uint64_t *b) {
+    for (int i = 0; i < VREG_WORDS; i++) if (a[i] != b[i]) return false;
+    return true;
+}
 
 /* Per-function constant pool entry */
 #define MAX_FN_CONSTS 64
@@ -1499,6 +1520,204 @@ static void compute_liveness(func_t *fn) {
                 use >= target && use <= loop_end) {
                 fn->vregs[v].in_loop = true;
             }
+        }
+    }
+}
+
+/* ================================================================
+ * CFG construction — split IR into basic blocks
+ * ================================================================ */
+
+static void build_cfg(func_t *fn) {
+    fn->nblocks = 0;
+    if (fn->ninsns == 0) return;
+
+    /* Pass 1: identify block boundaries.
+     * A new block starts at:
+     *   - instruction 0
+     *   - any label target
+     *   - the instruction after any jump/branch/ret */
+    bool is_leader[MAX_INSNS];
+    memset(is_leader, 0, sizeof(is_leader));
+    is_leader[0] = true;
+
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->op == IR_LABEL) {
+            is_leader[i] = true;
+        }
+        if (ins->op == IR_JMP || ins->op == IR_JZ || ins->op == IR_CJMP ||
+            ins->op == IR_RET || ins->op == IR_LOOP) {
+            /* Instruction after a branch starts a new block */
+            if (i + 1 < fn->ninsns)
+                is_leader[i + 1] = true;
+        }
+    }
+
+    /* Pass 2: create blocks from leaders */
+    for (int i = 0; i < fn->ninsns; i++) {
+        if (!is_leader[i]) continue;
+        if (fn->nblocks >= MAX_BLOCKS) break;
+        bblock_t *bb = &fn->blocks[fn->nblocks++];
+        memset(bb, 0, sizeof(*bb));
+        bb->start = i;
+        /* Block extends until the next leader */
+        int end = i + 1;
+        while (end < fn->ninsns && !is_leader[end]) end++;
+        bb->end = end;
+    }
+
+    /* Pass 3: connect edges (successors and predecessors) */
+    for (int b = 0; b < fn->nblocks; b++) {
+        bblock_t *bb = &fn->blocks[b];
+        int last = bb->end - 1;
+        ir_insn_t *term = &fn->insns[last];
+
+        /* Check if the block ends with a terminator */
+        bool is_term = (term->op == IR_JMP || term->op == IR_RET ||
+                        term->op == IR_TAILCALL || term->op == IR_GOTO_FN);
+
+        /* Conditional branch: fall-through + jump target */
+        if (term->op == IR_JZ || term->op == IR_CJMP || term->op == IR_LOOP) {
+            /* Fall-through to next block */
+            if (b + 1 < fn->nblocks && bb->nsuccs < 4)
+                bb->succs[bb->nsuccs++] = b + 1;
+            /* Jump target — find the block containing the label */
+            const char *target = term->name;
+            for (int t = 0; t < fn->nblocks; t++) {
+                if (fn->insns[fn->blocks[t].start].op == IR_LABEL &&
+                    strcmp(fn->insns[fn->blocks[t].start].name, target) == 0) {
+                    if (bb->nsuccs < 4)
+                        bb->succs[bb->nsuccs++] = t;
+                    break;
+                }
+            }
+        }
+        /* Unconditional jump: just the target */
+        else if (term->op == IR_JMP) {
+            const char *target = term->name;
+            for (int t = 0; t < fn->nblocks; t++) {
+                if (fn->insns[fn->blocks[t].start].op == IR_LABEL &&
+                    strcmp(fn->insns[fn->blocks[t].start].name, target) == 0) {
+                    if (bb->nsuccs < 4)
+                        bb->succs[bb->nsuccs++] = t;
+                    break;
+                }
+            }
+        }
+        /* Non-terminator: fall through to next block */
+        else if (!is_term && b + 1 < fn->nblocks) {
+            bb->succs[bb->nsuccs++] = b + 1;
+        }
+        /* RET/TAILCALL/GOTO_FN: no successors */
+    }
+
+    /* Build predecessor lists from successors */
+    for (int b = 0; b < fn->nblocks; b++) {
+        bblock_t *bb = &fn->blocks[b];
+        for (int s = 0; s < bb->nsuccs; s++) {
+            bblock_t *succ = &fn->blocks[bb->succs[s]];
+            if (succ->npreds < 16)
+                succ->preds[succ->npreds++] = b;
+        }
+    }
+}
+
+/* ================================================================
+ * Dataflow liveness on CFG
+ * ================================================================ */
+
+/* Collect def and use sets for a basic block */
+static void compute_block_def_use(func_t *fn, bblock_t *bb) {
+    vset_zero(bb->defs);
+    vset_zero(bb->uses);
+
+    for (int i = bb->start; i < bb->end; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+
+        /* Uses: vregs read by this instruction.
+         * Only counts as a use if not already defined in this block. */
+        int use_vregs[16];
+        int nuses = 0;
+        if (ins->src1 >= 0) use_vregs[nuses++] = ins->src1;
+        if (ins->src2 >= 0) use_vregs[nuses++] = ins->src2;
+        for (int j = 0; j < 8; j++)
+            if (ins->extra_args[j] >= 0) use_vregs[nuses++] = ins->extra_args[j];
+        /* dst is a "use" for stores (the address is read) */
+        if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
+             ins->op == IR_STOREFIELD) && ins->dst >= 0)
+            use_vregs[nuses++] = ins->dst;
+
+        for (int u = 0; u < nuses; u++) {
+            int v = use_vregs[u];
+            if (v >= 0 && v < fn->nvregs && !vset_test(bb->defs, v))
+                vset_set(bb->uses, v);
+        }
+
+        /* Defs: vreg written by this instruction */
+        if (ins->dst >= 0 && ins->dst < fn->nvregs &&
+            ins->op != IR_STORE && ins->op != IR_STOREMEM &&
+            ins->op != IR_STOREFIELD)
+            vset_set(bb->defs, ins->dst);
+    }
+}
+
+/* Run backward dataflow liveness to fixpoint */
+static void compute_cfg_liveness(func_t *fn) {
+    if (fn->nblocks == 0) return;
+
+    /* Compute local def/use sets */
+    for (int b = 0; b < fn->nblocks; b++)
+        compute_block_def_use(fn, &fn->blocks[b]);
+
+    /* Initialize live_in and live_out to empty */
+    for (int b = 0; b < fn->nblocks; b++) {
+        vset_zero(fn->blocks[b].live_in);
+        vset_zero(fn->blocks[b].live_out);
+    }
+
+    /* Parameters are live-in at entry block */
+    for (int p = 0; p < fn->nparams; p++) {
+        int v = fn->param_vregs[p];
+        if (v >= 0 && v < fn->nvregs)
+            vset_set(fn->blocks[0].live_in, v);
+    }
+
+    /* Iterate until stable */
+    bool changed = true;
+    int max_iter = fn->nblocks * 4 + 10; /* safety bound */
+    while (changed && max_iter-- > 0) {
+        changed = false;
+        /* Process blocks in reverse order (approximate reverse postorder) */
+        for (int b = fn->nblocks - 1; b >= 0; b--) {
+            bblock_t *bb = &fn->blocks[b];
+            uint64_t old_in[VREG_WORDS], old_out[VREG_WORDS];
+            memcpy(old_in, bb->live_in, sizeof(old_in));
+            memcpy(old_out, bb->live_out, sizeof(old_out));
+
+            /* live_out = union of live_in of all successors */
+            vset_zero(bb->live_out);
+            for (int s = 0; s < bb->nsuccs; s++)
+                vset_or(bb->live_out, fn->blocks[bb->succs[s]].live_in);
+
+            /* live_in = uses | (live_out - defs) */
+            uint64_t diff[VREG_WORDS];
+            vset_diff(diff, bb->live_out, bb->defs);
+            memcpy(bb->live_in, bb->uses, VREG_WORDS * sizeof(uint64_t));
+            vset_or(bb->live_in, diff);
+
+            /* Preserve parameter liveness at entry */
+            if (b == 0) {
+                for (int p = 0; p < fn->nparams; p++) {
+                    int v = fn->param_vregs[p];
+                    if (v >= 0 && v < fn->nvregs)
+                        vset_set(bb->live_in, v);
+                }
+            }
+
+            if (!vset_equal(bb->live_in, old_in) ||
+                !vset_equal(bb->live_out, old_out))
+                changed = true;
         }
     }
 }
@@ -3430,6 +3649,10 @@ int main(int argc, char **argv) {
         /* Phase 1: scan constraints and liveness */
         scan_addressing_constraints(fn);
         compute_liveness(fn);
+
+        /* Build CFG and run dataflow liveness (new infrastructure) */
+        build_cfg(fn);
+        compute_cfg_liveness(fn);
 
         /* Phase 2: try allocation with BP available */
         allocate_registers(fn, true);
