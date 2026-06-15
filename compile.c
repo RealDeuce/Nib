@@ -486,7 +486,7 @@ static type_t *check_compare(type_t *l, type_t *r, int line) {
  * NIR emission — expression compilation
  * ================================================================ */
 
-typedef struct { int vreg; type_t *type; } typed_vreg_t;
+typedef struct { int vreg; int vreg_seg; type_t *type; } typed_vreg_t;
 
 static typed_vreg_t emit_expr_typed(expr_t *e);
 
@@ -584,13 +584,18 @@ static int emit_expr(expr_t *e) {
 }
 
 static typed_vreg_t TV(int vreg, type_t *type) {
-    typed_vreg_t tv = { vreg, type };
+    typed_vreg_t tv = { vreg, -1, type };
     if (type && C.nir) {
         if (type->kind == TYPE_U8)
             fprintf(C.nir, ".vreg %%%d, u8\n", vreg);
         else if (type->kind == TYPE_SEG)
             fprintf(C.nir, ".vreg %%%d, seg\n", vreg);
     }
+    return tv;
+}
+
+static typed_vreg_t TV_FAR(int off_vreg, int seg_vreg) {
+    typed_vreg_t tv = { off_vreg, seg_vreg, mk_type(TYPE_FAR) };
     return tv;
 }
 
@@ -628,14 +633,14 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(r, mk_type_array(mk_type(TYPE_U8), slen));
     }
     case EXPR_IDENT: {
-        /* Interrupt handler name — far32 constant via far.ref */
+        /* Interrupt handler name — far32 constant (label + SEG) */
         if (is_isr(e->u.ident)) {
-            int r = alloc_vreg();
-            int cid = C.next_const++;
-            fprintf(C.nir, ".const _C%d, far.ref %s\n", cid, e->u.ident);
-            fprintf(C.nir, "    mov %%%d, _C%d\n", r, cid);
-            fprintf(C.nir, ".vreg %%%d, u16, csref\n", r);
-            return TV(r, mk_type(TYPE_FAR));
+            int off = alloc_vreg();
+            int seg = alloc_vreg();
+            fprintf(C.nir, "    mov %%%d, %s\n", off, e->u.ident);
+            fprintf(C.nir, "    mov %%%d, SEG %s\n", seg, e->u.ident);
+            fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+            return TV_FAR(off, seg);
         }
         symbol_t *sym = sym_lookup(e->u.ident);
         if (!sym) {
@@ -760,27 +765,27 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (e->u.unop.op == NIB_FAR_ADDR &&
             e->u.unop.operand->kind == EXPR_IDENT &&
             find_function(e->u.unop.operand->u.ident) >= 0) {
-            int dst = alloc_vreg();
-            int cid = C.next_const++;
-            fprintf(C.nir, ".const _C%d, far.ref %s\n",
-                    cid, e->u.unop.operand->u.ident);
-            fprintf(C.nir, "    mov %%%d, _C%d\n", dst, cid);
-            return TV(dst, mk_type(TYPE_FAR));
+            int off = alloc_vreg();
+            int seg = alloc_vreg();
+            fprintf(C.nir, "    mov %%%d, %s\n", off, e->u.unop.operand->u.ident);
+            fprintf(C.nir, "    mov %%%d, SEG %s\n", seg, e->u.unop.operand->u.ident);
+            fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+            return TV_FAR(off, seg);
         }
         /* @global — far pointer to global variable */
         if (e->u.unop.op == NIB_FAR_ADDR &&
             e->u.unop.operand->kind == EXPR_IDENT) {
             symbol_t *sym = sym_lookup(e->u.unop.operand->u.ident);
             if (sym && sym->is_global) {
-                int dst = alloc_vreg();
-                int cid = C.next_const++;
-                fprintf(C.nir, ".const _C%d, far.ref %s\n",
-                        cid, e->u.unop.operand->u.ident);
-                fprintf(C.nir, "    mov %%%d, _C%d\n", dst, cid);
-                return TV(dst, mk_type(TYPE_FAR));
+                int off = alloc_vreg();
+                int seg = alloc_vreg();
+                fprintf(C.nir, "    mov %%%d, %s\n", off, sym->name);
+                fprintf(C.nir, "    mov %%%d, SEG %s\n", seg, sym->name);
+                fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+                return TV_FAR(off, seg);
             }
             cerr(e->line, "@ requires a function or global name");
-            return TV(alloc_vreg(), mk_type(TYPE_FAR));
+            return TV_FAR(alloc_vreg(), alloc_vreg());
         }
 
         typed_vreg_t operand = emit_expr_typed(e->u.unop.operand);
@@ -822,11 +827,14 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* Emit arguments */
         int argc = 0;
         int arg_vregs[16];
+        int arg_seg_vregs[16];
         type_t *arg_types[16];
+        memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
         for (expr_t *a = e->u.call.args; a; a = a->next) {
             if (argc < 16) {
                 typed_vreg_t av = emit_expr_typed(a);
                 arg_vregs[argc] = av.vreg;
+                arg_seg_vregs[argc] = av.vreg_seg;
                 arg_types[argc] = av.type;
             }
             argc++;
@@ -1070,20 +1078,26 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 if (fi >= 0 && C.functions[fi].param_is_far[i]) {
                     /* Far param — split into offset + segment vregs */
                     symbol_t *asym = NULL;
-                    if (arg_expr && arg_expr->kind == EXPR_IDENT)
-                        asym = sym_lookup(arg_expr->u.ident);
-                    if (asym && asym->vreg_seg >= 0) {
-                        /* Register-split far — pass both directly */
-                        ir_args[nir_args++] = asym->vreg;
-                        ir_args[nir_args++] = asym->vreg_seg;
+                    if (arg_seg_vregs[i] >= 0) {
+                        /* Expression returned a vreg pair — use directly */
+                        ir_args[nir_args++] = arg_vregs[i];
+                        ir_args[nir_args++] = arg_seg_vregs[i];
                     } else {
-                        /* Memory-based far — extract via far.off/far.seg */
-                        int off_v = alloc_vreg();
-                        int seg_v = alloc_vreg();
-                        fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, arg_vregs[i]);
-                        fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, arg_vregs[i]);
-                        ir_args[nir_args++] = off_v;
-                        ir_args[nir_args++] = seg_v;
+                        if (arg_expr && arg_expr->kind == EXPR_IDENT)
+                            asym = sym_lookup(arg_expr->u.ident);
+                        if (asym && asym->vreg_seg >= 0) {
+                            /* Symbol has split vregs — pass both directly */
+                            ir_args[nir_args++] = asym->vreg;
+                            ir_args[nir_args++] = asym->vreg_seg;
+                        } else {
+                            /* Memory-based far — extract via far.off/far.seg */
+                            int off_v = alloc_vreg();
+                            int seg_v = alloc_vreg();
+                            fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, arg_vregs[i]);
+                            fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, arg_vregs[i]);
+                            ir_args[nir_args++] = off_v;
+                            ir_args[nir_args++] = seg_v;
+                        }
                     }
                 } else {
                     ir_args[nir_args++] = arg_vregs[i];
@@ -1314,13 +1328,13 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, mk_type(TYPE_U8));
     }
     case EXPR_FAR_LIT: {
-        /* Far literal — emit as constant pool entry (off, seg in LDS format) */
-        int cid = C.next_const++;
-        int r = alloc_vreg();
-        fprintf(C.nir, ".const _C%d, far 0x%04X:0x%04X\n",
-                cid, e->u.far_lit.seg, e->u.far_lit.off);
-        fprintf(C.nir, "    mov %%%d, _C%d\n", r, cid);
-        return TV(r, mk_type(TYPE_FAR));
+        /* Far literal — two immediate movs (offset + segment) */
+        int off = alloc_vreg();
+        int seg = alloc_vreg();
+        fprintf(C.nir, "    mov %%%d, 0x%04X\n", off, e->u.far_lit.off);
+        fprintf(C.nir, "    mov %%%d, 0x%04X\n", seg, e->u.far_lit.seg);
+        fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+        return TV_FAR(off, seg);
     }
     case EXPR_RAW_FIELD: {
         /* Same as EXPR_FIELD but returns storage type, ignoring as annotation.
@@ -1590,6 +1604,15 @@ static void emit_stmt(stmt_t *s) {
                          type_str(s->u.vardecl.type), type_str(val.type));
             }
             fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
+            /* Far32 init: also copy segment vreg */
+            if (val.vreg_seg >= 0 && s->u.vardecl.type &&
+                s->u.vardecl.type->kind == TYPE_FAR) {
+                if (sym->vreg_seg < 0) {
+                    sym->vreg_seg = alloc_vreg();
+                    fprintf(C.nir, ".vreg %%%d, seg\n", sym->vreg_seg);
+                }
+                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg_seg, val.vreg_seg);
+            }
         }
         break;
     }
