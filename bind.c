@@ -2318,6 +2318,8 @@ static void emit_function(func_t *fn) {
         if (fn->is_interrupt) {
             fprintf(out_asm, "    popa\n");
             fprintf(out_asm, "    iret\n");
+        } else if (fn->is_far) {
+            fprintf(out_asm, "    retf\n");
         } else {
             fprintf(out_asm, "    ret\n");
         }
