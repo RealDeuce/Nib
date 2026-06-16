@@ -239,16 +239,29 @@ if [ -f /tmp/t_internal_call_save.asm ]; then
     fi
 fi
 
+# Direct byte-returning calls must not save and restore the call result.
+if [ -f /tmp/t_call_ret_save.asm ]; then
+    call_window=$(sed -n '/call t_call_ret_save_pop_byte/,/popf/p' /tmp/t_call_ret_save.asm)
+    if echo "$call_window" | grep -q 'call t_call_ret_save_pop_byte' &&
+       ! echo "$call_window" | grep -q 'pop AX'; then
+        pass "call-ret-save: direct byte return is not restored away"
+    else
+        fail "call-ret-save" "direct byte return restored by caller-save"
+    fi
+fi
+
 # Indirect calls must save live registers not preserved by the extern
 # descriptor.
 if [ -f /tmp/t_icall_save.asm ]; then
     call_window=$(sed -n '/push DI/,/pop DI/p' /tmp/t_icall_save.asm)
     if echo "$call_window" | grep -q 'push DI' &&
        echo "$call_window" | grep -q 'call far \[SS:BX\]' &&
-       echo "$call_window" | grep -q 'pop DI'; then
-        pass "icall-save: live DI saved across indirect call"
+       echo "$call_window" | grep -q 'pop DI' &&
+       ! echo "$call_window" | grep -q 'push AX\|pop AX' &&
+       sed -n '/call far \[SS:BX\]/,/ret/p' /tmp/t_icall_save.asm | grep -q 'mov BL, AL'; then
+        pass "icall-save: live DI saved without clobbering AL return"
     else
-        fail "icall-save" "missing DI save around indirect call"
+        fail "icall-save" "indirect call save/return handling is wrong"
     fi
 fi
 

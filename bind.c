@@ -2492,6 +2492,7 @@ static void insert_fixup_moves(func_t *fn) {
                 call_saved[call_nsaved++] = PREG_BP;
             }
             for (int v = 0; v < fn->nvregs; v++) {
+                if (v == ins->dst) continue;
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
                 if (fn->vregs[v].is_seg) continue;
@@ -2580,6 +2581,7 @@ static void insert_fixup_moves(func_t *fn) {
                 call_saved[call_nsaved++] = PREG_BP;
             }
             for (int v = 0; v < fn->nvregs; v++) {
+                if (v == ins->dst) continue;
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
                 if (fn->vregs[v].is_seg) continue;

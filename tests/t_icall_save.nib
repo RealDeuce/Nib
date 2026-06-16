@@ -1,11 +1,12 @@
 // Test: indirect calls must save live caller registers that the extern
-// descriptor does not preserve.
+// descriptor does not preserve, without saving and restoring the vreg
+// defined by a byte return in AL.
 
-pub extern fn target() preserves(BX, BP, DS, ES, SS);
+pub extern fn target() -> u8 in AL preserves(BX, BP, DS, ES, SS);
 
 fn caller() -> u16 {
     u16 DI = 0x113B;
     far32 addr = 0xE000:0x0100;
-    addr as target from mod();
-    return DI;
+    u8 ch = addr as target from mod();
+    return DI + zero_extend(ch);
 }

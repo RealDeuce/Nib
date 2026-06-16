@@ -1,0 +1,21 @@
+// Test: caller-save insertion must not save and restore the vreg
+// defined by a byte-returning direct call.
+
+u8 count;
+
+fn pop_byte() -> u8 {
+    return 0x41;
+}
+
+fn wait_like() -> u8 {
+again:
+    pushf();
+    cli();
+    if (count != 0) {
+        u8 ch = pop_byte();
+        popf();
+        return ch;
+    }
+    popf();
+    goto again;
+}
