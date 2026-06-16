@@ -2974,6 +2974,20 @@ static void compile_global(decl_t *d) {
     const char *name = d->u.global.name;
     if (!name) name = "?";
 
+    if (d->u.global.type && d->u.global.type->kind == TYPE_ARRAY &&
+        d->u.global.type->array_size == 0 && d->u.global.init) {
+        if (d->u.global.init->kind == EXPR_ARRAY_INIT) {
+            int nelem = 0;
+            for (expr_t *e = d->u.global.init->u.array_init.elements;
+                 e; e = e->next)
+                nelem++;
+            d->u.global.type->array_size = nelem;
+        } else if (d->u.global.init->kind == EXPR_LIT_STR) {
+            d->u.global.type->array_size =
+                strlen(d->u.global.init->u.lit_str);
+        }
+    }
+
     /* Add to the current (global) scope */
     symbol_t *gsym = sym_add(name, d->u.global.type, true);
     if (d->u.global.has_at) {
@@ -3078,8 +3092,6 @@ static void compile_global(decl_t *d) {
         const char *str = d->u.global.init->u.lit_str;
         int slen = strlen(str);
         type_t *ty = d->u.global.type;
-        /* Infer size if unsized */
-        if (ty->array_size == 0) ty->array_size = slen;
         int arr_size = ty->array_size;
         if (slen > arr_size) {
             cerr(d->line, "string initializer too long for %s", type_str(ty));

@@ -606,6 +606,15 @@ if [ -f "$TEST_TMPDIR"/t_globals_rw.asm ]; then
     fi
 fi
 
+if [ -f tests/t_array_infer.nir ]; then
+    if grep -q '^\.data bytes, u8\[19\]' tests/t_array_infer.nir &&
+       grep -q '^\.global bytes, u8\[19\]$' tests/t_array_infer.nif; then
+        pass "array-infer: brace initializer inferred u8[19]"
+    else
+        fail "array-infer" "unsized brace initializer did not infer u8[19]"
+    fi
+fi
+
 # Near JMP backward: displacement must account for 3-byte instruction size
 if [ -f "$TEST_TMPDIR"/t_jmp_near.asm ]; then
     outbin="$TEST_TMPDIR/t_jmp_near_check.bin"
