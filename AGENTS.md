@@ -82,6 +82,9 @@ Requires: bison 3.8+, flex 2.6+, clang (FreeBSD base).
 - Commit messages should match the existing style: concise subject,
   explanatory body wrapped to 72 columns, and the project co-author trailer
   when applicable.
+- When using `git commit -m`, pass the wrapped body as one message argument
+  with embedded newlines. Do not use one `-m` per body line, since that
+  creates separate paragraphs and makes the rendered message double-spaced.
 
 ## Files
 
