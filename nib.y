@@ -159,7 +159,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 %token <sval> ASM_BODY
 
 /* ---- Keywords ---- */
-%token KW_FN KW_STRUCT KW_ALIGNED KW_EXTERN KW_FAR KW_FAR32
+%token KW_FN KW_STRUCT KW_ALIGNED KW_EXTERN KW_API KW_FAR KW_FAR32
 %token KW_INTERRUPT KW_BARE
 %token KW_IF KW_ELSE KW_WHILE KW_FOR KW_IN
 %token KW_RETURN KW_BREAK KW_CONTINUE
@@ -197,7 +197,7 @@ static void program_splice(program_t *prog, decl_t *list) {
 %type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl when_body when_block at_decl end_at_decl
 %type <param>  param param_list extern_param extern_param_list
 %type <field>  struct_field struct_fields
-%type <rlist>  reg_flag_list reg_or_flag asm_annotation preserves_clause
+%type <rlist>  reg_flag_list reg_flag_list_opt reg_or_flag asm_annotation preserves_clause
 %type <regval> reg_name word_reg byte_reg seg_reg flag mem_base
 %type <retlist> return_clause_extern
 %type <sval>   any_ident
@@ -382,7 +382,7 @@ fn_preserves
     : /* empty */
     | KW_PRESERVES '(' reg_flag_list ')'
         { current_mods.has_preserves = true; current_mods.preserves = $3; }
-    | KW_CLOBBERS '(' reg_flag_list ')'
+    | KW_CLOBBERS '(' reg_flag_list_opt ')'
         { current_mods.has_preserves = true; current_mods.is_clobbers = true;
           current_mods.preserves = $3; }
     ;
@@ -394,6 +394,7 @@ fn_modifiers
 
 fn_modifier
     : KW_FAR                    { current_mods.is_far = true; }
+    | KW_API                    { current_mods.is_api = true; }
     | KW_INTERRUPT              { current_mods.is_interrupt = true; }
     | KW_BARE                   { current_mods.is_bare = true; }
     | KW_AT '(' LIT_INT ':' LIT_INT ')'
@@ -462,10 +463,15 @@ return_clause_extern
 
 preserves_clause
     : /* empty */                               { $$ = NULL; }
-    | KW_PRESERVES '(' reg_flag_list ')'        { $$ = $3; }
-    | KW_CLOBBERS '(' reg_flag_list ')'
+    | KW_PRESERVES '(' reg_flag_list ')'
+        { current_mods.has_preserves = true;
+          current_mods.preserves = $3;
+          $$ = $3; }
+    | KW_CLOBBERS '(' reg_flag_list_opt ')'
         { $$ = $3;
-          current_mods.is_clobbers = true; }
+          current_mods.has_preserves = true;
+          current_mods.is_clobbers = true;
+          current_mods.preserves = $3; }
     ;
 
 /* ==== Parameters ==== */
@@ -875,6 +881,11 @@ flag
 reg_flag_list
     : reg_or_flag                           { $$ = $1; }
     | reg_flag_list ',' reg_or_flag         { $$ = reg_list_append($1, $3); }
+    ;
+
+reg_flag_list_opt
+    : /* empty */                           { $$ = NULL; }
+    | reg_flag_list                         { $$ = $1; }
     ;
 
 reg_or_flag

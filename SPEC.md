@@ -410,26 +410,35 @@ fn internal(ptr: far32) {     // binder chooses seg + word regs
 ### clobbers()
 
 `clobbers()` is the inverse of `preserves()` — it lists registers the
-function is allowed to trash, and everything else is callee-saved. The
-return register is implicitly clobbered. Intended for API boundary
-functions that preserve almost everything.
+function may modify. Return registers are implicitly clobbered by the
+return value. The binder uses the list to save live caller state around
+calls when necessary.
 
 ```
 fn api_read(port: u16 in DX) -> u8 in AL clobbers(FLAGS) {
-    // preserves everything except AL (return reg) and FLAGS
+    // may modify AL (return reg) and FLAGS
     ...
 }
 
 fn api_memcopy(dst: u16 in DI, src: u16 in SI, len: u16 in CX)
     clobbers(SI, DI, CX, FLAGS) {
-    // preserves AX, BX, DX, BP
+    // may modify SI, DI, CX, and FLAGS
     ...
 }
 ```
 
 `clobbers()` and `preserves()` are mutually exclusive on a declaration.
 The compiler inverts `clobbers()` to `preserves` in the IR — the binder
-only ever sees `preserves`.
+only ever sees `preserves`. `CS` cannot be listed in `clobbers()`;
+changing it is not a valid function boundary effect.
+
+`api` functions and `extern fn` declarations must use `clobbers(...)`,
+even when the list is empty:
+
+```
+fn api far nop() ds(none) clobbers() {
+}
+```
 
 ### DS policy
 
@@ -575,7 +584,7 @@ Each return slot can be pinned independently at API boundaries:
 
 ```
 extern fn read_pair() -> u8 in AL, u16 in DX
-    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+    clobbers(FLAGS);
 ```
 
 For u32 return values, the binder assigns a register pair (typically
@@ -592,10 +601,10 @@ binaries. Includes a fixed far address:
 
 ```
 extern fn far [0xF000:0x0100] rom_init()
-    preserves(BP, DS, ES, SS);
+    clobbers(AX, CX, DX, BX, SI, DI, FLAGS);
 
 extern fn far [0xF000:0x0080] dos_putchar(svc: u8 in AH, char: u8 in DL)
-    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+    clobbers(AX, DX, FLAGS);
 ```
 
 **Implementation form** — a `pub extern fn` with a body defines the
@@ -624,14 +633,12 @@ Both forms require `in REG` on each parameter and return value.
 The binder treats these as fixed constraints — non-negotiable
 assignments that the rest of the call graph must work around.
 
-The `preserves` clause lists which registers the function guarantees
-not to modify. Everything not listed is assumed clobbered. This is
-fail-safe: forgetting a register in the list means the binder treats
-it as clobbered (conservative), rather than silently trusting it.
-For Nib functions, preserves/clobbers are computed automatically by
-the compiler. For externs, `preserves` must be declared explicitly.
-Omitting `preserves` on an extern means nothing is preserved — the
-binder assumes the function destroys everything.
+The `clobbers` clause lists which registers the function may modify.
+Registers not listed are treated as not modified by that call. Return
+registers are implicitly clobbered by the return value. Extern
+declarations and `api` functions require `clobbers(...)` so the ABI
+contract is explicit, even for zero-clobber routines. `CS` is not a
+valid clobber.
 
 ```
 // Multiple parameters, all pinned
@@ -640,17 +647,17 @@ extern fn far bios_scroll(
     attr: u8 in BH,
     top: u16 in CX,
     bottom: u16 in DX
-) preserves(SI, DI, BP, DS, ES, SS);
+) clobbers(AX, CX, DX, BX, FLAGS);
 
 // No return value
 extern fn far rom_beep(
     freq: u16 in BX,
     duration: u16 in CX
-) preserves(AX, DX, SI, DI, BP, DS, ES, SS);
+) clobbers(CX, BX, FLAGS);
 
 // Near extern (same segment)
 extern fn helper(val: u16 in AX) -> u16 in AX
-    preserves(BX, CX, DX, SI, DI, BP, DS, ES, SS);
+    clobbers(FLAGS);
 ```
 
 Extern declarations have no body. The binder resolves the symbol
@@ -659,7 +666,7 @@ address from the link map or an explicit address:
 ```
 // Extern at a known absolute address
 extern fn far [0xF000:0x0100] rom_init()
-    preserves(BP, DS, ES, SS);
+    clobbers(AX, CX, DX, BX, SI, DI, FLAGS);
 ```
 
 ### Indirect calls via extern descriptors
@@ -669,18 +676,30 @@ The caller gets a far pointer at runtime and needs to call through it
 with the correct register convention. Extern declarations serve as
 calling convention descriptors for these indirect calls.
 
-**Module side** — the driver declares a `pub extern` alongside its
-private implementation:
+**Module side** — the driver marks the implementation `api` when the
+function itself should remain private but its indirect-call ABI should be
+exported:
 
 ```
-fn print_impl(str: far32 in ES:SI, len: u16 in CX) { ... }
+fn api far print(str: far32 in ES:SI, len: u16 in CX)
+    ds(serif_data)
+    clobbers(FLAGS) {
+    ...
+}
+```
 
+The `api` qualifier emits an extern-style descriptor to the `.nif` and
+`.nir`, but it does not make the implementation a direct public
+function. `clobbers()` is inverted into the generated `.preserves`
+descriptor, so the calling convention does not need to be copy/pasted.
+
+A separate `pub extern` declaration is still valid for a pure ABI
+descriptor with no local implementation:
+
+```
 pub extern fn print(str: far32 in ES:SI, len: u16 in CX)
     clobbers(FLAGS);
 ```
-
-The `pub extern` has no body or address — it's purely an ABI descriptor
-exported to the `.nif`.
 
 **Caller side** — uses `as ... from` syntax to bind a far pointer to
 the extern's calling convention:
@@ -1958,7 +1977,7 @@ all .nir files         →  [nibbind]  →  .asm
 
 ### Declarations
 
-`fn`, `struct`, `const`, `extern`, `pub`, `use`, `aligned`, `value`, `at`, `end`
+`fn`, `struct`, `const`, `extern`, `api`, `pub`, `use`, `aligned`, `value`, `at`, `end`
 
 ### Types
 

@@ -50,23 +50,23 @@ struct mixed {
 
 // Extern function declarations
 extern fn far rom_read(port: u16 in DX) -> u16 in AX
-    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+    clobbers(DX, FLAGS);
 
 extern fn far bios_scroll(
     lines: u8 in AL,
     attr: u8 in BH,
     top: u16 in CX,
     bottom: u16 in DX
-) preserves(SI, DI, BP, DS, ES, SS);
+) clobbers(AX, CX, DX, BX, FLAGS);
 
 extern fn far [0xF000:0x0100] rom_init()
-    preserves(BP, DS, ES, SS);
+    clobbers(AX, CX, DX, BX, SI, DI, FLAGS);
 
 // Extern interrupt declaration
 extern fn interrupt(0x21) dos_putchar(
     svc: u8 in AH,
     char: u8 in DL
-) preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+) clobbers(AX, DX, FLAGS);
 
 // Simple function
 fn add(a: u16, b: u16) -> u16 {

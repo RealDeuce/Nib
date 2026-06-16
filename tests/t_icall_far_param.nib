@@ -1,13 +1,13 @@
 // Test: indirect far calls through far32 parameters keep segment halves.
 
 pub extern fn tone(divisor: u16 in DX)
-    preserves(AX, BX, CX, BP, DS, ES, SS);
+    clobbers(DX, SI, DI, FLAGS);
 
 pub extern fn on()
-    preserves(AX, BX, CX, DX, BP, DS, ES, SS);
+    clobbers(SI, DI, FLAGS);
 
 pub extern fn off()
-    preserves(AX, BX, CX, DX, BP, DS, ES, SS);
+    clobbers(SI, DI, FLAGS);
 
 fn beep_once(tone_addr: far32, on_addr: far32, off_addr: far32,
              divisor: u16) {

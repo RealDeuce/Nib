@@ -2592,11 +2592,25 @@ static void emit_preserves(FILE *f, fn_modifiers_t *mods, return_t *rets) {
     if (!mods->has_preserves) return;
 
     if (mods->is_clobbers) {
-        static const struct { const char *name; int id; } all_regs[] = {
-            {"AX",0}, {"CX",1}, {"DX",2}, {"BX",3},
-            {"BP",5}, {"SI",6}, {"DI",7},
+        static const struct {
+            const char *name;
+            int id;
+            reg_class_t rclass;
+        } all_regs[] = {
+            {"AX", WREG_AX, REGCLASS_WORD},
+            {"CX", WREG_CX, REGCLASS_WORD},
+            {"DX", WREG_DX, REGCLASS_WORD},
+            {"BX", WREG_BX, REGCLASS_WORD},
+            {"BP", WREG_BP, REGCLASS_WORD},
+            {"SI", WREG_SI, REGCLASS_WORD},
+            {"DI", WREG_DI, REGCLASS_WORD},
+            {"ES", SREG_ES, REGCLASS_SEG},
+            {"CS", SREG_CS, REGCLASS_SEG},
+            {"SS", SREG_SS, REGCLASS_SEG},
+            {"DS", SREG_DS, REGCLASS_SEG},
         };
         bool clobbered[8] = {0};
+        bool clobbered_seg[4] = {0};
         bool clobber_flags = false;
         for (reg_list_t *r = mods->preserves; r; r = r->next) {
             if (r->is_flags_all) clobber_flags = true;
@@ -2604,6 +2618,8 @@ static void emit_preserves(FILE *f, fn_modifiers_t *mods, return_t *rets) {
             else if (r->rclass == REGCLASS_BYTE) {
                 static const int parent[] = {0,1,2,3,0,1,2,3};
                 clobbered[parent[r->id]] = true;
+            } else if (r->rclass == REGCLASS_SEG) {
+                clobbered_seg[r->id] = true;
             }
         }
         for (return_t *r = rets; r; r = r->next) {
@@ -2618,8 +2634,10 @@ static void emit_preserves(FILE *f, fn_modifiers_t *mods, return_t *rets) {
 
         fprintf(f, ".preserves ");
         bool first = true;
-        for (int i = 0; i < 7; i++) {
-            if (!clobbered[all_regs[i].id]) {
+        for (size_t i = 0; i < sizeof(all_regs) / sizeof(all_regs[0]); i++) {
+            bool is_clobbered = all_regs[i].rclass == REGCLASS_SEG ?
+                clobbered_seg[all_regs[i].id] : clobbered[all_regs[i].id];
+            if (!is_clobbered) {
                 if (!first) fprintf(f, ", ");
                 fprintf(f, "%s", all_regs[i].name);
                 first = false;
@@ -2640,6 +2658,15 @@ static void emit_preserves(FILE *f, fn_modifiers_t *mods, return_t *rets) {
             if (r->next) fprintf(f, ", ");
         }
         fprintf(f, "\n");
+    }
+}
+
+static void validate_clobbers(fn_modifiers_t *mods, int line) {
+    if (!mods->has_preserves || !mods->is_clobbers)
+        return;
+    for (reg_list_t *r = mods->preserves; r; r = r->next) {
+        if (r->rclass == REGCLASS_SEG && r->id == SREG_CS)
+            cerr(line, "functions cannot clobber CS");
     }
 }
 
@@ -2674,6 +2701,78 @@ static void emit_ds_policy(FILE *f, fn_modifiers_t *mods) {
     }
 }
 
+static void emit_extern_params(FILE *f, param_t *params, bool nir) {
+    int pn = 0;
+    for (param_t *p = params; p; p = p->next, pn++) {
+        if (nir) {
+            if (p->type && p->type->kind == TYPE_FAR) {
+                fprintf(f, ".eparam u16, \"%s_off\"", p->name);
+                if (p->has_pin)
+                    fprintf(f, ", pin=%s",
+                            reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(f, "\n");
+                fprintf(f, ".eparam seg, \"%s_seg\"", p->name);
+                if (p->has_seg_pin)
+                    fprintf(f, ", pin=%s",
+                            reg_name_str(p->pinned_seg, REGCLASS_SEG));
+                fprintf(f, "\n");
+            } else {
+                fprintf(f, ".eparam %s, \"%s\"", type_str(p->type), p->name);
+                if (p->has_pin)
+                    fprintf(f, ", pin=%s",
+                            reg_name_str(p->pinned_reg, p->pin_class));
+                fprintf(f, "\n");
+            }
+        } else {
+            fprintf(f, ".param %%%d, %s, \"%s\"", pn, type_str(p->type),
+                    p->name);
+            if (p->has_pin)
+                fprintf(f, ", pin=%s",
+                        reg_name_str(p->pinned_reg, p->pin_class));
+            if (p->type && p->type->kind == TYPE_FAR && p->has_seg_pin)
+                fprintf(f, ":%s",
+                        reg_name_str(p->pinned_seg, REGCLASS_SEG));
+            fprintf(f, "\n");
+            if (p->type && p->type->kind == TYPE_FAR)
+                pn++;
+        }
+    }
+}
+
+static void emit_extern_returns(FILE *f, return_t *returns) {
+    for (return_t *r = returns; r; r = r->next) {
+        fprintf(f, ".returns %s", type_str(r->type));
+        if (r->has_pin)
+            fprintf(f, ", pin=%s",
+                    reg_name_str(r->pinned_reg, r->pin_class));
+        fprintf(f, "\n");
+    }
+}
+
+static void emit_extern_descriptor(FILE *f, const char *name,
+                                   fn_modifiers_t *mods,
+                                   param_t *params, return_t *returns,
+                                   bool has_address, int addr_seg,
+                                   int addr_off, bool nir) {
+    fprintf(f, "\n.extern %s", name);
+    if (mods->is_far)
+        fprintf(f, ", far");
+    emit_ds_policy(f, mods);
+    if (has_address) {
+        fprintf(f, ", addr_seg=0x%04X, addr_off=0x%04X",
+                addr_seg, addr_off);
+    } else if (nir) {
+        fprintf(f, " ; WARNING: no address — unbindable");
+    }
+    fprintf(f, "\n");
+    emit_extern_params(f, params, nir);
+    emit_extern_returns(f, returns);
+    emit_preserves(f, mods, returns);
+    fprintf(f, ".endextern\n");
+    if (!nir)
+        fprintf(f, "\n");
+}
+
 static void compile_fn(decl_t *d) {
     C.next_vreg = 0;
     /* Don't reset next_label — keep it global so labels are unique across functions */
@@ -2688,9 +2787,13 @@ static void compile_fn(decl_t *d) {
     C.naddr_taken = 0;
     scan_addr_taken_stmt(d->u.fn.body);
     validate_ds_policy(&d->u.fn.mods, d->line);
-    if (d->is_pub && d->u.fn.mods.is_far &&
+    validate_clobbers(&d->u.fn.mods, d->line);
+    if ((d->is_pub || d->u.fn.mods.is_api) && d->u.fn.mods.is_far &&
         d->u.fn.mods.ds_policy == DS_POLICY_UNSPEC)
-        cerr(d->line, "public far functions must declare ds(...)");
+        cerr(d->line, "public/api far functions must declare ds(...)");
+    if (d->u.fn.mods.is_api &&
+        (!d->u.fn.mods.has_preserves || !d->u.fn.mods.is_clobbers))
+        cerr(d->line, "api functions must declare clobbers(...)");
     if (d->u.fn.mods.is_bare &&
         (d->u.fn.mods.ds_policy == DS_POLICY_SYMBOL ||
          d->u.fn.mods.ds_policy == DS_POLICY_LITERAL))
@@ -2700,6 +2803,8 @@ static void compile_fn(decl_t *d) {
     if (d->u.fn.mods.is_interrupt) {
         if (d->is_pub)
             cerr(d->line, "interrupt handlers cannot be pub");
+        if (d->u.fn.mods.is_api)
+            cerr(d->line, "interrupt handlers cannot be api");
         if (d->u.fn.mods.is_far)
             cerr(d->line, "interrupt handlers cannot be far");
         if (d->u.fn.mods.has_at)
@@ -2716,6 +2821,15 @@ static void compile_fn(decl_t *d) {
         for (param_t *p = d->u.fn.params; p; p = p->next) nparams++;
         register_function_returns(d->u.fn.name, nparams, d->u.fn.returns,
                                   d->u.fn.params);
+    }
+
+    if (d->u.fn.mods.is_api) {
+        emit_extern_descriptor(C.nir, d->u.fn.name, &d->u.fn.mods,
+                               d->u.fn.params, d->u.fn.returns,
+                               false, 0, 0, true);
+        emit_extern_descriptor(C.nif, d->u.fn.name, &d->u.fn.mods,
+                               d->u.fn.params, d->u.fn.returns,
+                               false, 0, 0, false);
     }
 
     /* Emit .nir function header */
@@ -3001,87 +3115,30 @@ static void compile_extern_fn(decl_t *d) {
                               d->u.extern_fn.returns,
                               d->u.extern_fn.params);
     validate_ds_policy(&d->u.extern_fn.mods, d->line);
+    validate_clobbers(&d->u.extern_fn.mods, d->line);
     if (d->is_pub && d->u.extern_fn.mods.is_far &&
         d->u.extern_fn.mods.ds_policy == DS_POLICY_UNSPEC)
         cerr(d->line, "public far functions must declare ds(...)");
+    if (!d->u.extern_fn.mods.has_preserves ||
+        !d->u.extern_fn.mods.is_clobbers)
+        cerr(d->line, "extern functions must declare clobbers(...)");
 
-    /* Emit to .nir so the binder knows how to call it */
-    fprintf(C.nir, "\n.extern %s", d->u.extern_fn.name);
-    if (d->u.extern_fn.mods.is_far) fprintf(C.nir, ", far");
-    emit_ds_policy(C.nir, &d->u.extern_fn.mods);
-    if (d->u.extern_fn.has_address)
-        fprintf(C.nir, ", addr_seg=0x%04X, addr_off=0x%04X",
-                d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
-    else
-        fprintf(C.nir, " ; WARNING: no address — unbindable");
-    fprintf(C.nir, "\n");
-    for (param_t *p = d->u.extern_fn.params; p; p = p->next) {
-        if (p->type && p->type->kind == TYPE_FAR) {
-            /* Far param splits into offset + segment */
-            fprintf(C.nir, ".eparam u16, \"%s_off\"", p->name);
-            if (p->has_pin)
-                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
-            fprintf(C.nir, "\n");
-            fprintf(C.nir, ".eparam seg, \"%s_seg\"", p->name);
-            if (p->has_seg_pin)
-                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
-            fprintf(C.nir, "\n");
-        } else {
-            fprintf(C.nir, ".eparam %s, \"%s\"", type_str(p->type), p->name);
-            if (p->has_pin)
-                fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
-            fprintf(C.nir, "\n");
-        }
+    fn_modifiers_t desc_mods = d->u.extern_fn.mods;
+    if (d->u.extern_fn.mods.has_preserves) {
+        desc_mods.has_preserves = true;
+        desc_mods.preserves = d->u.extern_fn.preserves;
     }
-    for (return_t *r = d->u.extern_fn.returns; r; r = r->next) {
-        fprintf(C.nir, ".returns %s", type_str(r->type));
-        if (r->has_pin)
-            fprintf(C.nir, ", pin=%s",
-                    reg_name_str(r->pinned_reg, r->pin_class));
-        fprintf(C.nir, "\n");
-    }
-    fprintf(C.nir, ".endextern\n");
 
-    /* Also emit to .nif for cross-module type checking */
-    fprintf(C.nif, ".extern %s", d->u.extern_fn.name);
-    if (d->u.extern_fn.mods.is_far) fprintf(C.nif, ", far");
-    emit_ds_policy(C.nif, &d->u.extern_fn.mods);
-    if (d->u.extern_fn.has_address)
-        fprintf(C.nif, ", addr_seg=0x%04X, addr_off=0x%04X",
-                d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
-    fprintf(C.nif, "\n");
-
-    {
-        int pn = 0;
-        for (param_t *p = d->u.extern_fn.params; p; p = p->next, pn++) {
-            fprintf(C.nif, ".param %%%d, %s, \"%s\"", pn, type_str(p->type), p->name);
-            if (p->has_pin)
-                fprintf(C.nif, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
-            if (p->type && p->type->kind == TYPE_FAR && p->has_seg_pin)
-                fprintf(C.nif, ":%s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
-            fprintf(C.nif, "\n");
-            if (p->type && p->type->kind == TYPE_FAR) pn++; /* far splits */
-        }
-    }
-    for (return_t *r = d->u.extern_fn.returns; r; r = r->next) {
-        fprintf(C.nif, ".returns %s", type_str(r->type));
-        if (r->has_pin)
-            fprintf(C.nif, ", pin=%s",
-                    reg_name_str(r->pinned_reg, r->pin_class));
-        fprintf(C.nif, "\n");
-    }
-    if (d->u.extern_fn.preserves) {
-        fprintf(C.nif, ".preserves ");
-        for (reg_list_t *r = d->u.extern_fn.preserves; r; r = r->next) {
-            if (r->is_flags_all)
-                fprintf(C.nif, "FLAGS");
-            else
-                fprintf(C.nif, "%s", reg_name_str(r->id, r->rclass));
-            if (r->next) fprintf(C.nif, ", ");
-        }
-        fprintf(C.nif, "\n");
-    }
-    fprintf(C.nif, ".endextern\n\n");
+    emit_extern_descriptor(C.nir, d->u.extern_fn.name, &desc_mods,
+                           d->u.extern_fn.params, d->u.extern_fn.returns,
+                           d->u.extern_fn.has_address,
+                           d->u.extern_fn.addr_seg,
+                           d->u.extern_fn.addr_off, true);
+    emit_extern_descriptor(C.nif, d->u.extern_fn.name, &desc_mods,
+                           d->u.extern_fn.params, d->u.extern_fn.returns,
+                           d->u.extern_fn.has_address,
+                           d->u.extern_fn.addr_seg,
+                           d->u.extern_fn.addr_off, false);
 
     /* If this extern has a body, compile it as a regular function.
      * This is the "implementation form" — defines calling convention
@@ -3100,7 +3157,7 @@ static void compile_extern_fn(decl_t *d) {
         fn_decl.u.fn.nreturns = d->u.extern_fn.nreturns;
         fn_decl.u.fn.body = d->u.extern_fn.body;
         /* Transfer preserves/clobbers to fn mods */
-        if (d->u.extern_fn.preserves) {
+        if (d->u.extern_fn.mods.has_preserves) {
             fn_decl.u.fn.mods.has_preserves = true;
             fn_decl.u.fn.mods.preserves = d->u.extern_fn.preserves;
         }

@@ -1,15 +1,15 @@
 // Test: extern function declarations
 
 extern fn far [0xF000:0x0050] rom_read(port: u16 in DX) -> u16 in AX
-    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+    clobbers(DX, FLAGS);
 
 extern fn far [0xF000:0x0100] rom_init()
-    preserves(BP, DS, ES, SS);
+    clobbers(AX, CX, DX, BX, SI, DI, FLAGS);
 
 extern fn far [0xF000:0x0080] dos_putchar(
     svc: u8 in AH,
     char: u8 in DL
-) preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+) clobbers(AX, DX, FLAGS);
 
 fn test_extern() {
     u16 DX = 0x03F8;

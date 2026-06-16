@@ -60,7 +60,7 @@ for f in tests/t_*.nir; do
     name=$(basename "$f" .nir)
     # Skip multi-module tests (they need special handling)
     case "$name" in
-        t_modules_app|t_const_scope|t_icall) continue ;;
+        t_modules_app|t_const_scope|t_icall|t_api_descriptor) continue ;;
     esac
     outasm="$TEST_TMPDIR/${name}.asm"
     if ./nibbind "$f" -o "$outasm" >/dev/null 2>&1; then
@@ -116,6 +116,25 @@ if [ -f tests/t_icall_lib.nir ] && [ -f tests/t_icall.nir ]; then
 else
     skip "t_icall" "nir files not generated"
 fi
+
+# API descriptors: api functions export .extern descriptors without
+# exporting direct .fn entries.
+if [ -f tests/t_api_descriptor_lib.nir ] && [ -f tests/t_api_descriptor.nir ]; then
+    outasm="$TEST_TMPDIR/t_api_descriptor_multi.asm"
+    if ./nibbind tests/t_api_descriptor_lib.nir tests/t_api_descriptor.nir -o "$outasm" >/dev/null 2>&1; then
+        if grep -q '^\.extern send, far, ds=none$' tests/t_api_descriptor_lib.nif &&
+           grep -q '^\.preserves AX, CX, DX, BX, BP, SI, DI, ES, CS, SS, DS, FLAGS$' tests/t_api_descriptor_lib.nif &&
+           ! grep -q '^\.fn send' tests/t_api_descriptor_lib.nif; then
+            pass "t_api_descriptor (extern descriptor)"
+        else
+            fail "t_api_descriptor (nif)" "api descriptor export is wrong"
+        fi
+    else
+        fail "t_api_descriptor (bind)" "$(./nibbind tests/t_api_descriptor_lib.nir tests/t_api_descriptor.nir -o "$outasm" 2>&1 | tail -1)"
+    fi
+else
+    skip "t_api_descriptor" "nir files not generated"
+fi
 echo ""
 
 # Phase 5: Assemble tests — bound .asm files should assemble
@@ -125,7 +144,7 @@ for f in "$TEST_TMPDIR"/t_*.asm; do
     name=$(basename "$f" .asm)
     # Skip tests that can't assemble standalone
     case "$name" in
-        t_const_scope|t_const_scope_multi|t_icall|t_icall_multi) continue ;;
+        t_const_scope|t_const_scope_multi|t_icall|t_icall_multi|t_api_descriptor_multi) continue ;;
     esac
     outbin="$TEST_TMPDIR/${name}.bin"
     if ./nibasm "$f" -o "$outbin" >/dev/null 2>&1; then
@@ -406,6 +425,43 @@ if ./nib "$TEST_TMPDIR"/bad_pub_far_ds.nib >/dev/null 2>&1; then
     fail "ds-policy-require" "public far function without ds() was accepted"
 else
     pass "ds-policy-require: public far functions require ds()"
+fi
+
+cat > "$TEST_TMPDIR"/bad_extern_clobbers.nib <<'NIB'
+extern fn far missing();
+NIB
+if ./nib "$TEST_TMPDIR"/bad_extern_clobbers.nib >/dev/null 2>&1; then
+    fail "extern-clobbers-require" "extern function without clobbers() accepted"
+else
+    pass "extern-clobbers-require: extern functions require clobbers()"
+fi
+
+cat > "$TEST_TMPDIR"/bad_extern_preserves.nib <<'NIB'
+extern fn far old_style() preserves(AX);
+NIB
+if ./nib "$TEST_TMPDIR"/bad_extern_preserves.nib >/dev/null 2>&1; then
+    fail "extern-preserves-reject" "extern function with preserves() accepted"
+else
+    pass "extern-preserves-reject: extern functions reject preserves()"
+fi
+
+cat > "$TEST_TMPDIR"/bad_api_clobbers.nib <<'NIB'
+fn api far missing() ds(none) {
+}
+NIB
+if ./nib "$TEST_TMPDIR"/bad_api_clobbers.nib >/dev/null 2>&1; then
+    fail "api-clobbers-require" "api function without clobbers() accepted"
+else
+    pass "api-clobbers-require: api functions require clobbers()"
+fi
+
+cat > "$TEST_TMPDIR"/bad_clobber_cs.nib <<'NIB'
+extern fn far bad() clobbers(CS);
+NIB
+if ./nib "$TEST_TMPDIR"/bad_clobber_cs.nib >/dev/null 2>&1; then
+    fail "clobber-cs-reject" "clobbers(CS) was accepted"
+else
+    pass "clobber-cs-reject: functions cannot clobber CS"
 fi
 
 cat > "$TEST_TMPDIR"/bad_ds_symbol.nib <<'NIB'

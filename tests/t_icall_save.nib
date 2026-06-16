@@ -2,7 +2,7 @@
 // descriptor does not preserve, without saving and restoring the vreg
 // defined by a byte return in AL.
 
-pub extern fn target() -> u8 in AL preserves(BX, BP, DS, ES, SS);
+pub extern fn target() -> u8 in AL clobbers(CX, DX, SI, DI, FLAGS);
 
 fn caller() -> u16 {
     u16 DI = 0x113B;

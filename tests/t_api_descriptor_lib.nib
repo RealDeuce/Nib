@@ -1,0 +1,5 @@
+// Test: api functions export an extern descriptor without exporting .fn.
+
+fn api far send(byte: u8 in AL) ds(none) clobbers() {
+    port_out(0x50, byte);
+}

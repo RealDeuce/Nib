@@ -355,6 +355,7 @@ typedef struct {
     bool is_far;
     bool is_interrupt;
     bool is_bare;
+    bool is_api;           /* emit extern descriptor without exporting fn */
     bool has_preserves;
     bool is_clobbers;       /* true if clobbers() used instead of preserves() */
     reg_list_t *preserves;

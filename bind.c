@@ -333,6 +333,7 @@ static const char *fn_asm_name(func_t *fn);
 static const char *vreg_asm(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
+static bool call_saved_has_seg(int *call_saved, int call_nsaved);
 
 static bool insn_defines_dst(const ir_insn_t *ins) {
     if (!ins || ins->dst < 0)
@@ -3238,7 +3239,6 @@ static void insert_fixup_moves(func_t *fn) {
                 if (is_ret_dst) continue;
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
-                if (fn->vregs[v].is_seg) continue;
                 if (fn->vregs[v].last_use <= (int)i) continue;
                 if (fn->vregs[v].def_pos > (int)i) continue;
                 int push_reg = preg;
@@ -3249,7 +3249,8 @@ static void insert_fixup_moves(func_t *fn) {
                 add_call_saved_reg(call_saved, &call_nsaved, push_reg);
             }
             /* Emit saves: PUSHA if >= 6, individual pushes otherwise */
-            if (call_nsaved >= 6) {
+            if (call_nsaved >= 6 &&
+                !call_saved_has_seg(call_saved, call_nsaved)) {
                 rins_asm(fn, "    pusha");
                 call_use_pusha = true;
             } else {
@@ -3338,7 +3339,6 @@ static void insert_fixup_moves(func_t *fn) {
                 if (v == ins->dst) continue;
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
-                if (fn->vregs[v].is_seg) continue;
                 if (fn->vregs[v].last_use <= (int)i) continue;
                 if (fn->vregs[v].def_pos > (int)i) continue;
                 int push_reg = preg;
@@ -3353,7 +3353,8 @@ static void insert_fixup_moves(func_t *fn) {
                     call_saved[call_nsaved++] = push_reg;
             }
 
-            if (call_nsaved >= 6) {
+            if (call_nsaved >= 6 &&
+                !call_saved_has_seg(call_saved, call_nsaved)) {
                 rins_asm(fn, "    pusha");
                 call_use_pusha = true;
             } else {
@@ -3631,6 +3632,14 @@ static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg) {
             return;
     if (*call_nsaved < 16)
         call_saved[(*call_nsaved)++] = preg;
+}
+
+static bool call_saved_has_seg(int *call_saved, int call_nsaved) {
+    for (int s = 0; s < call_nsaved; s++) {
+        if (call_saved[s] >= PREG_ES && call_saved[s] <= PREG_DS)
+            return true;
+    }
+    return false;
 }
 
 static void emit_ds_setup(func_t *fn, bool explicit_save) {

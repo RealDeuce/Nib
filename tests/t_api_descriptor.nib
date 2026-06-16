@@ -1,0 +1,7 @@
+// Test: callers use an api function's exported extern descriptor.
+
+use "t_api_descriptor_lib.nif";
+
+fn call_send(addr: far32, val: u8) {
+    addr as send from t_api_descriptor_lib(val);
+}
