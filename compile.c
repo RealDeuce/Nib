@@ -2565,6 +2565,37 @@ static void emit_preserves(FILE *f, fn_modifiers_t *mods, return_t *rets) {
     }
 }
 
+static void validate_ds_policy(fn_modifiers_t *mods, int line) {
+    if (mods->ds_policy == DS_POLICY_LITERAL) {
+        if (mods->ds_literal < 0 || mods->ds_literal > 0xFFFF)
+            cerr(line, "ds() segment literal must be in range 0x0000..0xFFFF");
+    } else if (mods->ds_policy == DS_POLICY_SYMBOL) {
+        symbol_t *sym = sym_lookup(mods->ds_symbol);
+        if (sym && !sym->is_global)
+            cerr(line, "ds(%s) must name a global or data object",
+                 mods->ds_symbol);
+    }
+}
+
+static void emit_ds_policy(FILE *f, fn_modifiers_t *mods) {
+    switch (mods->ds_policy) {
+    case DS_POLICY_CALLER:
+        fprintf(f, ", ds=caller");
+        break;
+    case DS_POLICY_NONE:
+        fprintf(f, ", ds=none");
+        break;
+    case DS_POLICY_SYMBOL:
+        fprintf(f, ", ds=%s", mods->ds_symbol);
+        break;
+    case DS_POLICY_LITERAL:
+        fprintf(f, ", ds=0x%04X", mods->ds_literal & 0xFFFF);
+        break;
+    case DS_POLICY_UNSPEC:
+        break;
+    }
+}
+
 static void compile_fn(decl_t *d) {
     C.next_vreg = 0;
     /* Don't reset next_label — keep it global so labels are unique across functions */
@@ -2578,6 +2609,14 @@ static void compile_fn(decl_t *d) {
     C.cur_fn_mods = d->u.fn.mods;
     C.naddr_taken = 0;
     scan_addr_taken_stmt(d->u.fn.body);
+    validate_ds_policy(&d->u.fn.mods, d->line);
+    if (d->is_pub && d->u.fn.mods.is_far &&
+        d->u.fn.mods.ds_policy == DS_POLICY_UNSPEC)
+        cerr(d->line, "public far functions must declare ds(...)");
+    if (d->u.fn.mods.is_bare &&
+        (d->u.fn.mods.ds_policy == DS_POLICY_SYMBOL ||
+         d->u.fn.mods.ds_policy == DS_POLICY_LITERAL))
+        cerr(d->line, "bare functions cannot use ds() setup policies");
 
     /* Validate and register */
     if (d->u.fn.mods.is_interrupt) {
@@ -2611,6 +2650,7 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nir, ", bare");
     if (d->u.fn.mods.has_at)
         fprintf(C.nir, ", at(0x%04X:0x%04X)", d->u.fn.mods.at_seg, d->u.fn.mods.at_off);
+    emit_ds_policy(C.nir, &d->u.fn.mods);
     fprintf(C.nir, "\n");
 
     emit_preserves(C.nir, &d->u.fn.mods, d->u.fn.returns);
@@ -2620,6 +2660,7 @@ static void compile_fn(decl_t *d) {
     if (nif) {
         fprintf(C.nif, ".fn %s", d->u.fn.name);
         if (d->u.fn.mods.is_far) fprintf(C.nif, ", far");
+        emit_ds_policy(C.nif, &d->u.fn.mods);
         fprintf(C.nif, "\n");
 
         emit_preserves(C.nif, &d->u.fn.mods, d->u.fn.returns);
@@ -2881,10 +2922,15 @@ static void compile_extern_fn(decl_t *d) {
     register_function_returns(d->u.extern_fn.name, nparams,
                               d->u.extern_fn.returns,
                               d->u.extern_fn.params);
+    validate_ds_policy(&d->u.extern_fn.mods, d->line);
+    if (d->is_pub && d->u.extern_fn.mods.is_far &&
+        d->u.extern_fn.mods.ds_policy == DS_POLICY_UNSPEC)
+        cerr(d->line, "public far functions must declare ds(...)");
 
     /* Emit to .nir so the binder knows how to call it */
     fprintf(C.nir, "\n.extern %s", d->u.extern_fn.name);
     if (d->u.extern_fn.mods.is_far) fprintf(C.nir, ", far");
+    emit_ds_policy(C.nir, &d->u.extern_fn.mods);
     if (d->u.extern_fn.has_address)
         fprintf(C.nir, ", addr_seg=0x%04X, addr_off=0x%04X",
                 d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);
@@ -2921,6 +2967,7 @@ static void compile_extern_fn(decl_t *d) {
     /* Also emit to .nif for cross-module type checking */
     fprintf(C.nif, ".extern %s", d->u.extern_fn.name);
     if (d->u.extern_fn.mods.is_far) fprintf(C.nif, ", far");
+    emit_ds_policy(C.nif, &d->u.extern_fn.mods);
     if (d->u.extern_fn.has_address)
         fprintf(C.nif, ", addr_seg=0x%04X, addr_off=0x%04X",
                 d->u.extern_fn.addr_seg, d->u.extern_fn.addr_off);

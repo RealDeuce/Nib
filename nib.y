@@ -67,6 +67,24 @@ static void mods_reset(void) {
     memset(&current_mods, 0, sizeof(current_mods));
 }
 
+static void set_ds_policy_ident(char *name) {
+    if (strcmp(name, "caller") == 0) {
+        current_mods.ds_policy = DS_POLICY_CALLER;
+    } else if (strcmp(name, "none") == 0) {
+        current_mods.ds_policy = DS_POLICY_NONE;
+    } else {
+        current_mods.ds_policy = DS_POLICY_SYMBOL;
+        current_mods.ds_symbol = name;
+        return;
+    }
+    free(name);
+}
+
+static void set_ds_policy_literal(int seg) {
+    current_mods.ds_policy = DS_POLICY_LITERAL;
+    current_mods.ds_literal = seg;
+}
+
 /* ---- Compile-time defines for `when` conditional compilation ---- */
 #define MAX_DEFINES 64
 static struct {
@@ -338,10 +356,26 @@ fn_start
     ;
 
 function_def
-    : fn_start fn_modifiers IDENT '(' param_list ')' return_clause fn_preserves '{' stmt_list '}'
-        { $$ = mk_decl_fn($3, current_mods, $5, $7, $10, yyline); }
-    | fn_start fn_modifiers IDENT '(' ')' return_clause fn_preserves '{' stmt_list '}'
-        { $$ = mk_decl_fn($3, current_mods, NULL, $6, $9, yyline); }
+    : fn_start fn_modifiers IDENT '(' param_list ')' return_clause ds_clause fn_preserves '{' stmt_list '}'
+        { $$ = mk_decl_fn($3, current_mods, $5, $7, $11, yyline); }
+    | fn_start fn_modifiers IDENT '(' ')' return_clause ds_clause fn_preserves '{' stmt_list '}'
+        { $$ = mk_decl_fn($3, current_mods, NULL, $6, $10, yyline); }
+    ;
+
+ds_clause
+    : /* empty */
+    | IDENT '(' IDENT ')'
+        { if (strcmp($1, "ds") != 0) {
+              yyerror("expected ds(...) function policy");
+              free($1); free($3); YYERROR;
+          }
+          free($1); set_ds_policy_ident($3); }
+    | IDENT '(' LIT_INT ')'
+        { if (strcmp($1, "ds") != 0) {
+              yyerror("expected ds(...) function policy");
+              free($1); YYERROR;
+          }
+          free($1); set_ds_policy_literal($3); }
     ;
 
 fn_preserves
@@ -389,26 +423,26 @@ extern_fn_start
     ;
 
 extern_decl
-    : extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern preserves_clause ';'
+    : extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern ds_clause preserves_clause ';'
         { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
-              $8, false, 0, 0, yyline); }
-    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern preserves_clause ';'
+              $9, false, 0, 0, yyline); }
+    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern ds_clause preserves_clause ';'
         { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
-              $7, false, 0, 0, yyline); }
-    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' extern_param_list ')' return_clause_extern preserves_clause ';'
+              $8, false, 0, 0, yyline); }
+    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' extern_param_list ')' return_clause_extern ds_clause preserves_clause ';'
         { $$ = mk_decl_extern_fn($8, current_mods, $10, $12,
-              $13, true, $4, $6, yyline); }
-    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' ')' return_clause_extern preserves_clause ';'
+              $14, true, $4, $6, yyline); }
+    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' ')' return_clause_extern ds_clause preserves_clause ';'
         { $$ = mk_decl_extern_fn($8, current_mods, NULL, $11,
-              $12, true, $4, $6, yyline); }
-    | extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern preserves_clause '{' stmt_list '}'
+              $13, true, $4, $6, yyline); }
+    | extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern ds_clause preserves_clause '{' stmt_list '}'
         { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
+              $9, false, 0, 0, yyline);
+          $$->u.extern_fn.body = $11; }
+    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern ds_clause preserves_clause '{' stmt_list '}'
+        { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
               $8, false, 0, 0, yyline);
           $$->u.extern_fn.body = $10; }
-    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern preserves_clause '{' stmt_list '}'
-        { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
-              $7, false, 0, 0, yyline);
-          $$->u.extern_fn.body = $9; }
     ;
 
 extern_modifiers

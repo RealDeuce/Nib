@@ -351,6 +351,31 @@ if [ -f "$TEST_TMPDIR"/t_far_data_seg.asm ]; then
     fi
 fi
 
+# Explicit DS policies must emit setup/restore at boundaries without
+# requiring callers to manage DS.
+if [ -f "$TEST_TMPDIR"/t_ds_policy.asm ]; then
+    lit_window=$(sed -n '/^api_lit:/,/^[[:space:]]*retf$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
+    sym_window=$(sed -n '/^api_sym:/,/^[[:space:]]*retf$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
+    caller_window=$(sed -n '/t_ds_policy_caller_ds:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
+    none_window=$(sed -n '/t_ds_policy_no_ds:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
+    forward_window=$(sed -n '/t_ds_policy_forward_data_ds:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
+    irq_window=$(sed -n '/t_ds_policy_irq_handler:/,/^[[:space:]]*iret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
+    if printf "%s\n" "$lit_window" | grep -q 'push DS' &&
+       printf "%s\n" "$lit_window" | grep -q 'mov AX, 0xE000' &&
+       printf "%s\n" "$lit_window" | grep -q 'mov DS, AX' &&
+       printf "%s\n" "$lit_window" | grep -q 'pop DS' &&
+       printf "%s\n" "$sym_window" | grep -q 'mov AX, SEG data_anchor' &&
+       printf "%s\n" "$forward_window" | grep -q 'mov AX, SEG late_anchor' &&
+       printf "%s\n" "$irq_window" | grep -q 'push DS' &&
+       printf "%s\n" "$irq_window" | grep -q 'iret' &&
+       ! printf "%s\n" "$caller_window" | grep -q 'mov DS, AX' &&
+       ! printf "%s\n" "$none_window" | grep -q 'mov DS, AX'; then
+        pass "ds-policy: setup and restore emitted at boundaries"
+    else
+        fail "ds-policy" "DS setup/restore sequence missing or unexpected"
+    fi
+fi
+
 cat > "$TEST_TMPDIR"/bad_far_data.nib <<'NIB'
 far u8[1] table;
 NIB
@@ -371,6 +396,52 @@ if ./nib "$TEST_TMPDIR"/bad_unplaced_data.nib >/dev/null 2>&1 &&
     fail "init-data-placement" "unplaced initialized data bound successfully"
 else
     pass "init-data-placement: initialized data requires at()"
+fi
+
+cat > "$TEST_TMPDIR"/bad_pub_far_ds.nib <<'NIB'
+pub extern fn far missing() clobbers(FLAGS) {
+}
+NIB
+if ./nib "$TEST_TMPDIR"/bad_pub_far_ds.nib >/dev/null 2>&1; then
+    fail "ds-policy-require" "public far function without ds() was accepted"
+else
+    pass "ds-policy-require: public far functions require ds()"
+fi
+
+cat > "$TEST_TMPDIR"/bad_ds_symbol.nib <<'NIB'
+fn code_label() {
+}
+pub extern fn far bad() ds(code_label) clobbers(FLAGS) {
+}
+NIB
+if ./nib "$TEST_TMPDIR"/bad_ds_symbol.nib >/dev/null 2>&1 &&
+   ./nibbind "$TEST_TMPDIR"/bad_ds_symbol.nir -o "$TEST_TMPDIR"/bad_ds_symbol.asm >/dev/null 2>&1; then
+    fail "ds-policy-symbol" "ds(function) was accepted"
+else
+    pass "ds-policy-symbol: ds() requires data object"
+fi
+
+cat > "$TEST_TMPDIR"/bad_ds_literal.nib <<'NIB'
+pub extern fn far bad() ds(0x10000) clobbers(FLAGS) {
+}
+NIB
+if ./nib "$TEST_TMPDIR"/bad_ds_literal.nib >/dev/null 2>&1; then
+    fail "ds-policy-literal" "out-of-range DS literal was accepted"
+else
+    pass "ds-policy-literal: DS literal range checked"
+fi
+
+cat > "$TEST_TMPDIR"/bad_ds_none.nib <<'NIB'
+u8 flag;
+fn bad() ds(none) -> u8 {
+    return flag;
+}
+NIB
+if ./nib "$TEST_TMPDIR"/bad_ds_none.nib >/dev/null 2>&1 &&
+   ./nibbind "$TEST_TMPDIR"/bad_ds_none.nir -o "$TEST_TMPDIR"/bad_ds_none.asm >/dev/null 2>&1; then
+    fail "ds-policy-none" "ds(none) allowed DS-default memory"
+else
+    pass "ds-policy-none: DS-default memory rejected"
 fi
 
 # Indirect calls must save live registers not preserved by the extern

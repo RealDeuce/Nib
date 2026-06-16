@@ -343,6 +343,14 @@ typedef enum {
     DECL_ENDAT
 } decl_kind_t;
 
+typedef enum {
+    DS_POLICY_UNSPEC,
+    DS_POLICY_CALLER,
+    DS_POLICY_NONE,
+    DS_POLICY_SYMBOL,
+    DS_POLICY_LITERAL
+} ds_policy_kind_t;
+
 typedef struct {
     bool is_far;
     bool is_interrupt;
@@ -356,6 +364,9 @@ typedef struct {
     bool has_at;
     int  at_seg;
     int  at_off;
+    ds_policy_kind_t ds_policy;
+    char *ds_symbol;
+    int  ds_literal;
 } fn_modifiers_t;
 
 struct decl_node {

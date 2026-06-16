@@ -1,0 +1,30 @@
+// Test: explicit DS policies at function boundaries.
+
+at(0xE000:0x0000);
+u8[1] data_anchor = {0x00};
+end at;
+
+pub extern fn far api_lit() ds(0xE000) clobbers(FLAGS) {
+    return;
+}
+
+pub extern fn far api_sym() ds(data_anchor) clobbers(FLAGS) {
+    return;
+}
+
+fn caller_ds() ds(caller) {
+}
+
+fn no_ds() ds(none) {
+}
+
+fn forward_data_ds() ds(late_anchor) {
+    return;
+}
+
+at(0xE000:0x0010);
+u8[1] late_anchor = {0x00};
+end at;
+
+fn interrupt irq_handler() ds(data_anchor) {
+}

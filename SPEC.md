@@ -431,6 +431,49 @@ fn api_memcopy(dst: u16 in DI, src: u16 in SI, len: u16 in CX)
 The compiler inverts `clobbers()` to `preserves` in the IR — the binder
 only ever sees `preserves`.
 
+### DS policy
+
+A function can declare what it requires of `DS` for the duration of its
+body. The policy is written after the return clause and before
+`preserves()` or `clobbers()`:
+
+```
+pub extern fn far print(str: far32 in ES:SI, len: u16 in CX)
+    ds(serif_data)
+    clobbers(FLAGS) {
+    ...
+}
+
+fn interrupt keyboard_irq() ds(0x0000) {
+    ...
+}
+```
+
+Accepted policies:
+
+- `ds(caller)` — the function uses whatever `DS` the caller supplied.
+  No prologue is emitted, but the declaration records that caller `DS`
+  is preserved.
+- `ds(none)` — the body must not use `DS` or DS-default memory. Stack
+  locals through `SS`, initialized placed data through `CS`/`ES`, and
+  explicit non-DS segment access are allowed.
+- `ds(symbol)` — save caller `DS`, set `DS` to `SEG symbol` for the
+  body, and restore caller `DS` before returning. The symbol must name
+  a global or initialized data object.
+- `ds(0xNNNN)` — save caller `DS`, set `DS` to the literal 16-bit
+  segment for the body, and restore caller `DS` before returning.
+
+For interrupt handlers, DS setup is emitted after the interrupt wrapper
+saves registers and DS restore happens before `iret`. For normal and far
+functions, DS setup/restore composes with the generated callee-save
+prologue and epilogue. Automatic DS setup is not available on `bare`
+functions because bare functions own their stack and register protocol.
+
+Public far functions and public far extern declarations must declare a
+DS policy. This makes driver/API boundaries explicit: callers do not
+need to know a callee's private data segment, and indirect far-call ABI
+descriptors can still describe whether caller `DS` is preserved.
+
 ### Placement with `at()`
 
 `at(seg:off)` controls where code and data are placed in the output
@@ -562,6 +605,7 @@ function body is compiled normally:
 
 ```
 pub extern fn far print(str: far32 in ES:SI, len: u16 in CX)
+    ds(serif_data)
     clobbers(FLAGS) {
     // function body — compiled as a regular function
     u8 ch = [str];

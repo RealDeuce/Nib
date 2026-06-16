@@ -42,6 +42,14 @@ enum {
     NUM_PREGS = 20
 };
 
+typedef enum {
+    DS_POLICY_UNSPEC,
+    DS_POLICY_CALLER,
+    DS_POLICY_NONE,
+    DS_POLICY_SYMBOL,
+    DS_POLICY_LITERAL
+} ds_policy_t;
+
 static const char *preg_name[] = {
     "AX","CX","DX","BX","SP","BP","SI","DI",
     "AL","CL","DL","BL","AH","CH","DH","BH",
@@ -222,6 +230,9 @@ typedef struct {
     int         at_seg;
     int         at_off;
     int         emit_seg;       /* segment at emission time (-1 = unknown) */
+    ds_policy_t ds_policy;
+    char        ds_symbol[64];
+    int         ds_literal;
 
     ir_insn_t   insns[MAX_INSNS];
     int         ninsns;
@@ -283,6 +294,9 @@ typedef struct {
 typedef struct {
     char name[64];
     bool is_far;
+    ds_policy_t ds_policy;
+    char ds_symbol[64];
+    int  ds_literal;
     bool has_address;
     int  addr_seg;
     int  addr_off;
@@ -426,6 +440,34 @@ static char *read_word(char *p, char *buf, int bufsz) {
     return p;
 }
 
+static void parse_ds_policy_word(const char *word, ds_policy_t *policy,
+                                 char *symbol, size_t symbol_sz,
+                                 int *literal) {
+    if (strncmp(word, "ds=", 3) != 0)
+        return;
+
+    const char *value = word + 3;
+    if (strcmp(value, "caller") == 0) {
+        *policy = DS_POLICY_CALLER;
+    } else if (strcmp(value, "none") == 0) {
+        *policy = DS_POLICY_NONE;
+    } else if (isdigit((unsigned char)value[0])) {
+        char *end = NULL;
+        long seg = strtol(value, &end, 0);
+        if (*end || seg < 0 || seg > 0xFFFF) {
+            fprintf(stderr, "bind: invalid ds() segment literal '%s'\n", value);
+            bind_errors++;
+            seg = 0;
+        }
+        *policy = DS_POLICY_LITERAL;
+        *literal = (int)seg;
+    } else {
+        *policy = DS_POLICY_SYMBOL;
+        strncpy(symbol, value, symbol_sz - 1);
+        symbol[symbol_sz - 1] = '\0';
+    }
+}
+
 static int parse_vreg(char *p, char **endp) {
     p = skip_ws(p);
     if (*p != '%') { *endp = p; return -1; }
@@ -477,6 +519,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             }
             p = skip_ws(p);
             if (*p == ')') p++;
+        }
+        else if (strncmp(word, "ds=", 3) == 0) {
+            parse_ds_policy_word(word, &fn->ds_policy, fn->ds_symbol,
+                                 sizeof(fn->ds_symbol), &fn->ds_literal);
         }
         /* chain removed */
     }
@@ -1475,6 +1521,12 @@ static void parse_nir(const char *path) {
                     }
                     p = skip_ws(p); if (*p == ')') p++;
                 }
+                else if (strncmp(word, "ds=", 3) == 0) {
+                    parse_ds_policy_word(word, &ext->ds_policy,
+                                         ext->ds_symbol,
+                                         sizeof(ext->ds_symbol),
+                                         &ext->ds_literal);
+                }
             }
             /* Skip .eparam lines until .endextern */
             char eline[512];
@@ -2207,6 +2259,152 @@ static void annotate_data_refs(void) {
     }
 }
 
+static bool symbol_is_data_object(const char *name) {
+    if (find_data_block(name))
+        return true;
+    for (int i = 0; i < nglobals; i++)
+        if (strcmp(globals[i].name, name) == 0)
+            return true;
+    return false;
+}
+
+static bool mem_text_has_explicit_segment(const char *name) {
+    return strstr(name, "CS:") || strstr(name, "ES:") || strstr(name, "SS:");
+}
+
+static bool vreg_is_non_ds_addr(func_t *fn, int v, bool *local_addr) {
+    if (v < 0 || v >= MAX_VREGS)
+        return false;
+    if (fn->vregs[v].is_local_slot || local_addr[v])
+        return true;
+    if (fn->vregs[v].is_cs_ref || vreg_data_label(fn, v))
+        return true;
+    return false;
+}
+
+static void validate_ds_none(func_t *fn) {
+    bool local_addr[MAX_VREGS] = {0};
+    bool changed;
+
+    do {
+        changed = false;
+        for (int i = 0; i < fn->ninsns; i++) {
+            ir_insn_t *ins = &fn->insns[i];
+            bool mark = false;
+            if (ins->op == IR_LEA) {
+                mark = true;
+            } else if (ins->op == IR_MOV && ins->src1 >= 0) {
+                mark = local_addr[ins->src1];
+            } else if (ins->op == IR_ALU &&
+                       strcmp(ins->name, "add") == 0) {
+                mark = (ins->src1 >= 0 && local_addr[ins->src1]) ||
+                       (ins->src2 >= 0 && local_addr[ins->src2]);
+            }
+            if (mark && ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                !local_addr[ins->dst]) {
+                local_addr[ins->dst] = true;
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (fn->vregs[v].prefer == PREG_DS) {
+            fprintf(stderr, "%s: ds(none) body uses DS-pinned vreg %%%d\n",
+                    fn->name, v);
+            bind_errors++;
+        }
+    }
+
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+
+        if (ins->op == IR_LOAD || ins->op == IR_STORE) {
+            int base = ins->src1;
+            if (!vreg_is_non_ds_addr(fn, base, local_addr)) {
+                fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
+                        fn->name);
+                bind_errors++;
+                return;
+            }
+        } else if (ins->op == IR_LOADMEM) {
+            if (ins->name[0]) {
+                if (!mem_text_has_explicit_segment(ins->name)) {
+                    fprintf(stderr,
+                            "%s: ds(none) body uses DS-default memory\n",
+                            fn->name);
+                    bind_errors++;
+                    return;
+                }
+            } else if (ins->src2 < 0 &&
+                       !vreg_is_non_ds_addr(fn, ins->src1, local_addr)) {
+                fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
+                        fn->name);
+                bind_errors++;
+                return;
+            }
+        } else if (ins->op == IR_STOREMEM) {
+            if (ins->name[0]) {
+                if (!mem_text_has_explicit_segment(ins->name)) {
+                    fprintf(stderr,
+                            "%s: ds(none) body uses DS-default memory\n",
+                            fn->name);
+                    bind_errors++;
+                    return;
+                }
+            } else if (ins->src2 < 0 &&
+                       !vreg_is_non_ds_addr(fn, ins->dst, local_addr)) {
+                fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
+                        fn->name);
+                bind_errors++;
+                return;
+            }
+        } else if (ins->op == IR_ALU &&
+                   (strcmp(ins->name, "lods") == 0 ||
+                    strcmp(ins->name, "xlat") == 0)) {
+            fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
+                    fn->name);
+            bind_errors++;
+            return;
+        } else if (ins->op == IR_ASM && ins->asm_body[0]) {
+            fprintf(stderr, "%s: ds(none) body contains opaque asm\n",
+                    fn->name);
+            bind_errors++;
+            return;
+        }
+    }
+}
+
+static void validate_ds_policies(void) {
+    for (int fi = 0; fi < nfunctions; fi++) {
+        func_t *fn = &functions[fi];
+        if (fn->is_pub && fn->is_far &&
+            fn->ds_policy == DS_POLICY_UNSPEC) {
+            fprintf(stderr, "%s: public far functions must declare ds(...)\n",
+                    fn->name);
+            bind_errors++;
+        }
+        if (fn->ds_policy == DS_POLICY_SYMBOL &&
+            !symbol_is_data_object(fn->ds_symbol)) {
+            fprintf(stderr, "%s: ds(%s) must name a global or data object\n",
+                    fn->name, fn->ds_symbol);
+            bind_errors++;
+        }
+        if (fn->ds_policy == DS_POLICY_NONE)
+            validate_ds_none(fn);
+    }
+
+    for (int e = 0; e < nexterns; e++) {
+        extern_fn_t *ext = &externs[e];
+        if (ext->ds_policy == DS_POLICY_SYMBOL &&
+            !symbol_is_data_object(ext->ds_symbol)) {
+            fprintf(stderr, "%s: ds(%s) must name a global or data object\n",
+                    ext->name, ext->ds_symbol);
+            bind_errors++;
+        }
+    }
+}
+
 /* Check if two vregs interfere (graph lookup) */
 static bool vregs_interfere(func_t *fn, int a, int b) {
     if (a < 0 || b < 0 || a >= fn->nvregs || b >= fn->nvregs)
@@ -2782,6 +2980,8 @@ static void insert_fixup_moves(func_t *fn) {
                         for (int r = 0; r < NUM_PREGS; r++)
                             callee_preserves[r] = !fn_assigns[fi2].clobbers[r];
                     }
+                    if (functions[fi2].ds_policy != DS_POLICY_UNSPEC)
+                        callee_preserves[PREG_DS] = true;
                     /* else: unresolved, no preserves — assume all clobbered */
                     found_callee = true;
                 }
@@ -2791,6 +2991,8 @@ static void insert_fixup_moves(func_t *fn) {
                     if (strcmp(externs[e].name, ins->name) == 0) {
                         for (int pp = 0; pp < externs[e].npreserves; pp++)
                             callee_preserves[externs[e].preserves[pp]] = true;
+                        if (externs[e].ds_policy != DS_POLICY_UNSPEC)
+                            callee_preserves[PREG_DS] = true;
                         break;
                     }
                 }
@@ -2916,6 +3118,8 @@ static void insert_fixup_moves(func_t *fn) {
                 if (strcmp(externs[e].name, ins->name) == 0) {
                     for (int pp = 0; pp < externs[e].npreserves; pp++)
                         callee_preserves[externs[e].preserves[pp]] = true;
+                    if (externs[e].ds_policy != DS_POLICY_UNSPEC)
+                        callee_preserves[PREG_DS] = true;
                     break;
                 }
             }
@@ -3203,6 +3407,59 @@ static const char *near_data_seg_prefix(func_t *fn, int addr_vreg) {
 static void emit_es_data_suffix(bool used_es) {
     if (used_es)
         fprintf(out_asm, "    pop ES\n");
+}
+
+static bool ds_policy_sets_ds(func_t *fn) {
+    return fn->ds_policy == DS_POLICY_SYMBOL ||
+           fn->ds_policy == DS_POLICY_LITERAL;
+}
+
+static bool reg_list_contains(int *regs, int nregs, int preg) {
+    for (int i = 0; i < nregs; i++)
+        if (regs[i] == preg)
+            return true;
+    return false;
+}
+
+static void emit_ds_setup(func_t *fn, bool explicit_save) {
+    if (!ds_policy_sets_ds(fn))
+        return;
+    if (explicit_save)
+        fprintf(out_asm, "    push DS\n");
+    fprintf(out_asm, "    push AX\n");
+    if (fn->ds_policy == DS_POLICY_SYMBOL)
+        fprintf(out_asm, "    mov AX, SEG %s\n", fn->ds_symbol);
+    else
+        fprintf(out_asm, "    mov AX, 0x%04X\n", fn->ds_literal & 0xFFFF);
+    fprintf(out_asm, "    mov DS, AX\n");
+    fprintf(out_asm, "    pop AX\n");
+}
+
+static void emit_epilogue(func_t *fn, int *save_regs, int nsave,
+                          int *isr_save, int isr_nsave,
+                          bool ds_explicit_save) {
+    if (fn->needs_frame) {
+        fprintf(out_asm, "    mov sp, bp\n");
+        fprintf(out_asm, "    pop bp\n");
+    }
+    if (ds_explicit_save)
+        fprintf(out_asm, "    pop DS\n");
+    /* Callee-save pops (reverse order) */
+    for (int j = nsave - 1; j >= 0; j--)
+        fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
+    if (fn->is_interrupt) {
+        if (isr_nsave >= 6) {
+            fprintf(out_asm, "    popa\n");
+        } else {
+            for (int j = isr_nsave - 1; j >= 0; j--)
+                fprintf(out_asm, "    pop %s\n", preg_name[isr_save[j]]);
+        }
+        fprintf(out_asm, "    iret\n");
+    } else if (fn->is_far) {
+        fprintf(out_asm, "    retf\n");
+    } else {
+        fprintf(out_asm, "    ret\n");
+    }
 }
 
 /* Emit an ALU instruction (handles special ops, spill combinations,
@@ -3590,6 +3847,8 @@ static void emit_function(func_t *fn) {
                 save_regs[nsave++] = preg;
         }
     }
+    bool ds_explicit_save = ds_policy_sets_ds(fn) &&
+        !reg_list_contains(save_regs, nsave, PREG_DS);
 
     /* For interrupt handlers: compute which word registers are clobbered */
     int isr_save[8]; /* word regs to save: AX,CX,DX,BX,SP,BP,SI,DI */
@@ -3637,6 +3896,8 @@ static void emit_function(func_t *fn) {
         /* Callee-save pushes */
         for (int i = 0; i < nsave; i++)
             fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
+
+        emit_ds_setup(fn, ds_explicit_save);
 
         if (fn->needs_frame) {
             fprintf(out_asm, "    push bp\n");
@@ -4045,26 +4306,8 @@ static void emit_function(func_t *fn) {
 
         case IR_RET:
             if (!fn->is_bare) {
-                if (fn->needs_frame) {
-                    fprintf(out_asm, "    mov sp, bp\n");
-                    fprintf(out_asm, "    pop bp\n");
-                }
-                /* Callee-save pops (reverse order) */
-                for (int j = nsave - 1; j >= 0; j--)
-                    fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
-                if (fn->is_interrupt) {
-                    if (isr_nsave >= 6) {
-                        fprintf(out_asm, "    popa\n");
-                    } else {
-                        for (int j = isr_nsave - 1; j >= 0; j--)
-                            fprintf(out_asm, "    pop %s\n", preg_name[isr_save[j]]);
-                    }
-                    fprintf(out_asm, "    iret\n");
-                } else if (fn->is_far) {
-                    fprintf(out_asm, "    retf\n");
-                } else {
-                    fprintf(out_asm, "    ret\n");
-                }
+                emit_epilogue(fn, save_regs, nsave, isr_save, isr_nsave,
+                              ds_explicit_save);
             }
             break;
 
@@ -4298,25 +4541,8 @@ static void emit_function(func_t *fn) {
     /* Final ret if not already emitted */
     if (!fn->is_bare &&
         (fn->ninsns == 0 || fn->insns[fn->ninsns-1].op != IR_RET)) {
-        if (fn->needs_frame) {
-            fprintf(out_asm, "    mov sp, bp\n");
-            fprintf(out_asm, "    pop bp\n");
-        }
-        for (int j = nsave - 1; j >= 0; j--)
-            fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
-        if (fn->is_interrupt) {
-            if (isr_nsave >= 6) {
-                fprintf(out_asm, "    popa\n");
-            } else {
-                for (int j = isr_nsave - 1; j >= 0; j--)
-                    fprintf(out_asm, "    pop %s\n", preg_name[isr_save[j]]);
-            }
-            fprintf(out_asm, "    iret\n");
-        } else if (fn->is_far) {
-            fprintf(out_asm, "    retf\n");
-        } else {
-            fprintf(out_asm, "    ret\n");
-        }
+        emit_epilogue(fn, save_regs, nsave, isr_save, isr_nsave,
+                      ds_explicit_save);
     }
 
     /* Emit per-function constant pool (strings, far refs) */
@@ -4938,6 +5164,9 @@ int main(int argc, char **argv) {
         return 1;
 
     annotate_data_refs();
+    validate_ds_policies();
+    if (bind_errors > 0)
+        return 1;
 
     /* Inter-procedural register propagation */
     build_call_graph();
@@ -5045,10 +5274,14 @@ int main(int argc, char **argv) {
                         fa->clobbers[r] = true;
                     for (int pp = 0; pp < externs[e].npreserves; pp++)
                         fa->clobbers[externs[e].preserves[pp]] = false;
+                    if (externs[e].ds_policy != DS_POLICY_UNSPEC)
+                        fa->clobbers[PREG_DS] = false;
                     break;
                 }
             }
         }
+        if (fn->ds_policy != DS_POLICY_UNSPEC)
+            fa->clobbers[PREG_DS] = false;
     }
 
     /* Build resolved instruction streams now that call fixups can see
