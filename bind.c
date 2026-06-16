@@ -320,6 +320,68 @@ static const char *vreg_asm(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
 
+static bool insn_defines_dst(const ir_insn_t *ins) {
+    if (!ins || ins->dst < 0)
+        return false;
+    if (ins->op == IR_STORE || ins->op == IR_STOREMEM ||
+        ins->op == IR_STOREFIELD)
+        return false;
+    if (ins->op == IR_ALU &&
+        (strcmp(ins->name, "out") == 0 ||
+         strcmp(ins->name, "outb") == 0 ||
+         strcmp(ins->name, "bins") == 0 ||
+         strcmp(ins->name, "stos") == 0))
+        return false;
+    return true;
+}
+
+static bool insn_reads_dst(const ir_insn_t *ins) {
+    return ins && ins->dst >= 0 && !insn_defines_dst(ins);
+}
+
+static void mark_preg_clobber(bool *clobbers, int preg) {
+    if (!clobbers || preg < 0 || preg >= NUM_PREGS)
+        return;
+    clobbers[preg] = true;
+    if (preg >= PREG_AL && preg <= PREG_BH)
+        clobbers[preg_alias_parent[preg]] = true;
+}
+
+static void mark_vreg_clobber(func_t *fn, bool *clobbers, int vreg) {
+    if (!fn || vreg < 0 || vreg >= fn->nvregs)
+        return;
+    mark_preg_clobber(clobbers, fn->vregs[vreg].assigned);
+}
+
+static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
+                                  bool *clobbers) {
+    if (insn_defines_dst(ins))
+        mark_vreg_clobber(fn, clobbers, ins->dst);
+
+    if (ins->op == IR_MCALL) {
+        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
+            mark_vreg_clobber(fn, clobbers, ins->ret_vregs[j]);
+    }
+
+    if (ins->op == IR_ALU &&
+        (strcmp(ins->name, "in") == 0 ||
+         strcmp(ins->name, "inb") == 0)) {
+        mark_preg_clobber(clobbers,
+                          strcmp(ins->name, "inb") == 0 ? PREG_AL
+                                                          : PREG_AX);
+    }
+
+    if (ins->op == IR_ALU &&
+        (strcmp(ins->name, "out") == 0 ||
+         strcmp(ins->name, "outb") == 0)) {
+        int acc = strcmp(ins->name, "outb") == 0 ? PREG_AL : PREG_AX;
+        int val = (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+            ? fn->vregs[ins->src1].assigned : PREG_NONE;
+        if (val != acc)
+            mark_preg_clobber(clobbers, acc);
+    }
+}
+
 /* Resolved parameter register assignments per function */
 typedef struct {
     int param_regs[16];     /* PREG_* for each parameter, or PREG_NONE */
@@ -1762,9 +1824,7 @@ static void compute_liveness(func_t *fn) {
     /* def_pos: first instruction that defines each vreg */
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
-        if (ins->dst >= 0 && ins->dst < fn->nvregs &&
-            ins->op != IR_STORE && ins->op != IR_STOREMEM &&
-            ins->op != IR_STOREFIELD &&
+        if (insn_defines_dst(ins) && ins->dst < fn->nvregs &&
             fn->vregs[ins->dst].def_pos < 0)
             fn->vregs[ins->dst].def_pos = i;
         if (ins->op == IR_MCALL) {
@@ -2008,9 +2068,7 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
             for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
                 if (ins->ret_vregs[j] >= 0) use_vregs[nuses++] = ins->ret_vregs[j];
         }
-        /* dst is a "use" for stores (the address is read) */
-        if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
-             ins->op == IR_STOREFIELD) && ins->dst >= 0)
+        if (insn_reads_dst(ins))
             use_vregs[nuses++] = ins->dst;
 
         for (int u = 0; u < nuses; u++) {
@@ -2020,9 +2078,7 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
         }
 
         /* Defs: vreg written by this instruction */
-        if (ins->dst >= 0 && ins->dst < fn->nvregs &&
-            ins->op != IR_STORE && ins->op != IR_STOREMEM &&
-            ins->op != IR_STOREFIELD)
+        if (insn_defines_dst(ins) && ins->dst < fn->nvregs)
             vset_set(bb->defs, ins->dst);
         if (ins->op == IR_MCALL) {
             for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
@@ -2148,9 +2204,7 @@ static void build_igraph(func_t *fn) {
                         if (ins->ret_vregs[j] >= 0 && ins->ret_vregs[j] < fn->nvregs)
                             vset_set(live, ins->ret_vregs[j]);
                 }
-                if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
-                     ins->op == IR_STOREFIELD) &&
-                    ins->dst >= 0 && ins->dst < fn->nvregs)
+                if (insn_reads_dst(ins) && ins->dst < fn->nvregs)
                     vset_set(live, ins->dst);
             }
 
@@ -2159,8 +2213,7 @@ static void build_igraph(func_t *fn) {
              * For MOV, the src does NOT interfere with dst (they can
              * share a register to eliminate the mov). */
             int def = -1;
-            if (ins->dst >= 0 && ins->op != IR_STORE &&
-                ins->op != IR_STOREMEM && ins->op != IR_STOREFIELD)
+            if (insn_defines_dst(ins))
                 def = ins->dst;
 
             if (def >= 0 && def < fn->nvregs) {
@@ -2752,9 +2805,7 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
         ir_insn_t *ins = &fn->insns[i];
 
         /* Remove defs (vreg dies here going backward) */
-        if (ins->dst >= 0 && ins->dst < fn->nvregs &&
-            ins->op != IR_STORE && ins->op != IR_STOREMEM &&
-            ins->op != IR_STOREFIELD)
+        if (insn_defines_dst(ins) && ins->dst < fn->nvregs)
             vset_clear(live, ins->dst);
         if (ins->op == IR_MCALL) {
             for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
@@ -2779,9 +2830,7 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
                     vset_set(live, rv);
             }
         }
-        if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
-             ins->op == IR_STOREFIELD) &&
-            ins->dst >= 0 && ins->dst < fn->nvregs)
+        if (insn_reads_dst(ins) && ins->dst < fn->nvregs)
             vset_set(live, ins->dst);
     }
 
@@ -3033,21 +3082,49 @@ static void insert_fixup_moves(func_t *fn) {
             int call_nsaved = 0;
             bool call_use_pusha = false;
             bool outgoing_bp_param = false;
+            bool outgoing_clobbers[NUM_PREGS];
+            memset(outgoing_clobbers, 0, sizeof(outgoing_clobbers));
             bool caller_bp_live = fn->needs_frame;
             if (callee_fi >= 0) {
                 fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
                 for (int a = 0; a < ins->nargs && a < 16; a++) {
-                    if (callee_fa->param_regs[a] == PREG_BP) {
+                    int expected = callee_fa->param_regs[a];
+                    if (expected == PREG_BP) {
                         outgoing_bp_param = true;
-                        break;
                     }
+                    if (expected == PREG_NONE || expected == PREG_SP)
+                        continue;
+                    int arg_vreg = (a == 0) ? ins->src1 :
+                                   (a == 1) ? ins->src2 :
+                                              ins->extra_args[a - 2];
+                    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
+                        continue;
+                    int actual = fn->vregs[arg_vreg].assigned;
+                    if (actual == expected || pregs_alias(actual, expected))
+                        continue;
+                    int clob = (expected >= PREG_AL && expected <= PREG_BH)
+                        ? preg_alias_parent[expected] : expected;
+                    outgoing_clobbers[clob] = true;
                 }
             } else if (callee_ext >= 0) {
                 for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
-                    if (externs[callee_ext].param_pins[a].preg == PREG_BP) {
+                    int expected = externs[callee_ext].param_pins[a].preg;
+                    if (expected == PREG_BP) {
                         outgoing_bp_param = true;
-                        break;
                     }
+                    if (expected == PREG_NONE || expected == PREG_SP)
+                        continue;
+                    int arg_vreg = (a == 0) ? ins->src1 :
+                                   (a == 1) ? ins->src2 :
+                                              ins->extra_args[a - 2];
+                    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
+                        continue;
+                    int actual = fn->vregs[arg_vreg].assigned;
+                    if (actual == expected || pregs_alias(actual, expected))
+                        continue;
+                    int clob = (expected >= PREG_AL && expected <= PREG_BH)
+                        ? preg_alias_parent[expected] : expected;
+                    outgoing_clobbers[clob] = true;
                 }
             }
             if (!caller_bp_live) {
@@ -3090,7 +3167,8 @@ static void insert_fixup_moves(func_t *fn) {
                 int push_reg = preg;
                 if (preg >= PREG_AL && preg <= PREG_BH)
                     push_reg = preg_alias_parent[preg];
-                if (callee_preserves[push_reg]) continue;
+                if (callee_preserves[push_reg] && !outgoing_clobbers[push_reg])
+                    continue;
                 add_call_saved_reg(call_saved, &call_nsaved, push_reg);
             }
             /* Emit saves: PUSHA if >= 6, individual pushes otherwise */
@@ -5367,13 +5445,8 @@ int main(int argc, char **argv) {
         fn_assignment_t *fa = &fn_assigns[fi];
 
         memset(fa->clobbers, 0, sizeof(fa->clobbers));
-        for (int v = 0; v < fn->nvregs; v++) {
-            int preg = fn->vregs[v].assigned;
-            if (preg == PREG_NONE) continue;
-            fa->clobbers[preg] = true;
-            if (preg >= PREG_AL && preg <= PREG_BH)
-                fa->clobbers[preg_alias_parent[preg]] = true;
-        }
+        for (int ii = 0; ii < fn->ninsns; ii++)
+            collect_insn_clobbers(fn, &fn->insns[ii], fa->clobbers);
 
         for (int ii = 0; ii < fn->ninsns; ii++) {
             if (fn->insns[ii].op != IR_CALL && fn->insns[ii].op != IR_MCALL) continue;
