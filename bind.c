@@ -74,6 +74,20 @@ static bool pregs_alias(int a, int b) {
     return false;
 }
 
+static bool preg_write_clobbers(int written, int live) {
+    if (written < 0 || live < 0)
+        return false;
+    if (written == live)
+        return true;
+    if (written >= PREG_AX && written <= PREG_BX) {
+        return live == preg_alias_lo[written] || live == preg_alias_hi[written];
+    }
+    if (written >= PREG_AL && written <= PREG_BH) {
+        return live == preg_alias_parent[written];
+    }
+    return false;
+}
+
 /* Parse a register name to PREG_* */
 static int parse_preg(const char *s) {
     for (int i = 0; i < NUM_PREGS; i++)
@@ -2860,6 +2874,69 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
     return ~occupied;  /* free = complement of occupied */
 }
 
+static void add_insn_uses_to_live(func_t *fn, ir_insn_t *ins,
+                                  uint64_t *live) {
+    if (ins->src1 >= 0 && ins->src1 < fn->nvregs && ins->op != IR_LEA)
+        vset_set(live, ins->src1);
+    if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
+        vset_set(live, ins->src2);
+    for (int j = 0; j < 8; j++)
+        if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
+            vset_set(live, ins->extra_args[j]);
+    if (ins->op == IR_RETVAL) {
+        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+            int rv = ins->ret_vregs[j];
+            if (rv >= 0 && rv < fn->nvregs)
+                vset_set(live, rv);
+        }
+    }
+    if (insn_reads_dst(ins) && ins->dst < fn->nvregs)
+        vset_set(live, ins->dst);
+}
+
+static void remove_insn_defs_from_live(func_t *fn, ir_insn_t *ins,
+                                       uint64_t *live) {
+    if (insn_defines_dst(ins) && ins->dst < fn->nvregs)
+        vset_clear(live, ins->dst);
+    if (ins->op == IR_MCALL) {
+        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+            int rv = ins->ret_vregs[j];
+            if (rv >= 0 && rv < fn->nvregs)
+                vset_clear(live, rv);
+        }
+    }
+}
+
+static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg) {
+    bblock_t *bb = NULL;
+    for (int b = 0; b < fn->nblocks; b++) {
+        if ((int)fn->blocks[b].start <= insn_idx &&
+            insn_idx < (int)fn->blocks[b].end) {
+            bb = &fn->blocks[b];
+            break;
+        }
+    }
+    if (!bb)
+        return false;
+
+    uint64_t live[VREG_WORDS];
+    memcpy(live, bb->live_out, sizeof(live));
+    for (int i = (int)bb->end - 1; i > insn_idx; i--) {
+        ir_insn_t *ins = &fn->insns[i];
+        remove_insn_defs_from_live(fn, ins, live);
+        add_insn_uses_to_live(fn, ins, live);
+    }
+
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (!vset_test(live, v))
+            continue;
+        int preg = fn->vregs[v].assigned;
+        if (preg_write_clobbers(written_preg, preg))
+            return true;
+    }
+    return false;
+}
+
 /* Find which block contains instruction index `pos` */
 static int block_of(func_t *fn, int pos) {
     for (int b = 0; b < fn->nblocks; b++)
@@ -3677,13 +3754,20 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     if (strcmp(op, "out") == 0 || strcmp(op, "outb") == 0) {
         bool byte_out = (strcmp(op, "outb") == 0);
         const char *acc = byte_out ? "AL" : "AX";
+        int acc_preg = byte_out ? PREG_AL : PREG_AX;
         const char *val = vreg_asm(fn, ins->src1);
+        bool preserve_acc = strcmp(acc, val) != 0 &&
+            preg_live_after_insn(fn, i, acc_preg);
+        if (preserve_acc)
+            fprintf(out_asm, "    push AX\n");
         if (strcmp(acc, val) != 0)
             fprintf(out_asm, "    mov %s, %s\n", acc, val);
         if (ins->has_imm)
             fprintf(out_asm, "    out 0x%02X, %s\n", ins->imm, acc);
         else
             fprintf(out_asm, "    out %s, %s\n", vreg_asm(fn, ins->dst), acc);
+        if (preserve_acc)
+            fprintf(out_asm, "    pop AX\n");
         return;
     }
 

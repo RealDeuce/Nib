@@ -3,6 +3,9 @@
 
 const PORT_LO = 0x50;
 const PORT_HI = 0x51;
+const PORT_TIMER = 0x53;
+const PORT_IRQ_CLEAR = 0x90;
+const IRQCLR_F9 = 0x40;
 
 fn test_out(val: u8) {
     port_out(0x50, val);
@@ -11,6 +14,11 @@ fn test_out(val: u8) {
 fn test_out_accum(divisor: u16 in AX) {
     port_out(PORT_LO, AL);
     port_out(PORT_HI, AH);
+}
+
+fn test_out_live_accum(ticks: u8 in AL) {
+    port_out(PORT_IRQ_CLEAR, IRQCLR_F9);
+    port_out(PORT_TIMER, ticks);
 }
 
 fn test_out16(divisor: u16 in AX) {
