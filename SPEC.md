@@ -255,6 +255,10 @@ that are spilled to the stack never need write-back, and low-use
 consts outside loops may be kept in memory rather than occupying
 a register.
 
+If a local const's address is taken with `&` or `@`, it is allocated
+in the function frame and initialized once at its declaration. The
+const qualifier still forbids reassignment.
+
 ### Visibility
 
 By default, declarations are module-private — not visible to other
@@ -713,11 +717,15 @@ Works between two registers, or between a register and memory.
 
 ```
 u16 addr = &variable        // LEA — load effective address
+u16 buf_addr = &local_buf   // BP-relative offset for stack locals
 u16 entry = &my_function    // offset of function within its segment
 ```
 
 `&` returns the offset (`u16`) of a variable or function within its
-segment. For struct fields:
+segment. For address-taken local variables and fixed-size local arrays,
+the compiler allocates storage in the function frame and returns the
+local's BP-relative offset. The frame remains live across calls made
+with that address. For struct fields:
 
 ```
 u16 addr = &record.field    // LEA with displacement
@@ -728,11 +736,17 @@ u16 addr = &record.field    // LEA with displacement
 ```
 far32 handler_addr = @my_handler  // seg:off pointer to function
 far32 data_ptr = @my_global       // seg:off pointer to global
+far32 stack_ptr = @local_buf      // SS:offset pointer to stack local
 ```
 
-`@` returns a `far32` address (segment:offset) resolved at link time by
-the binder. Works on function names and global variables. The result
-is a 4-byte seg:off pair stored in the constant pool.
+`@` returns a `far32` address (segment:offset). For function names and
+global variables, the address is resolved at link time by the binder.
+For address-taken stack locals, the compiler emits runtime code that
+materializes `SS:<BP-relative offset>`.
+
+`@local` works for scalar locals and fixed-size local arrays. It is the
+normal way to pass a temporary stack object to an API that accepts a
+`far32`, such as `print(@buf, len)`.
 
 ### Comparisons
 
