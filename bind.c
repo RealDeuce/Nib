@@ -58,6 +58,7 @@ static int preg_alias_parent[] = {
 
 /* Check if two physical registers alias */
 static bool pregs_alias(int a, int b) {
+    if (a < 0 || b < 0) return false;
     if (a == b) return true;
     /* Word vs its byte halves */
     if (a < 4 && (b == preg_alias_lo[a] || b == preg_alias_hi[a])) return true;
@@ -2536,12 +2537,13 @@ static void insert_fixup_moves(func_t *fn) {
                     if (actual == expected || pregs_alias(actual, expected))
                         continue;
                     /* Emit fixup mov */
-                    if (is_spilled(fn, arg_vreg))
+                    if (is_spilled(fn, arg_vreg)) {
                         rins_asm(fn, "    mov %s, %s",
                                  preg_name[expected], vreg_asm(fn, arg_vreg));
-                    else
+                    } else {
                         rins_asm(fn, "    mov %s, %s",
                                  preg_name[expected], preg_name[actual]);
+                    }
                 }
             }
 
