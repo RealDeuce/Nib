@@ -279,6 +279,17 @@ if [ -f "$TEST_TMPDIR"/t_call_ret_save.asm ]; then
     fi
 fi
 
+# u8 returns computed before later byte bookkeeping must be restored to AL.
+if [ -f "$TEST_TMPDIR"/t_return_late_u8.asm ]; then
+    ret_window=$(sed -n '/t_return_late_u8_pop_key:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_return_late_u8.asm)
+    after_count=$(printf "%s\n" "$ret_window" | sed -n '/mov .*count.*AL/,$p')
+    if printf "%s\n" "$after_count" | grep -q 'mov AL, '; then
+        pass "return-late-u8: saved byte restored to AL"
+    else
+        fail "return-late-u8" "u8 return value not restored after bookkeeping"
+    fi
+fi
+
 # Indirect calls must save live registers not preserved by the extern
 # descriptor.
 if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then

@@ -2376,6 +2376,14 @@ static bool is_shift_op(const char *op) {
            strcmp(op, "rcr") == 0;
 }
 
+static int function_return_reg(func_t *fn) {
+    if (!fn->has_return)
+        return PREG_NONE;
+    if (fn->ret_pin != PREG_NONE)
+        return fn->ret_pin;
+    return strcmp(fn->return_type, "u8") == 0 ? PREG_AL : PREG_AX;
+}
+
 /* Build the resolved instruction stream.
  * Inserts explicit moves for fixups that the emitter would
  * otherwise handle with push/pop sequences. */
@@ -2646,6 +2654,21 @@ static void insert_fixup_moves(func_t *fn) {
                     rins_asm(fn, "    pop %s", preg_name[call_saved[s]]);
             }
 
+            continue;
+        }
+
+        /* ---- Return value materialization ---- */
+        if (ins->op == IR_RETVAL) {
+            int ret_reg = function_return_reg(fn);
+            int src = ins->src1;
+            if (ret_reg != PREG_NONE && src >= 0 && src < fn->nvregs) {
+                int src_reg = fn->vregs[src].assigned;
+                if (src_reg != ret_reg) {
+                    rins_asm(fn, "    mov %s, %s",
+                             preg_name[ret_reg], vreg_asm(fn, src));
+                }
+            }
+            rins_ir(fn, i);
             continue;
         }
 

@@ -1,0 +1,14 @@
+// Test: a u8 return value saved before later byte bookkeeping must be
+// moved back to AL before returning.
+
+u8[32] key_buf;
+u8 tail;
+u8 count;
+
+fn pop_key() -> u8 {
+    const u16 idx = zero_extend(tail);
+    const u8 key = key_buf[idx];
+    tail := (tail + 1) & 0x1F;
+    count := count - 1;
+    return key;
+}
