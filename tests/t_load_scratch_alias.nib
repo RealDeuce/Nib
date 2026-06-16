@@ -1,0 +1,8 @@
+// Test: load through a spilled base must not put the result in a
+// register that is restored immediately afterward.
+
+u8[256] buf;
+
+fn masked(idx: u16 in SI, src: u8, mask: u8) {
+    buf[idx] := (buf[idx] & ~mask) | (~src & mask);
+}

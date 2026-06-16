@@ -358,6 +358,24 @@ if [ -f /tmp/t_byte_rmw_inv.asm ]; then
     fi
 fi
 
+# Load through a spilled BX base must not leave a byte result in BL/BH
+# before restoring BX.
+if [ -f /tmp/t_load_scratch_alias.asm ]; then
+    if awk '
+        /push AX/ { saw_push_ax = 1 }
+        saw_push_ax && /push BX/ { saw_push_bx = 1 }
+        saw_push_bx && /mov AL, \[BX\+SI\]/ { saw_load = 1 }
+        saw_load && /pop BX/ { saw_pop_bx = 1 }
+        saw_pop_bx && /mov B[HL], AL/ { saw_copy = 1 }
+        saw_copy && /pop AX/ { ok = 1 }
+        END { exit ok ? 0 : 1 }
+    ' /tmp/t_load_scratch_alias.asm; then
+        pass "load-scratch-alias: byte result survives BX restore"
+    else
+        fail "load-scratch-alias" "load result aliases restored BX scratch"
+    fi
+fi
+
 # Loop body CX: CX must not be modified between loop top and LOOP instruction
 if [ -f /tmp/t_loop_body.asm ]; then
     # Between the .L0 label and "loop", CX should only appear as a source (read), never as destination

@@ -2881,22 +2881,36 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
     bool cs_ref = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
                    fn->vregs[ins->src1].is_cs_ref);
     const char *seg_pfx = cs_ref ? "CS:" : "";
+    bool base_spilled = is_spilled(fn, ins->src1);
+    bool idx_spilled = (ins->src2 >= 0 && is_spilled(fn, ins->src2));
+    bool dst_conflicts_with_scratch = false;
 
-    if (is_spilled(fn, ins->src1)) {
+    if (!is_spilled(fn, ins->dst)) {
+        int dst_preg = fn->vregs[ins->dst].assigned;
+        if ((base_spilled && pregs_alias(dst_preg, PREG_BX)) ||
+            (idx_spilled && dst_preg == PREG_SI))
+            dst_conflicts_with_scratch = true;
+    }
+
+    if (dst_conflicts_with_scratch)
+        fprintf(out_asm, "    push AX\n");
+
+    if (base_spilled) {
         fprintf(out_asm, "    push BX\n");
         fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
         base_str = "BX"; pushed_bx = true;
     } else {
         base_str = vreg_asm(fn, ins->src1);
     }
-    if (ins->src2 >= 0 && is_spilled(fn, ins->src2)) {
+    if (idx_spilled) {
         fprintf(out_asm, "    push SI\n");
         fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src2));
         idx_str = "SI"; pushed_si = true;
     } else if (ins->src2 >= 0) {
         idx_str = vreg_asm(fn, ins->src2);
     }
-    if (is_spilled(fn, ins->dst)) {
+
+    if (is_spilled(fn, ins->dst) || dst_conflicts_with_scratch) {
         bool ld_byte = fn->vregs[ins->dst].is_byte;
         const char *acc = ld_byte ? "AL" : "AX";
         if (idx_str)
@@ -2906,6 +2920,8 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
         if (pushed_si) fprintf(out_asm, "    pop SI\n");
         if (pushed_bx) fprintf(out_asm, "    pop BX\n");
         fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
+        if (dst_conflicts_with_scratch)
+            fprintf(out_asm, "    pop AX\n");
     } else {
         if (idx_str)
             fprintf(out_asm, "    mov %s, [%s%s+%s]\n",
