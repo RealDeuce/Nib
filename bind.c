@@ -292,6 +292,7 @@ typedef struct {
     int param_regs[16];     /* PREG_* for each parameter, or PREG_NONE */
     int return_reg;         /* PREG_* for return value, or PREG_NONE */
     bool resolved;
+    bool clobbers[NUM_PREGS]; /* true if function clobbers this register */
 } fn_assignment_t;
 
 static fn_assignment_t fn_assigns[MAX_FNS];
@@ -2449,33 +2450,44 @@ static void insert_fixup_moves(func_t *fn) {
 
         /* ---- Call argument fixup + BP caller-save ---- */
         if (ins->op == IR_CALL) {
-            /* Build callee preserves set */
+            /* Build callee preserves set.
+             * For internal functions with resolved clobber sets, preserves
+             * = everything not clobbered. For externs, use .preserves list. */
             bool callee_preserves[NUM_PREGS];
             memset(callee_preserves, 0, sizeof(callee_preserves));
-            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+            bool found_callee = false;
+            for (int fi2 = 0; fi2 < nfunctions && !found_callee; fi2++) {
                 if (strcmp(functions[fi2].name, ins->name) == 0) {
-                    for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
-                        callee_preserves[functions[fi2].fn_preserves[pp]] = true;
-                    break;
+                    if (fn_assigns[fi2].resolved) {
+                        /* Use computed clobber set — preserves = !clobbers */
+                        for (int r = 0; r < NUM_PREGS; r++)
+                            callee_preserves[r] = !fn_assigns[fi2].clobbers[r];
+                    } else {
+                        /* Not yet resolved — use explicit .preserves */
+                        for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
+                            callee_preserves[functions[fi2].fn_preserves[pp]] = true;
+                    }
+                    found_callee = true;
                 }
             }
-            for (int e = 0; e < nexterns; e++) {
-                if (strcmp(externs[e].name, ins->name) == 0) {
-                    for (int pp = 0; pp < externs[e].npreserves; pp++)
-                        callee_preserves[externs[e].preserves[pp]] = true;
-                    break;
+            if (!found_callee) {
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, ins->name) == 0) {
+                        for (int pp = 0; pp < externs[e].npreserves; pp++)
+                            callee_preserves[externs[e].preserves[pp]] = true;
+                        break;
+                    }
                 }
             }
 
             /* BP caller-save */
+            /* Caller-save: collect live registers the callee may clobber */
             int call_saved[16];
             int call_nsaved = 0;
+            bool call_use_pusha = false;
             if (fn->needs_frame && !callee_preserves[PREG_BP]) {
                 call_saved[call_nsaved++] = PREG_BP;
-                rins_asm(fn, "    push BP");
             }
-
-            /* Caller-save: push live registers the callee may clobber */
             for (int v = 0; v < fn->nvregs; v++) {
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
@@ -2492,7 +2504,14 @@ static void insert_fixup_moves(func_t *fn) {
                 if (dup) continue;
                 if (call_nsaved < 16)
                     call_saved[call_nsaved++] = push_reg;
-                rins_asm(fn, "    push %s", preg_name[push_reg]);
+            }
+            /* Emit saves: PUSHA if >= 6, individual pushes otherwise */
+            if (call_nsaved >= 6) {
+                rins_asm(fn, "    pusha");
+                call_use_pusha = true;
+            } else {
+                for (int s = 0; s < call_nsaved; s++)
+                    rins_asm(fn, "    push %s", preg_name[call_saved[s]]);
             }
 
             /* Argument fixup: place args in expected registers */
@@ -2527,9 +2546,13 @@ static void insert_fixup_moves(func_t *fn) {
             /* Emit the call instruction itself (emitter handles encoding) */
             rins_ir(fn, i);
 
-            /* Caller-restore: pop in reverse order */
-            for (int s = call_nsaved - 1; s >= 0; s--)
-                rins_asm(fn, "    pop %s", preg_name[call_saved[s]]);
+            /* Caller-restore */
+            if (call_use_pusha) {
+                rins_asm(fn, "    popa");
+            } else {
+                for (int s = call_nsaved - 1; s >= 0; s--)
+                    rins_asm(fn, "    pop %s", preg_name[call_saved[s]]);
+            }
 
             continue;
         }
@@ -2975,12 +2998,41 @@ static void emit_function(func_t *fn) {
         }
     }
 
+    /* For interrupt handlers: compute which word registers are clobbered */
+    int isr_save[8]; /* word regs to save: AX,CX,DX,BX,SP,BP,SI,DI */
+    int isr_nsave = 0;
+    if (fn->is_interrupt && !fn->is_bare) {
+        bool word_used[8] = {0}; /* AX=0,CX=1,DX=2,BX=3,SP=4,BP=5,SI=6,DI=7 */
+        for (int v = 0; v < fn->nvregs; v++) {
+            int preg = fn->vregs[v].assigned;
+            if (preg == PREG_NONE || fn->vregs[v].def_pos < 0) continue;
+            if (preg < 4) word_used[preg] = true;           /* AX=0,CX=1,DX=2,BX=3 */
+            else if (preg == PREG_BP) word_used[5] = true;
+            else if (preg == PREG_SI) word_used[6] = true;
+            else if (preg == PREG_DI) word_used[7] = true;
+            else if (preg >= PREG_AL && preg <= PREG_BH)
+                word_used[preg_alias_parent[preg]] = true;   /* byte → parent word */
+        }
+        if (fn->needs_frame) word_used[5] = true; /* BP */
+        for (int r = 0; r < 8; r++) {
+            if (r == 4) continue; /* skip SP */
+            if (word_used[r])
+                isr_save[isr_nsave++] = r;
+        }
+    }
+
     fprintf(out_asm, "%s:\n", asm_name);
 
     /* Prologue (bare functions manage their own stack) */
     if (!fn->is_bare) {
-        if (fn->is_interrupt)
-            fprintf(out_asm, "    pusha\n");
+        if (fn->is_interrupt) {
+            if (isr_nsave >= 6) {
+                fprintf(out_asm, "    pusha\n");
+            } else {
+                for (int i = 0; i < isr_nsave; i++)
+                    fprintf(out_asm, "    push %s\n", preg_name[isr_save[i]]);
+            }
+        }
 
         /* Callee-save pushes */
         for (int i = 0; i < nsave; i++)
@@ -3373,7 +3425,12 @@ static void emit_function(func_t *fn) {
                 for (int j = nsave - 1; j >= 0; j--)
                     fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
                 if (fn->is_interrupt) {
-                    fprintf(out_asm, "    popa\n");
+                    if (isr_nsave >= 6) {
+                        fprintf(out_asm, "    popa\n");
+                    } else {
+                        for (int j = isr_nsave - 1; j >= 0; j--)
+                            fprintf(out_asm, "    pop %s\n", preg_name[isr_save[j]]);
+                    }
                     fprintf(out_asm, "    iret\n");
                 } else if (fn->is_far) {
                     fprintf(out_asm, "    retf\n");
@@ -3620,7 +3677,12 @@ static void emit_function(func_t *fn) {
         for (int j = nsave - 1; j >= 0; j--)
             fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
         if (fn->is_interrupt) {
-            fprintf(out_asm, "    popa\n");
+            if (isr_nsave >= 6) {
+                fprintf(out_asm, "    popa\n");
+            } else {
+                for (int j = isr_nsave - 1; j >= 0; j--)
+                    fprintf(out_asm, "    pop %s\n", preg_name[isr_save[j]]);
+            }
             fprintf(out_asm, "    iret\n");
         } else if (fn->is_far) {
             fprintf(out_asm, "    retf\n");
@@ -3901,6 +3963,39 @@ static void propagate_preferences(void) {
             } else {
                 bool is_byte = (strcmp(fn->return_type, "u8") == 0);
                 fa->return_reg = is_byte ? PREG_AL : PREG_AX;
+            }
+        }
+
+        /* Compute clobber set from allocation results + callee clobbers */
+        memset(fa->clobbers, 0, sizeof(fa->clobbers));
+        for (int v = 0; v < fn->nvregs; v++) {
+            int preg = fn->vregs[v].assigned;
+            if (preg == PREG_NONE || fn->vregs[v].def_pos < 0) continue;
+            fa->clobbers[preg] = true;
+            if (preg >= PREG_AL && preg <= PREG_BH)
+                fa->clobbers[preg_alias_parent[preg]] = true;
+        }
+        /* Add clobbers from called functions (unless caller-saved) */
+        for (int ii = 0; ii < fn->ninsns; ii++) {
+            if (fn->insns[ii].op != IR_CALL) continue;
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, fn->insns[ii].name) == 0 &&
+                    fn_assigns[fi2].resolved) {
+                    for (int r = 0; r < NUM_PREGS; r++)
+                        if (fn_assigns[fi2].clobbers[r])
+                            fa->clobbers[r] = true;
+                    break;
+                }
+            }
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, fn->insns[ii].name) == 0) {
+                    /* Extern: everything NOT in preserves is clobbered */
+                    for (int r = 0; r < NUM_PREGS; r++)
+                        fa->clobbers[r] = true;
+                    for (int pp = 0; pp < externs[e].npreserves; pp++)
+                        fa->clobbers[externs[e].preserves[pp]] = false;
+                    break;
+                }
             }
         }
 
