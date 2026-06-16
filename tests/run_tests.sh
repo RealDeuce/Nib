@@ -117,6 +117,7 @@ echo ""
 
 # Phase 5: Assemble tests — bound .asm files should assemble
 echo "--- Assemble tests ---"
+rm -f /tmp/t_v20_bitfield.asm /tmp/t_v20_bitfield.bin
 for f in /tmp/t_*.asm; do
     [ -f "$f" ] || continue
     name=$(basename "$f" .asm)
@@ -132,6 +133,32 @@ for f in /tmp/t_*.asm; do
         fail "$name (assemble)" "$(./nibasm "$f" -o "$outbin" 2>&1 | head -1)"
     fi
 done
+echo ""
+
+# Phase 5b: Standalone assembler regressions
+echo "--- Standalone assembler checks ---"
+cat > /tmp/v20_bitfield.asm <<'ASM'
+    org 0
+    bext
+    bins
+    bext cl
+    bins dl
+    bext cl, dl
+    bins cl, dl
+    bext cl, 12
+    bins cl, 12
+ASM
+if ./nibasm /tmp/v20_bitfield.asm -o /tmp/v20_bitfield.bin >/dev/null 2>&1; then
+    actual=$(od -An -tx1 -v /tmp/v20_bitfield.bin | tr -d ' \n')
+    expected="0f33c00f31c00f33c10f31c20f33d10f31d10f3bc10c0f39c10c"
+    if [ "$actual" = "$expected" ]; then
+        pass "v20-bitfield: bext/bins encode register and immediate forms"
+    else
+        fail "v20-bitfield" "bytes $actual != $expected"
+    fi
+else
+    fail "v20-bitfield" "$(./nibasm /tmp/v20_bitfield.asm -o /tmp/v20_bitfield.bin 2>&1 | head -1)"
+fi
 echo ""
 
 # Phase 6: Full build test

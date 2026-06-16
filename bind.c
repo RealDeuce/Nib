@@ -1995,6 +1995,36 @@ static void scan_addressing_constraints(func_t *fn) {
                     fn->vregs[ins->src2].needs_cl = true;
                     fn->vregs[ins->src2].is_byte = true;
                 }
+            } else if (strcmp(op, "bext") == 0) {
+                if (ins->dst >= 0 && ins->dst < MAX_VREGS)
+                    fn->vregs[ins->dst].prefer = PREG_AX;
+                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
+                    fn->vregs[ins->src1].needs_index = true;
+                    fn->vregs[ins->src1].prefer = PREG_SI;
+                }
+                if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
+                    fn->vregs[ins->src2].is_byte = true;
+                    fn->vregs[ins->src2].prefer = PREG_CL;
+                }
+                if (ins->extra_args[0] >= 0 && ins->extra_args[0] < MAX_VREGS) {
+                    fn->vregs[ins->extra_args[0]].is_byte = true;
+                    fn->vregs[ins->extra_args[0]].prefer = PREG_DL;
+                }
+            } else if (strcmp(op, "bins") == 0) {
+                if (ins->dst >= 0 && ins->dst < MAX_VREGS) {
+                    fn->vregs[ins->dst].needs_index = true;
+                    fn->vregs[ins->dst].prefer = PREG_DI;
+                }
+                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
+                    fn->vregs[ins->src1].is_byte = true;
+                    fn->vregs[ins->src1].prefer = PREG_CL;
+                }
+                if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
+                    fn->vregs[ins->src2].is_byte = true;
+                    fn->vregs[ins->src2].prefer = PREG_DL;
+                }
+                if (ins->extra_args[0] >= 0 && ins->extra_args[0] < MAX_VREGS)
+                    fn->vregs[ins->extra_args[0]].prefer = PREG_AX;
             }
         }
         if (ins->op == IR_LOAD || ins->op == IR_STORE) {
@@ -2880,12 +2910,38 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     }
     if (strcmp(op, "stos") == 0) { fprintf(out_asm, "    stosb\n"); return; }
     if (strcmp(op, "bext") == 0) {
+        bool dst_is_ax = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                          fn->vregs[ins->dst].assigned == PREG_AX);
+        if (!dst_is_ax)
+            fprintf(out_asm, "    push AX\n");
+        fprintf(out_asm, "    push SI\n");
+        if (!(ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+              fn->vregs[ins->src1].assigned == PREG_SI))
+            fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src1));
         fprintf(out_asm, "    bext %s, %s\n",
-                vreg_asm(fn, ins->src1), vreg_asm(fn, ins->dst)); return;
+                vreg_asm(fn, ins->src2),
+                vreg_asm(fn, ins->extra_args[0]));
+        fprintf(out_asm, "    pop SI\n");
+        if (!dst_is_ax) {
+            fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+            fprintf(out_asm, "    pop AX\n");
+        }
+        return;
     }
     if (strcmp(op, "bins") == 0) {
+        fprintf(out_asm, "    push AX\n");
+        fprintf(out_asm, "    push DI\n");
+        if (!(ins->extra_args[0] >= 0 && ins->extra_args[0] < MAX_VREGS &&
+              fn->vregs[ins->extra_args[0]].assigned == PREG_AX))
+            fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->extra_args[0]));
+        if (!(ins->dst >= 0 && ins->dst < MAX_VREGS &&
+              fn->vregs[ins->dst].assigned == PREG_DI))
+            fprintf(out_asm, "    mov DI, %s\n", vreg_asm(fn, ins->dst));
         fprintf(out_asm, "    bins %s, %s\n",
-                vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1)); return;
+                vreg_asm(fn, ins->src1), vreg_asm(fn, ins->src2));
+        fprintf(out_asm, "    pop DI\n");
+        fprintf(out_asm, "    pop AX\n");
+        return;
     }
 
     /* --- General ALU: three-address → two-address lowering --- */

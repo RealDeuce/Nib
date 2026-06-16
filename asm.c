@@ -1213,34 +1213,64 @@ static void asm_v20_nibble(const char *mnemonic) {
 static void asm_v20_bext_bins(const char *mnemonic) {
     /* BEXT (EXT) / BINS (INS) — register form */
     /* Uses ModRM to specify registers for bit offset/length */
-    emit(0x0F);
-    if (strcasecmp(mnemonic, "bext") == 0) emit(0x33);
-    else if (strcasecmp(mnemonic, "bins") == 0) emit(0x31);
-    else { err("unknown bit field op"); errors++; return; }
+    bool is_bext = (strcasecmp(mnemonic, "bext") == 0);
+    if (!is_bext && strcasecmp(mnemonic, "bins") != 0) {
+        err("unknown bit field op");
+        errors++;
+        return;
+    }
 
     /* Parse operand: register pair or immediate form */
     token_t t = peek_token();
     if (t.type == T_EOL) {
         /* No operands — use register form with defaults */
+        emit(0x0F);
+        emit(is_bext ? 0x33 : 0x31);
         emit(0xC0); /* ModRM for default regs */
         return;
     }
 
-    operand_t op = parse_operand();
-    if (op.type == OP_IMM) {
+    operand_t first = parse_operand();
+    if (peek_token().type != T_COMMA) {
+        if (first.type == OP_REG && first.size == 1) {
+            emit(0x0F);
+            emit(is_bext ? 0x33 : 0x31);
+            emit_modrm(&first, 0);
+        } else {
+            err("bit field operand must be an 8-bit register");
+            errors++;
+        }
+        return;
+    }
+
+    consume();
+    operand_t second = parse_operand();
+
+    if (second.type == OP_IMM) {
+        if (first.type != OP_REG || first.size != 1) {
+            err("bit field immediate form requires an 8-bit register");
+            errors++;
+            return;
+        }
+        if (second.imm < 0 || second.imm > 15) {
+            err("bit field immediate length must be 0..15");
+            errors++;
+            return;
+        }
         /* Immediate form: 0x0F 0x3B/0x39 */
-        /* Re-emit with correct opcode */
-        out_pos -= 2;
         emit(0x0F);
-        if (strcasecmp(mnemonic, "bext") == 0) emit(0x3B);
-        else emit(0x39);
-        emit_modrm(&op, 0);
-        expect(T_COMMA, "','");
-        operand_t imm = parse_operand();
-        emit(imm.imm & 0xFF);
+        emit(is_bext ? 0x3B : 0x39);
+        emit_modrm(&first, 0);
+        emit(second.imm & 0xFF);
+    } else if (first.type == OP_REG && first.size == 1 &&
+               second.type == OP_REG && second.size == 1) {
+        /* Register form: ModRM reg=length register, r/m=offset register */
+        emit(0x0F);
+        emit(is_bext ? 0x33 : 0x31);
+        emit(0xC0 | (second.reg << 3) | first.reg);
     } else {
-        /* Register form — operand specifies the ModRM */
-        emit_modrm(&op, 0);
+        err("bit field operands must be reg8, reg8 or reg8, imm4");
+        errors++;
     }
 }
 
