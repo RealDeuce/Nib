@@ -2555,6 +2555,8 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         if (fn->vregs[i].is_local_slot) continue;
         if (fn->vregs[i].prefer == PREG_NONE) continue;
         int preg = fn->vregs[i].prefer;
+        if (!bp_available && preg == PREG_BP)
+            continue;
         /* Segment preference must match segment vreg */
         if (fn->vregs[i].is_seg && !(preg >= PREG_ES && preg <= PREG_DS))
             continue;
@@ -2666,6 +2668,8 @@ static void allocate_registers(func_t *fn, bool bp_available) {
         /* Prefer the preference register if available */
         if (fn->vregs[v].prefer != PREG_NONE) {
             int preg = fn->vregs[v].prefer;
+            if (!bp_available && preg == PREG_BP)
+                goto skip_preferred_color;
             bool ok = true;
             for (int w = 0; w < VREG_WORDS && ok; w++) {
                 uint64_t bits = fn->igraph[v][w];
@@ -2689,6 +2693,7 @@ static void allocate_registers(func_t *fn, bool bp_available) {
                 }
             }
         }
+skip_preferred_color:
 
         if (!colored) {
             for (int r = 0; r < psz; r++) {
@@ -3462,6 +3467,65 @@ static void emit_epilogue(func_t *fn, int *save_regs, int nsave,
     }
 }
 
+static void emit_param_entry_moves(func_t *fn, int fn_idx) {
+    if (fn_idx < 0)
+        return;
+    fn_assignment_t *fa = &fn_assigns[fn_idx];
+
+    for (int p = 0; p < fn->nparams; p++) {
+        int v = fn->param_vregs[p];
+        int expected = fa->param_regs[p];
+        if (v < 0 || v >= MAX_VREGS || expected == PREG_NONE)
+            continue;
+        if (fn->vregs[v].is_local_slot)
+            continue;
+
+        if (is_spilled(fn, v)) {
+            if (expected == PREG_BP && fn->needs_frame) {
+                fprintf(out_asm, "    push AX\n");
+                fprintf(out_asm, "    mov AX, [BP]\n");
+                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, v));
+                fprintf(out_asm, "    pop AX\n");
+                continue;
+            }
+            if (fn->vregs[v].is_byte)
+                fprintf(out_asm, "    mov %s, %s\n",
+                        vreg_asm_sized(fn, v), preg_name[expected]);
+            else
+                fprintf(out_asm, "    mov %s, %s\n",
+                        vreg_asm(fn, v), preg_name[expected]);
+            continue;
+        }
+
+        int assigned = fn->vregs[v].assigned;
+        if (assigned == PREG_NONE || assigned == expected ||
+            pregs_alias(assigned, expected))
+            continue;
+
+        if (fn->vregs[v].is_seg && assigned >= PREG_ES &&
+            assigned <= PREG_DS) {
+            if (expected >= PREG_ES && expected <= PREG_DS) {
+                fprintf(out_asm, "    push AX\n");
+                fprintf(out_asm, "    mov AX, %s\n", preg_name[expected]);
+                fprintf(out_asm, "    mov %s, AX\n", preg_name[assigned]);
+                fprintf(out_asm, "    pop AX\n");
+            } else if (expected == PREG_BP && fn->needs_frame) {
+                fprintf(out_asm, "    push AX\n");
+                fprintf(out_asm, "    mov AX, [BP]\n");
+                fprintf(out_asm, "    mov %s, AX\n", preg_name[assigned]);
+                fprintf(out_asm, "    pop AX\n");
+            } else if (expected == PREG_AX) {
+                fprintf(out_asm, "    mov %s, AX\n", preg_name[assigned]);
+            } else {
+                fprintf(out_asm, "    push AX\n");
+                fprintf(out_asm, "    mov AX, %s\n", preg_name[expected]);
+                fprintf(out_asm, "    mov %s, AX\n", preg_name[assigned]);
+                fprintf(out_asm, "    pop AX\n");
+            }
+        }
+    }
+}
+
 /* Emit an ALU instruction (handles special ops, spill combinations,
  * three-address lowering, byte IMUL, and shift CL routing fallback) */
 static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
@@ -3905,6 +3969,8 @@ static void emit_function(func_t *fn) {
             if (fn->frame_size > 0)
                 fprintf(out_asm, "    sub sp, %d\n", fn->frame_size);
         }
+
+        emit_param_entry_moves(fn, fn_idx);
     }
 
     /* Body — iterate resolved instruction stream */

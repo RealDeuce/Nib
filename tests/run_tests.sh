@@ -459,6 +459,21 @@ if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then
     fi
 fi
 
+# Far32 parameters used as indirect far call targets must materialize
+# spilled segment halves at function entry, after the frame is created.
+if [ -f "$TEST_TMPDIR"/t_icall_far_param.asm ]; then
+    beep_window=$(sed -n '/t_icall_far_param_beep_once:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_far_param.asm)
+    if printf "%s\n" "$beep_window" | grep -q 'mov \[BP-4\], BX' &&
+       printf "%s\n" "$beep_window" | grep -q 'mov \[BP-2\], SI' &&
+       printf "%s\n" "$beep_window" | grep -q 'mov AX, \[BP\]' &&
+       printf "%s\n" "$beep_window" | grep -q 'mov ES, AX' &&
+       [ "$(printf "%s\n" "$beep_window" | grep -c 'call far \[SS:BX\]')" -eq 3 ]; then
+        pass "icall-far-param: target segment params materialized"
+    else
+        fail "icall-far-param" "far32 parameter segment half not materialized"
+    fi
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     if grep -q 'out 0x50, AL' "$TEST_TMPDIR"/t_port_io.asm && grep -q 'in AL, 0x60' "$TEST_TMPDIR"/t_port_io.asm; then
