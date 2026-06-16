@@ -3184,18 +3184,28 @@ static void emit_function(func_t *fn) {
                                 preg_name[preg_alias_lo[dst_preg]], s);
                     }
                 } else {
-                    /* Spilled or SI/DI/BP — use AX as scratch.
-                     * If src is AL, save it first since xor AX clobbers AL. */
-                    bool src_is_al = (src_preg == PREG_AL);
-                    if (src_is_al) {
-                        fprintf(out_asm, "    xor AH, AH\n");
-                        fprintf(out_asm, "    mov %s, AX\n", d);
+                    /* dst is SI/DI/BP or spilled — can't access byte halves.
+                     * Use mov + AND to zero-extend without clobbering any
+                     * byte register's sibling. */
+                    int src_parent = (src_preg >= PREG_AL && src_preg <= PREG_BH)
+                                     ? preg_alias_parent[src_preg] : -1;
+                    if (src_parent >= 0) {
+                        /* src is a byte reg — copy parent word, mask to byte */
+                        fprintf(out_asm, "    mov %s, %s\n", d, preg_name[src_parent]);
+                        if (src_preg == preg_alias_lo[src_parent]) {
+                            fprintf(out_asm, "    and %s, 0x00FF\n", d);
+                        } else {
+                            /* src is high byte — shift right 8, mask */
+                            fprintf(out_asm, "    shr %s, 8\n", d);
+                        }
+                    } else if (is_spilled(fn, ins->src1)) {
+                        /* Spilled byte: load word from spill, mask to byte */
+                        fprintf(out_asm, "    mov %s, %s\n", d, s);
+                        fprintf(out_asm, "    and %s, 0x00FF\n", d);
                     } else {
-                        fprintf(out_asm, "    push AX\n");
-                        fprintf(out_asm, "    xor AX, AX\n");
-                        fprintf(out_asm, "    mov AL, %s\n", s);
-                        fprintf(out_asm, "    mov %s, AX\n", d);
-                        fprintf(out_asm, "    pop AX\n");
+                        /* src is a non-byte reg (shouldn't happen) */
+                        fprintf(out_asm, "    mov %s, %s\n", d, s);
+                        fprintf(out_asm, "    and %s, 0x00FF\n", d);
                     }
                 }
                 break;
