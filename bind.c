@@ -2721,13 +2721,17 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             fprintf(out_asm, "    in %s, 0x%02X\n", acc, ins->imm);
         else
             fprintf(out_asm, "    in %s, %s\n", acc, vreg_asm(fn, ins->src1));
-        fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
+        const char *d = vreg_asm(fn, ins->dst);
+        if (strcmp(d, acc) != 0)
+            fprintf(out_asm, "    mov %s, %s\n", d, acc);
         return;
     }
     if (strcmp(op, "out") == 0 || strcmp(op, "outb") == 0) {
         bool byte_out = (strcmp(op, "outb") == 0);
         const char *acc = byte_out ? "AL" : "AX";
-        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+        const char *val = vreg_asm(fn, ins->src1);
+        if (strcmp(acc, val) != 0)
+            fprintf(out_asm, "    mov %s, %s\n", acc, val);
         if (ins->has_imm)
             fprintf(out_asm, "    out 0x%02X, %s\n", ins->imm, acc);
         else
