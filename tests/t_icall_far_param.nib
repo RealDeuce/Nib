@@ -15,3 +15,12 @@ fn beep_once(tone_addr: far32, on_addr: far32, off_addr: far32,
     on_addr as on from mod();
     off_addr as off from mod();
 }
+
+fn caller() {
+    far32 tone_addr = 0xE000:0x0100;
+    far32 on_addr = 0xE000:0x0120;
+    far32 off_addr = 0xE000:0x0140;
+
+    beep_once(tone_addr, on_addr, off_addr, 440);
+    beep_once(tone_addr, on_addr, off_addr, 660);
+}

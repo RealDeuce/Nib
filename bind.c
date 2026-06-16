@@ -317,6 +317,7 @@ static int nexterns = 0;
 static const char *fn_asm_name(func_t *fn);
 static const char *vreg_asm(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
+static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
 
 /* Resolved parameter register assignments per function */
 typedef struct {
@@ -3021,9 +3022,47 @@ static void insert_fixup_moves(func_t *fn) {
             int call_saved[16];
             int call_nsaved = 0;
             bool call_use_pusha = false;
-            if (fn->needs_frame && !callee_preserves[PREG_BP]) {
-                call_saved[call_nsaved++] = PREG_BP;
+            bool outgoing_bp_param = false;
+            bool caller_bp_live = fn->needs_frame;
+            if (callee_fi >= 0) {
+                fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
+                for (int a = 0; a < ins->nargs && a < 16; a++) {
+                    if (callee_fa->param_regs[a] == PREG_BP) {
+                        outgoing_bp_param = true;
+                        break;
+                    }
+                }
+            } else if (callee_ext >= 0) {
+                for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
+                    if (externs[callee_ext].param_pins[a].preg == PREG_BP) {
+                        outgoing_bp_param = true;
+                        break;
+                    }
+                }
             }
+            if (!caller_bp_live) {
+                for (int v = 0; v < fn->nvregs; v++) {
+                    if (v == ins->dst) continue;
+                    bool is_ret_dst = false;
+                    if (ins->op == IR_MCALL) {
+                        for (int ri = 0; ri < ins->nrets - 1 && ri < MAX_RETURNS; ri++) {
+                            if (v == ins->ret_vregs[ri]) {
+                                is_ret_dst = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (is_ret_dst) continue;
+                    if (fn->vregs[v].assigned != PREG_BP) continue;
+                    if (fn->vregs[v].last_use <= (int)i) continue;
+                    if (fn->vregs[v].def_pos > (int)i) continue;
+                    caller_bp_live = true;
+                    break;
+                }
+            }
+            if ((fn->needs_frame && !callee_preserves[PREG_BP]) ||
+                (outgoing_bp_param && caller_bp_live))
+                add_call_saved_reg(call_saved, &call_nsaved, PREG_BP);
             for (int v = 0; v < fn->nvregs; v++) {
                 if (v == ins->dst) continue;
                 bool is_ret_dst = false;
@@ -3042,12 +3081,7 @@ static void insert_fixup_moves(func_t *fn) {
                 if (preg >= PREG_AL && preg <= PREG_BH)
                     push_reg = preg_alias_parent[preg];
                 if (callee_preserves[push_reg]) continue;
-                bool dup = false;
-                for (int s = 0; s < call_nsaved; s++)
-                    if (call_saved[s] == push_reg) { dup = true; break; }
-                if (dup) continue;
-                if (call_nsaved < 16)
-                    call_saved[call_nsaved++] = push_reg;
+                add_call_saved_reg(call_saved, &call_nsaved, push_reg);
             }
             /* Emit saves: PUSHA if >= 6, individual pushes otherwise */
             if (call_nsaved >= 6) {
@@ -3424,6 +3458,14 @@ static bool reg_list_contains(int *regs, int nregs, int preg) {
         if (regs[i] == preg)
             return true;
     return false;
+}
+
+static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg) {
+    for (int s = 0; s < *call_nsaved; s++)
+        if (call_saved[s] == preg)
+            return;
+    if (*call_nsaved < 16)
+        call_saved[(*call_nsaved)++] = preg;
 }
 
 static void emit_ds_setup(func_t *fn, bool explicit_save) {

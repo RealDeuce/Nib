@@ -463,11 +463,15 @@ fi
 # spilled segment halves at function entry, after the frame is created.
 if [ -f "$TEST_TMPDIR"/t_icall_far_param.asm ]; then
     beep_window=$(sed -n '/t_icall_far_param_beep_once:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_far_param.asm)
+    caller_window=$(sed -n '/t_icall_far_param_caller:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_far_param.asm)
     if printf "%s\n" "$beep_window" | grep -q 'mov \[BP-4\], BX' &&
        printf "%s\n" "$beep_window" | grep -q 'mov \[BP-2\], SI' &&
        printf "%s\n" "$beep_window" | grep -q 'mov AX, \[BP\]' &&
        printf "%s\n" "$beep_window" | grep -q 'mov ES, AX' &&
-       [ "$(printf "%s\n" "$beep_window" | grep -c 'call far \[SS:BX\]')" -eq 3 ]; then
+       [ "$(printf "%s\n" "$beep_window" | grep -c 'call far \[SS:BX\]')" -eq 3 ] &&
+       [ "$(printf "%s\n" "$caller_window" | grep -c 'push BP')" -eq 2 ] &&
+       [ "$(printf "%s\n" "$caller_window" | grep -c 'pop BP')" -eq 2 ] &&
+       [ "$(printf "%s\n" "$caller_window" | grep -c 'mov BP, ES')" -eq 2 ]; then
         pass "icall-far-param: target segment params materialized"
     else
         fail "icall-far-param" "far32 parameter segment half not materialized"
