@@ -415,6 +415,15 @@ return_list
 return_item
     : type                      { $$ = mk_return($1); }
     | type KW_IN reg_name       { $$ = mk_return_pinned($1, $3.reg, $3.rclass); }
+    | type KW_IN IDENT
+        { if (strcmp($3, "stack") == 0)
+              $$ = mk_return_placed($1, ABI_PLACE_STACK);
+          else if (strcmp($3, "register") == 0)
+              $$ = mk_return_placed($1, ABI_PLACE_REGISTER);
+          else {
+              yyerror("expected stack or register placement");
+              $$ = mk_return($1);
+          } }
     ;
 
 /* ==== Extern declarations ==== */
@@ -484,6 +493,15 @@ param_list
 param
     : IDENT ':' type                { $$ = mk_param($1, $3, false); }
     | KW_VALUE IDENT ':' type       { $$ = mk_param($2, $4, true); }
+    | IDENT ':' type KW_IN IDENT
+        { if (strcmp($5, "stack") == 0)
+              $$ = mk_param_placed($1, $3, false, ABI_PLACE_STACK);
+          else if (strcmp($5, "register") == 0)
+              $$ = mk_param_placed($1, $3, false, ABI_PLACE_REGISTER);
+          else {
+              yyerror("expected stack or register placement");
+              $$ = mk_param($1, $3, false);
+          } }
     | IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
     | IDENT ':' type KW_IN seg_reg ':' word_reg
@@ -492,6 +510,15 @@ param
           $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     | KW_VALUE IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($2, $4, $6.reg, $6.rclass); $$->is_value = true; }
+    | KW_VALUE IDENT ':' type KW_IN IDENT
+        { if (strcmp($6, "stack") == 0)
+              $$ = mk_param_placed($2, $4, true, ABI_PLACE_STACK);
+          else if (strcmp($6, "register") == 0)
+              $$ = mk_param_placed($2, $4, true, ABI_PLACE_REGISTER);
+          else {
+              yyerror("expected stack or register placement");
+              $$ = mk_param($2, $4, true);
+          } }
     ;
 
 extern_param_list
@@ -500,7 +527,16 @@ extern_param_list
     ;
 
 extern_param
-    : IDENT ':' type KW_IN reg_name
+    : IDENT ':' type KW_IN IDENT
+        { if (strcmp($5, "stack") == 0)
+              $$ = mk_param_placed($1, $3, false, ABI_PLACE_STACK);
+          else if (strcmp($5, "register") == 0)
+              $$ = mk_param_placed($1, $3, false, ABI_PLACE_REGISTER);
+          else {
+              yyerror("expected stack or register placement");
+              $$ = mk_param($1, $3, false);
+          } }
+    | IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
     | IDENT ':' type KW_IN seg_reg ':' word_reg
         { if (!$3 || $3->kind != TYPE_FAR)

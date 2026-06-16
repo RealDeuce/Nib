@@ -367,7 +367,7 @@ fn split_word(x: u16) -> u8, u8 {
 }
 ```
 
-### Parameter and return register pins
+### Parameter and return ABI placement
 
 For API boundary functions, parameters and return values can be pinned
 to specific registers with `in REG`. This locks the ABI so the binder
@@ -384,6 +384,21 @@ fn api_pair() -> (u8 in AL, u16 in DX) {
 }
 ```
 
+Use `in register` to require register ABI placement while still allowing
+the binder to choose the exact register. Use `in stack` to require stack
+ABI placement:
+
+```
+fn send(ptr: far32 in register, len: u16 in CX) {
+    // far32 register pair is chosen by the binder
+}
+
+fn swap_pair(a: u16 in stack, b: u16 in stack)
+    -> u16 in stack, u16 in stack {
+    return b, a;
+}
+```
+
 For `far32` parameters, the pin specifies both the segment register and
 the offset register with `in SEG:REG`:
 
@@ -395,14 +410,20 @@ fn blit(src: far32 in ES:SI, x: u16, y: u8) {
 }
 ```
 
-A `far32` parameter is split into two registers internally — one segment
-and one word. The binder treats them as independent register assignments
-that propagate through the call graph like any other parameter. Without
-a pin, the binder picks the pair automatically:
+A `far32` parameter is split into one offset word and one segment word
+internally. Unpinned `far32` parameters and return values default to
+stack ABI placement because that is usually lower pressure and can be
+used directly by indirect far calls. Use `in register` or `in SEG:REG`
+when a register ABI is required:
 
 ```
-fn internal(ptr: far32) {     // binder chooses seg + word regs
+fn internal(ptr: far32) {     // stack ABI by default
     seg ES = ptr`seg;
+    u16 BX = ptr`off;
+}
+
+fn internal_reg(ptr: far32 in register) {
+    seg ES = ptr`seg;         // binder chooses seg + word regs
     u16 BX = ptr`off;
 }
 ```
@@ -520,17 +541,28 @@ unwound. A used module cannot move the parent's output position.
 
 ### Parameter passing
 
-There are no explicit parameter passing keywords. The binder determines
-how each parameter is delivered:
+Parameters can either have explicit ABI placement or use the default
+placement:
 
-- **Scalars** (u8, u16, u32, seg): Passed in registers. The binder chooses
-  which register based on whole-call-graph analysis.
+- **Scalars** (u8, u16, u32, seg): Passed in registers by default. The
+  binder chooses which register based on whole-call-graph analysis.
 - **Aggregates** (arrays, BCD): Passed by reference. The address arrives
   in a register chosen by the binder.
+- **far32**: Passed on the stack by default unless pinned or marked
+  `in register`.
+- **`in stack`**: Passed in a word-sized stack slot. `u8` uses one word
+  with the low byte meaningful. `far32` uses two words: offset, then
+  segment.
 
 Register assignments propagate up the call stack. If function C needs a
 parameter in SI (because it uses `movsb`), and B calls C, and A calls B,
 then A can place the value in SI from the start. No intermediate moves.
+
+Stack ABI slots live in the caller's call area and are addressed by the
+callee through positive BP offsets. The first stack slot is `[BP+4]` for
+near functions and `[BP+6]` for far functions. Stack parameters are not
+copied into registers on entry; reads load from the stack home when
+needed, and assignments write the same home.
 
 ### Explicit copy
 
@@ -545,11 +577,11 @@ fn process(value buf: u8[80]) {
 
 ### Return values
 
-Scalar return values are returned in registers chosen by the binder. A
-function can return multiple scalar values by listing multiple return
-types and returning the same number of expressions. Parentheses around a
-return expression list are optional, but comma is not a general
-expression operator.
+Scalar return values are returned in registers chosen by the binder
+unless an individual return slot is marked `in stack`. A function can
+return multiple values by listing multiple return types and returning the
+same number of expressions. Parentheses around a return expression list
+are optional, but comma is not a general expression operator.
 
 ```
 fn compute() -> u16 {
@@ -587,6 +619,26 @@ Each return slot can be pinned independently at API boundaries:
 extern fn read_pair() -> u8 in AL, u16 in DX
     clobbers(FLAGS);
 ```
+
+Each return slot can also be stack-placed:
+
+```
+fn split_stack(x: u16) -> u8 in stack, u8 in stack {
+    return x as (u8), (x >> 8) as (u8);
+}
+```
+
+The caller reserves one reusable call area:
+
+```
+call_area_words = max(stack_argument_words, stack_return_words)
+```
+
+Before the call, the area contains stack arguments. At `return`, stack
+return values overwrite the same slots. The caller captures stack returns
+before releasing the call area. Return expressions are materialized
+before stack return slots are written, so overlapping input and output
+slots are safe for cases such as `return b, a;`.
 
 For u32 return values, the binder assigns a register pair (typically
 DX:AX). Aggregates are returned via a caller-provided destination

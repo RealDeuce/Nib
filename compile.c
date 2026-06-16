@@ -20,6 +20,38 @@
 
 #define MAX_SYMBOLS 256
 #define MAX_RETURNS 8
+#define MAX_PARAMS 64
+
+static abi_place_t effective_param_place(param_t *p) {
+    if (!p)
+        return ABI_PLACE_DEFAULT;
+    if (p->has_pin || p->has_seg_pin)
+        return ABI_PLACE_REGISTER;
+    if (p->place != ABI_PLACE_DEFAULT)
+        return p->place;
+    if (p->type && p->type->kind == TYPE_FAR)
+        return ABI_PLACE_STACK;
+    return ABI_PLACE_DEFAULT;
+}
+
+static abi_place_t effective_return_place(return_t *r) {
+    if (!r)
+        return ABI_PLACE_DEFAULT;
+    if (r->has_pin)
+        return ABI_PLACE_REGISTER;
+    if (r->place != ABI_PLACE_DEFAULT)
+        return r->place;
+    if (r->type && r->type->kind == TYPE_FAR)
+        return ABI_PLACE_STACK;
+    return ABI_PLACE_DEFAULT;
+}
+
+static void emit_abi_place(FILE *f, abi_place_t place) {
+    if (place == ABI_PLACE_STACK)
+        fprintf(f, ", stack");
+    else if (place == ABI_PLACE_REGISTER)
+        fprintf(f, ", register");
+}
 
 typedef struct symbol {
     char        name[64];
@@ -80,7 +112,7 @@ typedef struct {
         type_t *return_type;
         int     nreturns;
         type_t *return_types[MAX_RETURNS];
-        bool    param_is_far[16]; /* which params are far type */
+        bool    param_is_far[MAX_PARAMS]; /* which params are far type */
     } functions[512];
     int nfunctions;
 
@@ -302,7 +334,7 @@ static void register_function_returns(const char *name, int nparams,
     /* Track which params are far (for call-site splitting) */
     int ir_count = 0;
     int pi = 0;
-    for (param_t *p = params; p && pi < 16; p = p->next, pi++) {
+    for (param_t *p = params; p && pi < MAX_PARAMS; p = p->next, pi++) {
         C.functions[fi].param_is_far[pi] = (p->type && p->type->kind == TYPE_FAR);
         ir_count++;
         if (C.functions[fi].param_is_far[pi]) ir_count++; /* far splits into 2 */
@@ -1143,12 +1175,12 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
 
         /* Emit arguments */
         int argc = 0;
-        int arg_vregs[16];
-        int arg_seg_vregs[16];
-        type_t *arg_types[16];
+        int arg_vregs[MAX_PARAMS];
+        int arg_seg_vregs[MAX_PARAMS];
+        type_t *arg_types[MAX_PARAMS];
         memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
         for (expr_t *a = e->u.call.args; a; a = a->next) {
-            if (argc < 16) {
+            if (argc < MAX_PARAMS) {
                 typed_vreg_t av = emit_expr_typed(a);
                 arg_vregs[argc] = av.vreg;
                 arg_seg_vregs[argc] = av.vreg_seg;
@@ -1397,7 +1429,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         int nir_args = 0;
         {
             expr_t *arg_expr = e->u.call.args;
-            for (int i = 0; i < argc && i < 16; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+            for (int i = 0; i < argc && i < MAX_PARAMS; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
                 if (fi >= 0 && C.functions[fi].param_is_far[i]) {
                     /* Far param — split into offset + segment vregs */
                     symbol_t *asym = NULL;
@@ -1440,11 +1472,11 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
 
         /* Emit arguments */
         int argc = 0;
-        int arg_vregs[16];
-        int arg_seg_vregs[16];
+        int arg_vregs[MAX_PARAMS];
+        int arg_seg_vregs[MAX_PARAMS];
         memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
         for (expr_t *a = e->u.indirect_call.args; a; a = a->next) {
-            if (argc < 16) {
+            if (argc < MAX_PARAMS) {
                 typed_vreg_t av = emit_expr_typed(a);
                 arg_vregs[argc] = av.vreg;
                 arg_seg_vregs[argc] = av.vreg_seg;
@@ -1464,7 +1496,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         int ir_args[32];
         int nir_args = 0;
         expr_t *arg_expr = e->u.indirect_call.args;
-        for (int i = 0; i < argc && i < 16; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+        for (int i = 0; i < argc && i < MAX_PARAMS; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
             if (fi >= 0 && C.functions[fi].param_is_far[i]) {
                 symbol_t *asym = NULL;
                 if (arg_expr && arg_expr->kind == EXPR_IDENT)
@@ -1874,12 +1906,12 @@ static bool emit_multi_call_assign(expr_t *targets, expr_t *value, int line) {
         cerr(line, "too many return targets");
 
     int argc = 0;
-    int arg_vregs[16];
-    int arg_seg_vregs[16];
-    expr_t *arg_exprs[16];
+    int arg_vregs[MAX_PARAMS];
+    int arg_seg_vregs[MAX_PARAMS];
+    expr_t *arg_exprs[MAX_PARAMS];
     memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
     for (expr_t *a = value->u.call.args; a; a = a->next) {
-        if (argc < 16) {
+        if (argc < MAX_PARAMS) {
             typed_vreg_t av = emit_expr_typed(a);
             arg_vregs[argc] = av.vreg;
             arg_seg_vregs[argc] = av.vreg_seg;
@@ -1893,7 +1925,7 @@ static bool emit_multi_call_assign(expr_t *targets, expr_t *value, int line) {
 
     int ir_args[32];
     int nir_args = 0;
-    for (int i = 0; i < argc && i < 16; i++) {
+    for (int i = 0; i < argc && i < MAX_PARAMS; i++) {
         if (C.functions[fi].param_is_far[i]) {
             symbol_t *asym = NULL;
             if (arg_seg_vregs[i] >= 0) {
@@ -2529,9 +2561,9 @@ static void emit_stmt(stmt_t *s) {
             break;
         }
         int argc = 0;
-        int arg_vregs[16];
+        int arg_vregs[MAX_PARAMS];
         for (expr_t *a = e->u.call.args; a; a = a->next) {
-            if (argc < 16)
+            if (argc < MAX_PARAMS)
                 arg_vregs[argc] = emit_expr(a);
             argc++;
         }
@@ -2539,7 +2571,7 @@ static void emit_stmt(stmt_t *s) {
         if (e->u.call.func->kind == EXPR_IDENT)
             fn_name = e->u.call.func->u.ident;
         fprintf(C.nir, "    tailcall %s", fn_name);
-        for (int i = 0; i < argc && i < 16; i++)
+        for (int i = 0; i < argc && i < MAX_PARAMS; i++)
             fprintf(C.nir, ", %%%d", arg_vregs[i]);
         fprintf(C.nir, "\n");
         break;
@@ -2705,20 +2737,24 @@ static void emit_ds_policy(FILE *f, fn_modifiers_t *mods) {
 static void emit_extern_params(FILE *f, param_t *params, bool nir) {
     int pn = 0;
     for (param_t *p = params; p; p = p->next, pn++) {
+        abi_place_t place = effective_param_place(p);
         if (nir) {
             if (p->type && p->type->kind == TYPE_FAR) {
                 fprintf(f, ".eparam u16, \"%s_off\"", p->name);
+                emit_abi_place(f, place);
                 if (p->has_pin)
                     fprintf(f, ", pin=%s",
                             reg_name_str(p->pinned_reg, p->pin_class));
                 fprintf(f, "\n");
                 fprintf(f, ".eparam seg, \"%s_seg\"", p->name);
+                emit_abi_place(f, place);
                 if (p->has_seg_pin)
                     fprintf(f, ", pin=%s",
                             reg_name_str(p->pinned_seg, REGCLASS_SEG));
                 fprintf(f, "\n");
             } else {
                 fprintf(f, ".eparam %s, \"%s\"", type_str(p->type), p->name);
+                emit_abi_place(f, place);
                 if (p->has_pin)
                     fprintf(f, ", pin=%s",
                             reg_name_str(p->pinned_reg, p->pin_class));
@@ -2727,6 +2763,7 @@ static void emit_extern_params(FILE *f, param_t *params, bool nir) {
         } else {
             fprintf(f, ".param %%%d, %s, \"%s\"", pn, type_str(p->type),
                     p->name);
+            emit_abi_place(f, place);
             if (p->has_pin)
                 fprintf(f, ", pin=%s",
                         reg_name_str(p->pinned_reg, p->pin_class));
@@ -2743,6 +2780,7 @@ static void emit_extern_params(FILE *f, param_t *params, bool nir) {
 static void emit_extern_returns(FILE *f, return_t *returns) {
     for (return_t *r = returns; r; r = r->next) {
         fprintf(f, ".returns %s", type_str(r->type));
+        emit_abi_place(f, effective_return_place(r));
         if (r->has_pin)
             fprintf(f, ", pin=%s",
                     reg_name_str(r->pinned_reg, r->pin_class));
@@ -2864,23 +2902,27 @@ static void compile_fn(decl_t *d) {
 
     for (param_t *p = d->u.fn.params; p; p = p->next) {
         symbol_t *sym = sym_add(p->name, p->type, false);
+        abi_place_t place = effective_param_place(p);
 
         /* Far params split into two vregs: offset (word) + segment */
         if (p->type && p->type->kind == TYPE_FAR) {
             /* Offset vreg (sym->vreg) */
             fprintf(C.nir, ".param %%%d, u16, \"%s_off\"", sym->vreg, p->name);
+            emit_abi_place(C.nir, place);
             if (p->has_pin)
                 fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
             fprintf(C.nir, "\n");
             /* Segment vreg */
             sym->vreg_seg = C.next_vreg++;
             fprintf(C.nir, ".param %%%d, seg, \"%s_seg\"", sym->vreg_seg, p->name);
+            emit_abi_place(C.nir, place);
             if (p->has_seg_pin)
                 fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_seg, REGCLASS_SEG));
             fprintf(C.nir, "\n");
             /* .nif: emit as far with pin */
             if (nif) {
                 fprintf(C.nif, ".param %%%d, far, \"%s\"", sym->vreg, p->name);
+                emit_abi_place(C.nif, place);
                 if (p->has_pin && p->has_seg_pin)
                     fprintf(C.nif, ", pin=%s:%s",
                             reg_name_str(p->pinned_seg, REGCLASS_SEG),
@@ -2897,6 +2939,7 @@ static void compile_fn(decl_t *d) {
         bool is_ref = (p->type && type_is_aggregate(p->type));
         const char *ir_type = (is_ref && !p->is_value) ? "u16" : type_str(p->type);
         fprintf(C.nir, ".param %%%d, %s, \"%s\"", sym->vreg, ir_type, p->name);
+        emit_abi_place(C.nir, place);
         if (p->is_value) fprintf(C.nir, ", value");
         if (p->has_pin)
             fprintf(C.nir, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
@@ -2907,6 +2950,7 @@ static void compile_fn(decl_t *d) {
         /* .nif keeps the full type for cross-module type checking */
         if (nif) {
             fprintf(C.nif, ".param %%%d, %s, \"%s\"", sym->vreg, type_str(p->type), p->name);
+            emit_abi_place(C.nif, place);
             if (p->is_value) fprintf(C.nif, ", value");
             if (p->has_pin)
                 fprintf(C.nif, ", pin=%s", reg_name_str(p->pinned_reg, p->pin_class));
@@ -2916,12 +2960,14 @@ static void compile_fn(decl_t *d) {
 
     for (return_t *r = d->u.fn.returns; r; r = r->next) {
         fprintf(C.nir, ".returns %s", type_str(r->type));
+        emit_abi_place(C.nir, effective_return_place(r));
         if (r->has_pin)
             fprintf(C.nir, ", pin=%s",
                     reg_name_str(r->pinned_reg, r->pin_class));
         fprintf(C.nir, "\n");
         if (nif) {
             fprintf(C.nif, ".returns %s", type_str(r->type));
+            emit_abi_place(C.nif, effective_return_place(r));
             if (r->has_pin)
                 fprintf(C.nif, ", pin=%s",
                         reg_name_str(r->pinned_reg, r->pin_class));
@@ -3235,7 +3281,7 @@ static void import_nif(const char *path, int use_line) {
     char cur_fn[64] = "";
     int cur_nparams = 0;
     return_t *cur_rets = NULL;
-    bool cur_param_is_far[16] = {0};
+    bool cur_param_is_far[MAX_PARAMS] = {0};
     while (fgets(line, sizeof(line), fp)) {
         int len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
@@ -3278,7 +3324,7 @@ static void import_nif(const char *path, int use_line) {
             /* Read type */
             char ptype[32];
             nif_read_word(p, ptype, sizeof(ptype));
-            if (cur_nparams < 16)
+            if (cur_nparams < MAX_PARAMS)
                 cur_param_is_far[cur_nparams] = (strcmp(ptype, "far") == 0 ||
                                                   strcmp(ptype, "far32") == 0);
             cur_nparams++;
@@ -3302,7 +3348,7 @@ static void import_nif(const char *path, int use_line) {
                 /* Apply far flags parsed from .param lines */
                 if (fi < C.nfunctions) {
                     int ir_count = 0;
-                    for (int pi = 0; pi < cur_nparams && pi < 16; pi++) {
+                    for (int pi = 0; pi < cur_nparams && pi < MAX_PARAMS; pi++) {
                         C.functions[fi].param_is_far[pi] = cur_param_is_far[pi];
                         ir_count++;
                         if (cur_param_is_far[pi]) ir_count++;
@@ -3321,7 +3367,7 @@ static void import_nif(const char *path, int use_line) {
             p = nif_read_word(p, name, sizeof(name));
             bool aligned = false;
             p = nif_skip_ws(p);
-            if (*p == ',') { p++; char q[16]; nif_read_word(p, q, sizeof(q));
+            if (*p == ',') { p++; char q[MAX_PARAMS]; nif_read_word(p, q, sizeof(q));
                 if (strcmp(q, "aligned") == 0) aligned = true; }
             /* Parse fields until .endstruct */
             field_t *fields = NULL, *tail = NULL;

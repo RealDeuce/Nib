@@ -1,5 +1,6 @@
 // Test: automatic ABI assignment rejects functions with too many params.
 
-fn too_many(a: far32, b: far32, c: far32, d: far32, divisor: u16) {
+fn too_many(a: u16, b: u16, c: u16, d: u16,
+            e: u16, f: u16, g: u16, h: u16) {
     nop();
 }

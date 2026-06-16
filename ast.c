@@ -378,6 +378,7 @@ param_t *mk_param(const char *name, type_t *type, bool is_value) {
     p->is_value = is_value;
     p->pinned_reg = REG_NONE;
     p->has_pin = false;
+    p->place = ABI_PLACE_DEFAULT;
     return p;
 }
 
@@ -387,6 +388,7 @@ param_t *mk_param_pinned(const char *name, type_t *type,
     p->pinned_reg = pinned_reg;
     p->pin_class = pin_class;
     p->has_pin = true;
+    p->place = ABI_PLACE_REGISTER;
     return p;
 }
 
@@ -398,6 +400,14 @@ param_t *mk_param_far_pinned(const char *name,
     p->has_pin = true;
     p->pinned_seg = seg_reg;
     p->has_seg_pin = true;
+    p->place = ABI_PLACE_REGISTER;
+    return p;
+}
+
+param_t *mk_param_placed(const char *name, type_t *type,
+                          bool is_value, abi_place_t place) {
+    param_t *p = mk_param(name, type, is_value);
+    p->place = place;
     return p;
 }
 
@@ -408,6 +418,7 @@ return_t *mk_return(type_t *type) {
     r->type = type;
     r->pinned_reg = REG_NONE;
     r->pin_class = REGCLASS_WORD;
+    r->place = ABI_PLACE_DEFAULT;
     return r;
 }
 
@@ -417,6 +428,13 @@ return_t *mk_return_pinned(type_t *type, int pinned_reg,
     r->pinned_reg = pinned_reg;
     r->pin_class = pin_class;
     r->has_pin = true;
+    r->place = ABI_PLACE_REGISTER;
+    return r;
+}
+
+return_t *mk_return_placed(type_t *type, abi_place_t place) {
+    return_t *r = mk_return(type);
+    r->place = place;
     return r;
 }
 

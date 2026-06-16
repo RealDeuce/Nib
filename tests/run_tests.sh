@@ -218,6 +218,23 @@ else
     skip "extern pins" "asm not generated"
 fi
 
+# Stack ABI: two stack params and two stack returns share the same
+# two-word call area, and return b,a must not clobber a before it is read.
+if [ -f "$TEST_TMPDIR"/t_stack_abi.asm ]; then
+    if grep -q "push \\[BP+6\\]" "$TEST_TMPDIR"/t_stack_abi.asm &&
+       grep -q "push \\[BP+4\\]" "$TEST_TMPDIR"/t_stack_abi.asm &&
+       grep -q "pop \\[BP+6\\]" "$TEST_TMPDIR"/t_stack_abi.asm &&
+       grep -q "pop \\[BP+4\\]" "$TEST_TMPDIR"/t_stack_abi.asm &&
+       grep -q "add SP, 4" "$TEST_TMPDIR"/t_stack_abi.asm &&
+       ! grep -q "add SP, 8" "$TEST_TMPDIR"/t_stack_abi.asm; then
+        pass "stack ABI: params and returns share call area"
+    else
+        fail "stack ABI" "expected overlapping stack param/return layout"
+    fi
+else
+    skip "stack ABI" "asm not generated"
+fi
+
 # Inter-procedural propagation: fill() should get DI, AL, CX
 if [ -f "$TEST_TMPDIR"/t_pinning.asm ]; then
     if grep -q "mov DI," "$TEST_TMPDIR"/t_pinning.asm && grep -q "mov AL," "$TEST_TMPDIR"/t_pinning.asm; then
@@ -527,22 +544,19 @@ if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then
     fi
 fi
 
-# Far32 parameters used as indirect far call targets must materialize
-# spilled segment halves at function entry, after the frame is created.
+# Far32 parameters default to stack ABI. Used as indirect far call
+# targets, they should be called directly from their stack homes.
 if [ -f "$TEST_TMPDIR"/t_icall_far_param.asm ]; then
     beep_window=$(sed -n '/t_icall_far_param_beep_once:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_far_param.asm)
     caller_window=$(sed -n '/t_icall_far_param_caller:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_far_param.asm)
-    if printf "%s\n" "$beep_window" | grep -q 'mov \[BP-4\], BX' &&
-       printf "%s\n" "$beep_window" | grep -q 'mov \[BP-2\], SI' &&
-       printf "%s\n" "$beep_window" | grep -q 'mov AX, \[BP\]' &&
-       printf "%s\n" "$beep_window" | grep -q 'mov ES, AX' &&
-       [ "$(printf "%s\n" "$beep_window" | grep -c 'call far \[SS:BX\]')" -eq 3 ] &&
-       [ "$(printf "%s\n" "$caller_window" | grep -c 'push BP')" -eq 2 ] &&
-       [ "$(printf "%s\n" "$caller_window" | grep -c 'pop BP')" -eq 2 ] &&
-       [ "$(printf "%s\n" "$caller_window" | grep -c 'mov BP, ES')" -eq 2 ]; then
-        pass "icall-far-param: target segment params materialized"
+    if printf "%s\n" "$beep_window" | grep -q 'call far \[BP+4\]' &&
+       printf "%s\n" "$beep_window" | grep -q 'call far \[BP+8\]' &&
+       printf "%s\n" "$beep_window" | grep -q 'call far \[BP+12\]' &&
+       ! printf "%s\n" "$beep_window" | grep -q 'call far \[SS:BX\]' &&
+       [ "$(printf "%s\n" "$caller_window" | grep -c 'add SP, 12')" -eq 2 ]; then
+        pass "icall-far-param: stack far32 targets called directly"
     else
-        fail "icall-far-param" "far32 parameter segment half not materialized"
+        fail "icall-far-param" "far32 stack target was repacked"
     fi
 fi
 

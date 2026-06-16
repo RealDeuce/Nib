@@ -23,6 +23,12 @@ typedef struct reg_list_node reg_list_t;
 typedef struct flag_expr_node flag_expr_t;
 typedef struct flag_case_node flag_case_t;
 
+typedef enum {
+    ABI_PLACE_DEFAULT,
+    ABI_PLACE_REGISTER,
+    ABI_PLACE_STACK
+} abi_place_t;
+
 /* ---- Register / flag IDs ---- */
 
 typedef enum {
@@ -263,6 +269,7 @@ struct param_node {
     int         pinned_reg;
     reg_class_t pin_class;
     bool        has_pin;
+    abi_place_t place;
 
     /* For far params: segment register pin */
     int         pinned_seg;     /* segment register (SREG_*) */
@@ -278,6 +285,7 @@ struct return_node {
     int         pinned_reg;
     reg_class_t pin_class;
     bool        has_pin;
+    abi_place_t place;
 
     return_t *next;
 };
@@ -516,9 +524,12 @@ param_t    *mk_param_pinned(const char *name, type_t *type,
                              int pinned_reg, reg_class_t pin_class);
 param_t    *mk_param_far_pinned(const char *name,
                                  int off_reg, int seg_reg);
+param_t    *mk_param_placed(const char *name, type_t *type,
+                             bool is_value, abi_place_t place);
 return_t   *mk_return(type_t *type);
 return_t   *mk_return_pinned(type_t *type, int pinned_reg,
                               reg_class_t pin_class);
+return_t   *mk_return_placed(type_t *type, abi_place_t place);
 return_t   *return_list_append(return_t *list, return_t *item);
 int         return_list_count(return_t *list);
 field_t    *mk_field(const char *name, type_t *type);

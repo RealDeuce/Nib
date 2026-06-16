@@ -50,6 +50,12 @@ typedef enum {
     DS_POLICY_LITERAL
 } ds_policy_t;
 
+typedef enum {
+    ABI_PLACE_DEFAULT,
+    ABI_PLACE_REGISTER,
+    ABI_PLACE_STACK
+} abi_place_t;
+
 static const char *preg_name[] = {
     "AX","CX","DX","BX","SP","BP","SI","DI",
     "AL","CL","DL","BL","AH","CH","DH","BH",
@@ -96,6 +102,30 @@ static int parse_preg(const char *s) {
     return PREG_NONE;
 }
 
+static abi_place_t parse_abi_place(const char *p) {
+    if (!p)
+        return ABI_PLACE_DEFAULT;
+    if (strstr(p, "pin="))
+        return ABI_PLACE_REGISTER;
+    if (strstr(p, "stack"))
+        return ABI_PLACE_STACK;
+    if (strstr(p, "register"))
+        return ABI_PLACE_REGISTER;
+    return ABI_PLACE_DEFAULT;
+}
+
+static bool abi_place_is_stack(abi_place_t p) {
+    return p == ABI_PLACE_STACK;
+}
+
+static int abi_type_words(const char *type) {
+    if (!type || !*type)
+        return 1;
+    if (strcmp(type, "far") == 0 || strcmp(type, "far32") == 0)
+        return 2;
+    return 1;
+}
+
 
 /* ================================================================
  * IR representation
@@ -107,6 +137,7 @@ static int parse_preg(const char *s) {
 #define MAX_FNS      128
 #define MAX_LABELS   512
 #define MAX_RETURNS  8
+#define MAX_ABI_PARAMS 64
 
 /* IR instruction opcodes */
 typedef enum {
@@ -151,7 +182,7 @@ typedef struct {
     ir_op_t op;
     int     dst;            /* vreg written, or -1 */
     int     src1, src2;     /* vregs read, or -1 */
-    int     extra_args[8];  /* for calls with >2 args */
+    int     extra_args[MAX_ABI_PARAMS - 2];  /* for calls with >2 args */
     int     nargs;          /* total args for calls */
     int     ret_vregs[MAX_RETURNS]; /* extra return destinations/sources */
     int     nrets;
@@ -184,6 +215,8 @@ typedef struct {
     bool    is_local_slot;     /* true if this vreg names a source stack local */
     int     local_size;        /* bytes reserved for the source local */
     int     local_offset;      /* positive offset within the local area */
+    bool    is_stack_home;     /* true if this vreg lives at positive BP offset */
+    int     stack_offset;      /* positive BP offset for stack ABI homes */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
     /* Liveness */
@@ -256,9 +289,11 @@ typedef struct {
     int         nvregs;
 
     int         nparams;
-    char        param_names[16][64];
-    int         param_vregs[16];
-    struct { int preg; } param_pins[16]; /* pinned register for params */
+    char        param_names[MAX_ABI_PARAMS][64];
+    int         param_vregs[MAX_ABI_PARAMS];
+    abi_place_t param_places[MAX_ABI_PARAMS];
+    int         param_stack_offsets[MAX_ABI_PARAMS];
+    struct { int preg; } param_pins[MAX_ABI_PARAMS]; /* pinned register for params */
 
     bool        has_return;
     char        return_type[32];
@@ -266,6 +301,7 @@ typedef struct {
     int         nreturns;
     char        return_types[MAX_RETURNS][32];
     int         ret_pins[MAX_RETURNS];
+    abi_place_t ret_places[MAX_RETURNS];
 
     bblock_t    blocks[MAX_BLOCKS];
     int         nblocks;
@@ -315,11 +351,15 @@ typedef struct {
     bool has_address;
     int  addr_seg;
     int  addr_off;
-    struct { int preg; } param_pins[16];
+    struct { int preg; } param_pins[MAX_ABI_PARAMS];
+    abi_place_t param_places[MAX_ABI_PARAMS];
+    int  param_stack_offsets[MAX_ABI_PARAMS];
     int  nparams;
     int  nreturns;
     char return_types[MAX_RETURNS][32];
     int  ret_pins[MAX_RETURNS];
+    abi_place_t ret_places[MAX_RETURNS];
+    int  return_stack_offsets[MAX_RETURNS];
     int  preserves[NUM_PREGS];  /* list of PREG_* preserved by extern */
     int  npreserves;
 } extern_fn_t;
@@ -399,9 +439,13 @@ static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
 
 /* Resolved parameter register assignments per function */
 typedef struct {
-    int param_regs[16];     /* PREG_* for each parameter, or PREG_NONE */
+    int param_regs[MAX_ABI_PARAMS];     /* PREG_* for each parameter, or PREG_NONE */
+    abi_place_t param_places[MAX_ABI_PARAMS];
+    int param_stack_offsets[MAX_ABI_PARAMS];
     int return_reg;         /* PREG_* for return value, or PREG_NONE */
     int return_regs[MAX_RETURNS];
+    abi_place_t return_places[MAX_RETURNS];
+    int return_stack_offsets[MAX_RETURNS];
     int nreturns;
     bool resolved;
     bool clobbers[NUM_PREGS]; /* true if function clobbers this register */
@@ -650,10 +694,11 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 p++;
                 char *e = strchr(p, '"');
                 int nlen = e ? (int)(e - p) : 0;
-                if (pidx < 16) {
+                if (pidx < MAX_ABI_PARAMS) {
                     memcpy(fn->param_names[pidx], p, nlen);
                     fn->param_names[pidx][nlen] = '\0';
                     fn->param_vregs[pidx] = v;
+                    fn->param_places[pidx] = parse_abi_place(e ? e + 1 : p);
                     fn->nparams++;
                 }
                 if (e) p = e + 1;
@@ -661,16 +706,18 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             /* Check for "pin=REG" (new) or "in REG" (legacy) */
             char *pin_ptr = strstr(p, "pin=");
             char *in_ptr = strstr(p, " in ");
-            if (pin_ptr && pidx < 16) {
+            if (pin_ptr && pidx < MAX_ABI_PARAMS) {
                 char reg[16];
                 read_word(pin_ptr + 4, reg, sizeof(reg));
                 fn->param_pins[pidx].preg = parse_preg(reg);
+                fn->param_places[pidx] = ABI_PLACE_REGISTER;
                 if (v < MAX_VREGS && fn->param_pins[pidx].preg != PREG_NONE)
                     fn->vregs[v].prefer = fn->param_pins[pidx].preg;
-            } else if (in_ptr && pidx < 16) {
+            } else if (in_ptr && pidx < MAX_ABI_PARAMS) {
                 char reg[16];
                 read_word(in_ptr + 4, reg, sizeof(reg));
                 fn->param_pins[pidx].preg = parse_preg(reg);
+                fn->param_places[pidx] = ABI_PLACE_REGISTER;
                 if (v < MAX_VREGS && fn->param_pins[pidx].preg != PREG_NONE)
                     fn->vregs[v].prefer = fn->param_pins[pidx].preg;
             }
@@ -696,15 +743,19 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             /* Check for "pin=REG" (new) or "in REG" (legacy) */
             char *pin_ptr = strstr(p, "pin=");
             char *in_ptr = strstr(p, "in ");
+            abi_place_t rplace = parse_abi_place(p);
             if (pin_ptr) {
                 char reg[16];
                 read_word(pin_ptr + 4, reg, sizeof(reg));
                 fn->ret_pins[ri] = parse_preg(reg);
+                rplace = ABI_PLACE_REGISTER;
             } else if (in_ptr) {
                 char reg[16];
                 read_word(in_ptr + 3, reg, sizeof(reg));
                 fn->ret_pins[ri] = parse_preg(reg);
+                rplace = ABI_PLACE_REGISTER;
             }
+            fn->ret_places[ri] = rplace;
             fn->ret_pin = fn->ret_pins[0];
             if (fn->nreturns < MAX_RETURNS)
                 fn->nreturns++;
@@ -947,7 +998,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         ir_insn_t *ins = &fn->insns[fn->ninsns];
         memset(ins, 0, sizeof(*ins));
         ins->dst = ins->src1 = ins->src2 = -1;
-        for (int i = 0; i < 8; i++) ins->extra_args[i] = -1;
+        for (int i = 0; i < MAX_ABI_PARAMS - 2; i++) ins->extra_args[i] = -1;
         for (int i = 0; i < MAX_RETURNS; i++) ins->ret_vregs[i] = -1;
 
         char opname[64];
@@ -1030,7 +1081,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 int a = parse_vreg(p, &p);
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
-                else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
+                else if (ins->nargs - 2 < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs - 2] = a;
                 ins->nargs++;
             }
         }
@@ -1056,7 +1107,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 int a = parse_vreg(p, &p);
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
-                else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
+                else if (ins->nargs - 2 < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs - 2] = a;
                 ins->nargs++;
             }
         }
@@ -1084,7 +1135,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 p = skip_ws(p);
                 if (*p != '%') break;
                 int a = parse_vreg(p, &p);
-                if (ins->nargs < 8) ins->extra_args[ins->nargs] = a;
+                if (ins->nargs < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs] = a;
                 ins->nargs++;
             }
         }
@@ -1103,7 +1154,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 int a = parse_vreg(p, &p);
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
-                else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
+                else if (ins->nargs - 2 < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs - 2] = a;
                 ins->nargs++;
             }
         }
@@ -1507,7 +1558,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (ins->dst >= fn->nvregs) fn->nvregs = ins->dst + 1;
         if (ins->src1 >= fn->nvregs) fn->nvregs = ins->src1 + 1;
         if (ins->src2 >= fn->nvregs) fn->nvregs = ins->src2 + 1;
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < MAX_ABI_PARAMS - 2; i++)
             if (ins->extra_args[i] >= fn->nvregs)
                 fn->nvregs = ins->extra_args[i] + 1;
         for (int i = 0; i < MAX_RETURNS; i++)
@@ -1553,7 +1604,7 @@ static void parse_nir(const char *path) {
             memset(fn, 0, sizeof(*fn));
             fn->ret_pin = PREG_NONE;
             strncpy(fn->module, cur_module, 63);
-            for (int i = 0; i < 16; i++)
+            for (int i = 0; i < MAX_ABI_PARAMS; i++)
                 fn->param_pins[i].preg = PREG_NONE;
             for (int i = 0; i < MAX_RETURNS; i++)
                 fn->ret_pins[i] = PREG_NONE;
@@ -1616,17 +1667,21 @@ static void parse_nir(const char *path) {
                 while (*ep == ' ' || *ep == '\t') ep++;
                 if (strncmp(ep, ".endextern", 10) == 0) break;
                 if (strncmp(ep, ".eparam", 7) == 0) {
+                    if (pi < MAX_ABI_PARAMS)
+                        ext->param_places[pi] = parse_abi_place(ep);
                     /* Parse "pin=REG" (new) or "in REG" (legacy) */
                     char *pin_ptr = strstr(ep, "pin=");
                     char *in_ptr = strstr(ep, " in ");
-                    if (pin_ptr && pi < 16) {
+                    if (pin_ptr && pi < MAX_ABI_PARAMS) {
                         char reg[16];
                         read_word(pin_ptr + 4, reg, sizeof(reg));
                         ext->param_pins[pi].preg = parse_preg(reg);
-                    } else if (in_ptr && pi < 16) {
+                        ext->param_places[pi] = ABI_PLACE_REGISTER;
+                    } else if (in_ptr && pi < MAX_ABI_PARAMS) {
                         char reg[16];
                         read_word(in_ptr + 4, reg, sizeof(reg));
                         ext->param_pins[pi].preg = parse_preg(reg);
+                        ext->param_places[pi] = ABI_PLACE_REGISTER;
                     }
                     pi++;
                 }
@@ -1640,15 +1695,19 @@ static void parse_nir(const char *path) {
                                    sizeof(ext->return_types[ri]));
                     char *pin_ptr = strstr(ep, "pin=");
                     char *in_ptr = strstr(ep, "in ");
+                    abi_place_t rplace = parse_abi_place(ep);
                     if (pin_ptr) {
                         char reg[16];
                         read_word(pin_ptr + 4, reg, sizeof(reg));
                         ext->ret_pins[ri] = parse_preg(reg);
+                        rplace = ABI_PLACE_REGISTER;
                     } else if (in_ptr) {
                         char reg[16];
                         read_word(in_ptr + 3, reg, sizeof(reg));
                         ext->ret_pins[ri] = parse_preg(reg);
+                        rplace = ABI_PLACE_REGISTER;
                     }
+                    ext->ret_places[ri] = rplace;
                     if (ext->nreturns < MAX_RETURNS)
                         ext->nreturns++;
                 }
@@ -1885,7 +1944,7 @@ static void compute_liveness(func_t *fn) {
             if (ins->src2 >= 0 && ins->src2 < fn->nvregs &&
                 i > fn->vregs[ins->src2].last_use)
                 fn->vregs[ins->src2].last_use = i;
-            for (int j = 0; j < 8; j++)
+            for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
                 if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs &&
                     i > fn->vregs[ins->extra_args[j]].last_use)
                     fn->vregs[ins->extra_args[j]].last_use = i;
@@ -1919,7 +1978,7 @@ static void compute_liveness(func_t *fn) {
             fn->vregs[ins->src1].use_count++;
         if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
             fn->vregs[ins->src2].use_count++;
-        for (int j = 0; j < 8; j++)
+        for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
             if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
                 fn->vregs[ins->extra_args[j]].use_count++;
         if (ins->op == IR_RETVAL) {
@@ -2073,17 +2132,22 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
 
         /* Uses: vregs read by this instruction.
          * Only counts as a use if not already defined in this block. */
-        int use_vregs[32];
+        int use_vregs[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+        int use_cap = (int)(sizeof(use_vregs) / sizeof(use_vregs[0]));
         int nuses = 0;
-        if (ins->src1 >= 0 && ins->op != IR_LEA) use_vregs[nuses++] = ins->src1;
-        if (ins->src2 >= 0) use_vregs[nuses++] = ins->src2;
-        for (int j = 0; j < 8; j++)
-            if (ins->extra_args[j] >= 0) use_vregs[nuses++] = ins->extra_args[j];
+        if (ins->src1 >= 0 && ins->op != IR_LEA && nuses < use_cap)
+            use_vregs[nuses++] = ins->src1;
+        if (ins->src2 >= 0 && nuses < use_cap)
+            use_vregs[nuses++] = ins->src2;
+        for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
+            if (ins->extra_args[j] >= 0 && nuses < use_cap)
+                use_vregs[nuses++] = ins->extra_args[j];
         if (ins->op == IR_RETVAL) {
             for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
-                if (ins->ret_vregs[j] >= 0) use_vregs[nuses++] = ins->ret_vregs[j];
+                if (ins->ret_vregs[j] >= 0 && nuses < use_cap)
+                    use_vregs[nuses++] = ins->ret_vregs[j];
         }
-        if (insn_reads_dst(ins))
+        if (insn_reads_dst(ins) && nuses < use_cap)
             use_vregs[nuses++] = ins->dst;
 
         for (int u = 0; u < nuses; u++) {
@@ -2121,6 +2185,8 @@ static void compute_cfg_liveness(func_t *fn) {
 
     /* Parameters are live-in at entry block */
     for (int p = 0; p < fn->nparams; p++) {
+        if (abi_place_is_stack(fn->param_places[p]))
+            continue;
         int v = fn->param_vregs[p];
         if (v >= 0 && v < fn->nvregs)
             vset_set(fn->blocks[0].live_in, v);
@@ -2211,7 +2277,7 @@ static void build_igraph(func_t *fn) {
                     vset_set(live, ins->src1);
                 if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
                     vset_set(live, ins->src2);
-                for (int j = 0; j < 8; j++)
+                for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
                     if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
                         vset_set(live, ins->extra_args[j]);
                 if (ins->op == IR_RETVAL) {
@@ -2626,10 +2692,12 @@ static void allocate_registers(func_t *fn, bool bp_available) {
      * the vreg adapts to the preference's register class. But
      * addressing constraints must still be respected. */
     for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].is_stack_home) continue;
         if (fn->vregs[i].fixed && fn->vregs[i].prefer != PREG_NONE)
             fn->vregs[i].assigned = fn->vregs[i].prefer;
     }
     for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].is_stack_home) continue;
         if (fn->vregs[i].is_local_slot) continue;
         if (fn->vregs[i].fixed) continue;
         if (fn->vregs[i].prefer == PREG_NONE) continue;
@@ -2680,6 +2748,7 @@ static void allocate_registers(func_t *fn, bool bp_available) {
 
     /* Mark already-handled vregs */
     for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].is_stack_home) removed[i] = true;
         if (fn->vregs[i].is_local_slot) removed[i] = true;
         if (fn->vregs[i].assigned != PREG_NONE) removed[i] = true;
         if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0)
@@ -2835,7 +2904,7 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
             vset_set(live, ins->src1);
         if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
             vset_set(live, ins->src2);
-        for (int j = 0; j < 8; j++)
+        for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
             if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
                 vset_set(live, ins->extra_args[j]);
         if (ins->op == IR_RETVAL) {
@@ -2881,7 +2950,7 @@ static void add_insn_uses_to_live(func_t *fn, ir_insn_t *ins,
         vset_set(live, ins->src1);
     if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
         vset_set(live, ins->src2);
-    for (int j = 0; j < 8; j++)
+    for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
         if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
             vset_set(live, ins->extra_args[j]);
     if (ins->op == IR_RETVAL) {
@@ -2987,6 +3056,8 @@ static int function_return_reg(func_t *fn, int idx) {
         return PREG_NONE;
     if (idx < 0 || idx >= fn->nreturns || idx >= MAX_RETURNS)
         return PREG_NONE;
+    if (abi_place_is_stack(fn->ret_places[idx]))
+        return PREG_NONE;
     if (fn->ret_pins[idx] != PREG_NONE)
         return fn->ret_pins[idx];
     return default_return_reg(fn->return_types[idx], idx);
@@ -2995,15 +3066,143 @@ static int function_return_reg(func_t *fn, int idx) {
 static int extern_return_reg(extern_fn_t *ext, int idx) {
     if (idx < 0 || idx >= ext->nreturns || idx >= MAX_RETURNS)
         return PREG_NONE;
+    if (abi_place_is_stack(ext->ret_places[idx]))
+        return PREG_NONE;
     if (ext->ret_pins[idx] != PREG_NONE)
         return ext->ret_pins[idx];
     return default_return_reg(ext->return_types[idx], idx);
 }
 
+static int call_arg_vreg(ir_insn_t *ins, int a) {
+    if (a == 0) return ins->src1;
+    if (a == 1) return ins->src2;
+    int idx = a - 2;
+    if (idx < 0 || idx >= MAX_ABI_PARAMS - 2)
+        return -1;
+    return ins->extra_args[idx];
+}
+
+static int stack_param_words(abi_place_t *places, int nparams) {
+    int words = 0;
+    for (int a = 0; a < nparams && a < MAX_ABI_PARAMS; a++)
+        if (abi_place_is_stack(places[a]))
+            words++;
+    return words;
+}
+
+static int stack_return_words(abi_place_t *places, char types[][32], int nreturns) {
+    int words = 0;
+    for (int ri = 0; ri < nreturns && ri < MAX_RETURNS; ri++)
+        if (abi_place_is_stack(places[ri]))
+            words += abi_type_words(types[ri]);
+    return words;
+}
+
+static int direct_stack_arg_words(int callee_fi, int callee_ext) {
+    if (callee_fi >= 0)
+        return stack_param_words(fn_assigns[callee_fi].param_places,
+                                 functions[callee_fi].nparams);
+    if (callee_ext >= 0)
+        return stack_param_words(externs[callee_ext].param_places,
+                                 externs[callee_ext].nparams);
+    return 0;
+}
+
+static int direct_stack_ret_words(int callee_fi, int callee_ext) {
+    if (callee_fi >= 0)
+        return stack_return_words(fn_assigns[callee_fi].return_places,
+                                  functions[callee_fi].return_types,
+                                  functions[callee_fi].nreturns);
+    if (callee_ext >= 0)
+        return stack_return_words(externs[callee_ext].ret_places,
+                                  externs[callee_ext].return_types,
+                                  externs[callee_ext].nreturns);
+    return 0;
+}
+
+static void call_area_operand(char *buf, size_t bufsz, int disp) {
+    if (disp == 0)
+        snprintf(buf, bufsz, "[SS:BX]");
+    else
+        snprintf(buf, bufsz, "[SS:BX+%d]", disp);
+}
+
+static void rins_push_call_arg(func_t *fn, int arg_vreg) {
+    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
+        return;
+    if (fn->vregs[arg_vreg].is_byte) {
+        rins_asm(fn, "    push AX");
+        rins_asm(fn, "    mov AL, %s", vreg_asm(fn, arg_vreg));
+        rins_asm(fn, "    xchg AX, [SP]");
+    } else {
+        rins_asm(fn, "    push %s", vreg_asm(fn, arg_vreg));
+    }
+}
+
+static void rins_load_call_slot(func_t *fn, int ret_vreg, int disp) {
+    if (ret_vreg < 0 || ret_vreg >= fn->nvregs)
+        return;
+    char src[32];
+    call_area_operand(src, sizeof(src), disp);
+    bool is_byte = fn->vregs[ret_vreg].is_byte;
+    bool is_seg = fn->vregs[ret_vreg].is_seg;
+    if (is_seg) {
+        rins_asm(fn, "    push AX");
+        rins_asm(fn, "    mov AX, %s", src);
+        rins_asm(fn, "    mov %s, AX", vreg_asm(fn, ret_vreg));
+        rins_asm(fn, "    pop AX");
+    } else if (is_spilled(fn, ret_vreg)) {
+        const char *acc = is_byte ? "AL" : "AX";
+        rins_asm(fn, "    mov %s, %s", acc, src);
+        rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), acc);
+    } else {
+        rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), src);
+    }
+}
+
+static void bp_operand(char *buf, size_t bufsz, int off) {
+    snprintf(buf, bufsz, "[BP%+d]", off);
+}
+
+static void rins_push_ret_src(func_t *fn, int src_vreg) {
+    if (src_vreg < 0 || src_vreg >= fn->nvregs)
+        return;
+    if (fn->vregs[src_vreg].is_byte) {
+        rins_asm(fn, "    push AX");
+        rins_asm(fn, "    mov AL, %s", vreg_asm(fn, src_vreg));
+        rins_asm(fn, "    xchg AX, [SP]");
+    } else {
+        rins_asm(fn, "    push %s", vreg_asm(fn, src_vreg));
+    }
+}
+
+static void rins_pop_ret_reg(func_t *fn, int ret_reg) {
+    if (ret_reg == PREG_NONE)
+        return;
+    if (ret_reg >= PREG_AL && ret_reg <= PREG_BH) {
+        rins_asm(fn, "    pop AX");
+        if (ret_reg != PREG_AL)
+            rins_asm(fn, "    mov %s, AL", preg_name[ret_reg]);
+    } else {
+        rins_asm(fn, "    pop %s", preg_name[ret_reg]);
+    }
+}
+
+static void rins_pop_bp_slot(func_t *fn, int bp_off, bool is_byte) {
+    char dst[32];
+    bp_operand(dst, sizeof(dst), bp_off);
+    if (is_byte) {
+        rins_asm(fn, "    pop AX");
+        rins_asm(fn, "    mov %s, AL", dst);
+    } else {
+        rins_asm(fn, "    pop %s", dst);
+    }
+}
+
 /* Build the resolved instruction stream.
  * Inserts explicit moves for fixups that the emitter would
  * otherwise handle with push/pop sequences. */
-static void insert_fixup_moves(func_t *fn) {
+static void insert_fixup_moves(func_t *fn, int fn_idx) {
     fn->nresolved = 0;
 
     for (int i = 0; i < fn->ninsns; i++) {
@@ -3154,6 +3353,11 @@ static void insert_fixup_moves(func_t *fn) {
                 }
             }
 
+            int stack_arg_words = direct_stack_arg_words(callee_fi, callee_ext);
+            int stack_ret_words = direct_stack_ret_words(callee_fi, callee_ext);
+            int call_area_words = stack_arg_words > stack_ret_words ?
+                                  stack_arg_words : stack_ret_words;
+
             /* BP caller-save */
             /* Caller-save: collect live registers the callee may clobber */
             int call_saved[16];
@@ -3165,16 +3369,16 @@ static void insert_fixup_moves(func_t *fn) {
             bool caller_bp_live = fn->needs_frame;
             if (callee_fi >= 0) {
                 fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
-                for (int a = 0; a < ins->nargs && a < 16; a++) {
+                for (int a = 0; a < ins->nargs && a < MAX_ABI_PARAMS; a++) {
+                    if (abi_place_is_stack(callee_fa->param_places[a]))
+                        continue;
                     int expected = callee_fa->param_regs[a];
                     if (expected == PREG_BP) {
                         outgoing_bp_param = true;
                     }
                     if (expected == PREG_NONE || expected == PREG_SP)
                         continue;
-                    int arg_vreg = (a == 0) ? ins->src1 :
-                                   (a == 1) ? ins->src2 :
-                                              ins->extra_args[a - 2];
+                    int arg_vreg = call_arg_vreg(ins, a);
                     if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
                         continue;
                     int actual = fn->vregs[arg_vreg].assigned;
@@ -3186,15 +3390,15 @@ static void insert_fixup_moves(func_t *fn) {
                 }
             } else if (callee_ext >= 0) {
                 for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
+                    if (abi_place_is_stack(externs[callee_ext].param_places[a]))
+                        continue;
                     int expected = externs[callee_ext].param_pins[a].preg;
                     if (expected == PREG_BP) {
                         outgoing_bp_param = true;
                     }
                     if (expected == PREG_NONE || expected == PREG_SP)
                         continue;
-                    int arg_vreg = (a == 0) ? ins->src1 :
-                                   (a == 1) ? ins->src2 :
-                                              ins->extra_args[a - 2];
+                    int arg_vreg = call_arg_vreg(ins, a);
                     if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
                         continue;
                     int actual = fn->vregs[arg_vreg].assigned;
@@ -3228,6 +3432,31 @@ static void insert_fixup_moves(func_t *fn) {
             if ((fn->needs_frame && !callee_preserves[PREG_BP]) ||
                 (outgoing_bp_param && caller_bp_live))
                 add_call_saved_reg(call_saved, &call_nsaved, PREG_BP);
+            if (stack_ret_words > 0) {
+                bool bx_live = false;
+                for (int v = 0; v < fn->nvregs; v++) {
+                    if (v == ins->dst) continue;
+                    bool is_ret_dst = false;
+                    if (ins->op == IR_MCALL) {
+                        for (int ri = 0; ri < ins->nrets - 1 && ri < MAX_RETURNS; ri++) {
+                            if (v == ins->ret_vregs[ri]) {
+                                is_ret_dst = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (is_ret_dst) continue;
+                    int preg = fn->vregs[v].assigned;
+                    if (preg != PREG_BX && !pregs_alias(preg, PREG_BX))
+                        continue;
+                    if (fn->vregs[v].last_use <= (int)i) continue;
+                    if (fn->vregs[v].def_pos > (int)i) continue;
+                    bx_live = true;
+                    break;
+                }
+                if (bx_live)
+                    add_call_saved_reg(call_saved, &call_nsaved, PREG_BX);
+            }
             for (int v = 0; v < fn->nvregs; v++) {
                 if (v == ins->dst) continue;
                 bool is_ret_dst = false;
@@ -3258,14 +3487,37 @@ static void insert_fixup_moves(func_t *fn) {
                     rins_asm(fn, "    push %s", preg_name[call_saved[s]]);
             }
 
+            if (call_area_words > 0) {
+                int extra_words = call_area_words - stack_arg_words;
+                if (extra_words > 0)
+                    rins_asm(fn, "    sub SP, %d", extra_words * 2);
+                if (callee_fi >= 0) {
+                    fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
+                    int last_arg = ins->nargs < functions[callee_fi].nparams ?
+                                   ins->nargs - 1 : functions[callee_fi].nparams - 1;
+                    for (int a = last_arg; a >= 0; a--) {
+                        if (!abi_place_is_stack(callee_fa->param_places[a]))
+                            continue;
+                        rins_push_call_arg(fn, call_arg_vreg(ins, a));
+                    }
+                } else if (callee_ext >= 0) {
+                    int last_arg = ins->nargs < externs[callee_ext].nparams ?
+                                   ins->nargs - 1 : externs[callee_ext].nparams - 1;
+                    for (int a = last_arg; a >= 0; a--) {
+                        if (!abi_place_is_stack(externs[callee_ext].param_places[a]))
+                            continue;
+                        rins_push_call_arg(fn, call_arg_vreg(ins, a));
+                    }
+                }
+            }
+
             /* Argument fixup: place args in expected registers */
             if (callee_fi >= 0) {
                 fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
                 for (int a = 0; a < ins->nargs; a++) {
-                    int arg_vreg;
-                    if (a == 0) arg_vreg = ins->src1;
-                    else if (a == 1) arg_vreg = ins->src2;
-                    else arg_vreg = ins->extra_args[a - 2];
+                    if (abi_place_is_stack(callee_fa->param_places[a]))
+                        continue;
+                    int arg_vreg = call_arg_vreg(ins, a);
                     if (arg_vreg < 0) continue;
                     int expected = callee_fa->param_regs[a];
                     if (expected == PREG_NONE) continue;
@@ -3273,6 +3525,25 @@ static void insert_fixup_moves(func_t *fn) {
                     if (actual == expected || pregs_alias(actual, expected))
                         continue;
                     /* Emit fixup mov */
+                    if (is_spilled(fn, arg_vreg)) {
+                        rins_asm(fn, "    mov %s, %s",
+                                 preg_name[expected], vreg_asm(fn, arg_vreg));
+                    } else {
+                        rins_asm(fn, "    mov %s, %s",
+                                 preg_name[expected], preg_name[actual]);
+                    }
+                }
+            } else if (callee_ext >= 0) {
+                for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
+                    if (abi_place_is_stack(externs[callee_ext].param_places[a]))
+                        continue;
+                    int arg_vreg = call_arg_vreg(ins, a);
+                    if (arg_vreg < 0) continue;
+                    int expected = externs[callee_ext].param_pins[a].preg;
+                    if (expected == PREG_NONE) continue;
+                    int actual = fn->vregs[arg_vreg].assigned;
+                    if (actual == expected || pregs_alias(actual, expected))
+                        continue;
                     if (is_spilled(fn, arg_vreg)) {
                         rins_asm(fn, "    mov %s, %s",
                                  preg_name[expected], vreg_asm(fn, arg_vreg));
@@ -3292,10 +3563,29 @@ static void insert_fixup_moves(func_t *fn) {
                 int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
                 if (ret_v < 0 || ret_v >= fn->nvregs) continue;
                 int expected = PREG_NONE;
+                bool ret_stack = false;
+                int ret_disp = 0;
                 if (callee_fi >= 0)
                     expected = fn_assigns[callee_fi].return_regs[ri];
                 else if (callee_ext >= 0)
                     expected = extern_return_reg(&externs[callee_ext], ri);
+                if (callee_fi >= 0 &&
+                    abi_place_is_stack(fn_assigns[callee_fi].return_places[ri])) {
+                    ret_stack = true;
+                    ret_disp = fn_assigns[callee_fi].return_stack_offsets[ri] -
+                               (functions[callee_fi].is_far ? 6 : 4);
+                } else if (callee_ext >= 0 &&
+                           abi_place_is_stack(externs[callee_ext].ret_places[ri])) {
+                    ret_stack = true;
+                    ret_disp = externs[callee_ext].return_stack_offsets[ri] -
+                               (externs[callee_ext].is_far ? 6 : 4);
+                }
+                if (ret_stack) {
+                    if (call_area_words > 0)
+                        rins_asm(fn, "    mov BX, SP");
+                    rins_load_call_slot(fn, ret_v, ret_disp);
+                    continue;
+                }
                 if (expected == PREG_NONE) continue;
                 int actual = fn->vregs[ret_v].assigned;
                 if (actual != expected) {
@@ -3303,6 +3593,9 @@ static void insert_fixup_moves(func_t *fn) {
                              vreg_asm(fn, ret_v), preg_name[expected]);
                 }
             }
+
+            if (call_area_words > 0)
+                rins_asm(fn, "    add SP, %d", call_area_words * 2);
 
             /* Caller-restore */
             if (call_use_pusha) {
@@ -3377,6 +3670,34 @@ static void insert_fixup_moves(func_t *fn) {
         /* ---- Return value materialization ---- */
         if (ins->op == IR_RETVAL) {
             int nrets = ins->nrets > 0 ? ins->nrets : 1;
+            bool has_stack_ret = false;
+            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+                if (abi_place_is_stack(fn->ret_places[ri])) {
+                    has_stack_ret = true;
+                    break;
+                }
+            }
+            if (has_stack_ret) {
+                for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+                    int src = (ri == 0) ? ins->src1 : ins->ret_vregs[ri - 1];
+                    rins_push_ret_src(fn, src);
+                }
+                int last_ret = nrets < MAX_RETURNS ? nrets - 1 : MAX_RETURNS - 1;
+                for (int ri = last_ret; ri >= 0; ri--) {
+                    if (abi_place_is_stack(fn->ret_places[ri])) {
+                        int src = (ri == 0) ? ins->src1 : ins->ret_vregs[ri - 1];
+                        bool is_byte = (src >= 0 && src < fn->nvregs &&
+                                        fn->vregs[src].is_byte);
+                        rins_pop_bp_slot(fn,
+                                         fn_assigns[fn_idx].return_stack_offsets[ri],
+                                         is_byte);
+                    } else {
+                        rins_pop_ret_reg(fn, function_return_reg(fn, ri));
+                    }
+                }
+                rins_ir(fn, i);
+                continue;
+            }
             struct { int dst_reg; int src_vreg; int src_reg; bool done; } moves[MAX_RETURNS];
             int nmoves = 0;
             for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
@@ -3445,6 +3766,10 @@ static const char *vreg_asm(func_t *fn, int v) {
         snprintf(b, 32, "[BP%+d]", off);
         return b;
     }
+    if (fn->vregs[v].is_stack_home) {
+        snprintf(b, 32, "[BP%+d]", fn->vregs[v].stack_offset);
+        return b;
+    }
     snprintf(b, 32, "%%_%d", v); /* shouldn't happen */
     return b;
 }
@@ -3507,7 +3832,7 @@ static const char *scoped_label(func_t *fn, const char *label) {
 /* Check if a vreg is spilled to memory */
 static bool is_spilled(func_t *fn, int v) {
     if (v < 0 || v >= MAX_VREGS) return false;
-    return fn->vregs[v].spill_slot >= 0;
+    return fn->vregs[v].spill_slot >= 0 || fn->vregs[v].is_stack_home;
 }
 
 /* Emit a mov that handles memory-to-memory via AX scratch */
@@ -4523,6 +4848,14 @@ static void emit_function(func_t *fn) {
             bool has_seg = (ins->src2 >= 0 && ins->src2 < MAX_VREGS &&
                             fn->vregs[ins->src2].is_seg);
             if (has_seg) {
+                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                    fn->vregs[ins->src1].is_stack_home &&
+                    fn->vregs[ins->src2].is_stack_home &&
+                    fn->vregs[ins->src2].stack_offset ==
+                        fn->vregs[ins->src1].stack_offset + 2) {
+                    fprintf(out_asm, "    call far %s\n", vreg_asm(fn, ins->src1));
+                    break;
+                }
                 /* Register pair: build far pointer on stack, use BX to address it.
                  * push seg; push off; push BX; mov BX,SP; add BX,2; call far [SS:BX]
                  * After call: pop BX (restore); add SP,4 (clean far ptr) */
@@ -4856,7 +5189,7 @@ typedef struct {
     int caller_fn;          /* index into functions[] */
     int callee_fn;          /* index into functions[], or -1 if external */
     int insn_idx;           /* call instruction index in caller */
-    int arg_vregs[16];      /* caller's vregs for each argument */
+    int arg_vregs[MAX_ABI_PARAMS];      /* caller's vregs for each argument */
     int nargs;
     int ret_vreg;           /* caller's vreg receiving return value */
     int ret_vregs[MAX_RETURNS];
@@ -4906,13 +5239,13 @@ static void build_call_graph(void) {
 
             if (ins->op == IR_ICALL) {
                 /* icall: args are in extra_args (src1 is addr vreg) */
-                for (int j = 0; j < 8 && ins->extra_args[j] >= 0; j++)
+                for (int j = 0; j < MAX_ABI_PARAMS - 2 && ins->extra_args[j] >= 0; j++)
                     e->arg_vregs[e->nargs++] = ins->extra_args[j];
             } else {
                 /* call/tailcall: args in src1, src2, extra_args */
                 if (ins->src1 >= 0) e->arg_vregs[e->nargs++] = ins->src1;
                 if (ins->src2 >= 0) e->arg_vregs[e->nargs++] = ins->src2;
-                for (int j = 0; j < 8 && ins->extra_args[j] >= 0; j++)
+                for (int j = 0; j < MAX_ABI_PARAMS - 2 && ins->extra_args[j] >= 0; j++)
                     e->arg_vregs[e->nargs++] = ins->extra_args[j];
             }
         }
@@ -4992,8 +5325,33 @@ static void propagate_preferences(void) {
         fn_assigns[i].nreturns = functions[i].nreturns;
         for (int j = 0; j < MAX_RETURNS; j++)
             fn_assigns[i].return_regs[j] = PREG_NONE;
-        for (int j = 0; j < 16; j++)
+        for (int j = 0; j < MAX_RETURNS; j++) {
+            fn_assigns[i].return_places[j] = functions[i].ret_places[j];
+            fn_assigns[i].return_stack_offsets[j] = 0;
+        }
+        for (int j = 0; j < MAX_ABI_PARAMS; j++) {
             fn_assigns[i].param_regs[j] = PREG_NONE;
+            fn_assigns[i].param_places[j] = functions[i].param_places[j];
+            fn_assigns[i].param_stack_offsets[j] = 0;
+        }
+    }
+
+    for (int x = 0; x < nexterns; x++) {
+        int base = externs[x].is_far ? 6 : 4;
+        int slot = 0;
+        for (int p = 0; p < externs[x].nparams && p < MAX_ABI_PARAMS; p++) {
+            if (!abi_place_is_stack(externs[x].param_places[p]))
+                continue;
+            externs[x].param_stack_offsets[p] = base + slot * 2;
+            slot++;
+        }
+        slot = 0;
+        for (int ri = 0; ri < externs[x].nreturns && ri < MAX_RETURNS; ri++) {
+            if (!abi_place_is_stack(externs[x].ret_places[ri]))
+                continue;
+            externs[x].return_stack_offsets[ri] = base + slot * 2;
+            slot += abi_type_words(externs[x].return_types[ri]);
+        }
     }
 
     /* Pre-propagate: extern functions have fixed param registers.
@@ -5031,6 +5389,33 @@ static void propagate_preferences(void) {
         func_t *fn = &functions[fi];
         fn_assignment_t *fa = &fn_assigns[fi];
 
+        int base = fn->is_far ? 6 : 4;
+        int stack_slot = 0;
+        for (int p = 0; p < fn->nparams; p++) {
+            if (!abi_place_is_stack(fn->param_places[p]))
+                continue;
+            int v = fn->param_vregs[p];
+            int off = base + stack_slot * 2;
+            fa->param_stack_offsets[p] = off;
+            fn->param_stack_offsets[p] = off;
+            if (v >= 0 && v < MAX_VREGS) {
+                fn->vregs[v].is_stack_home = true;
+                fn->vregs[v].stack_offset = off;
+            }
+            fn->needs_frame = true;
+            stack_slot++;
+        }
+
+        stack_slot = 0;
+        for (int ri = 0; ri < fn->nreturns && ri < MAX_RETURNS; ri++) {
+            if (!abi_place_is_stack(fn->ret_places[ri]))
+                continue;
+            int off = base + stack_slot * 2;
+            fa->return_stack_offsets[ri] = off;
+            fn->needs_frame = true;
+            stack_slot += abi_type_words(fn->return_types[ri]);
+        }
+
         /* Step 1: Assign parameter registers from this function's preferences.
          * If a parameter's vreg has a .prefer, use that.
          * Otherwise, pick a free register. */
@@ -5038,6 +5423,7 @@ static void propagate_preferences(void) {
 
         /* First pass: honor explicit preferences */
         for (int p = 0; p < fn->nparams; p++) {
+            if (abi_place_is_stack(fn->param_places[p])) continue;
             int v = fn->param_vregs[p];
             if (v >= 0 && fn->vregs[v].prefer != PREG_NONE) {
                 int preg = fn->vregs[v].prefer;
@@ -5066,6 +5452,7 @@ static void propagate_preferences(void) {
             if (dst_pref == PREG_NONE) continue;
 
             for (int p = 0; p < fn->nparams; p++) {
+                if (abi_place_is_stack(fn->param_places[p])) continue;
                 if (fn->param_vregs[p] == ins->src1 &&
                     fa->param_regs[p] == PREG_NONE) {
                     if (!reg_used[dst_pref]) {
@@ -5089,6 +5476,7 @@ static void propagate_preferences(void) {
                              PREG_AH, PREG_BH, PREG_CH, PREG_DH };
 
         for (int p = 0; p < fn->nparams; p++) {
+            if (abi_place_is_stack(fn->param_places[p])) continue;
             if (fa->param_regs[p] != PREG_NONE) continue;
             int v = fn->param_vregs[p];
             if (v < 0) continue;
@@ -5122,6 +5510,7 @@ static void propagate_preferences(void) {
         }
 
         for (int p = 0; p < fn->nparams; p++) {
+            if (abi_place_is_stack(fn->param_places[p])) continue;
             if (fa->param_regs[p] == PREG_NONE) {
                 fprintf(stderr,
                         "%s: no available ABI register for parameter %d '%s'\n",
@@ -5202,6 +5591,8 @@ static void propagate_preferences(void) {
         fn_assignment_t *fa = &fn_assigns[fi];
 
         for (int p = 0; p < fn->nparams; p++) {
+            if (abi_place_is_stack(fa->param_places[p]))
+                continue;
             int v = fn->param_vregs[p];
             if (v >= 0 && fa->param_regs[p] != PREG_NONE &&
                 fa->param_regs[p] != PREG_SP) {
@@ -5502,6 +5893,8 @@ int main(int argc, char **argv) {
             fn->needs_frame = true;
         }
         for (int v = 0; v < fn->nvregs; v++) {
+            if (fn->vregs[v].is_stack_home)
+                continue;
             if (fn->vregs[v].is_local_slot)
                 continue;
             if (fn->vregs[v].def_pos < 0 && fn->vregs[v].last_use < 0)
@@ -5588,7 +5981,7 @@ int main(int argc, char **argv) {
      * complete callee clobber sets. */
     for (int i = 0; i < nfunctions; i++) {
         func_t *fn = &functions[i];
-        insert_fixup_moves(fn);
+        insert_fixup_moves(fn, i);
 
         /* Debug: show assignments */
         fprintf(stderr, "  %s: %d vregs, %d spills", fn->name, fn->nvregs, fn->nspill_slots);
