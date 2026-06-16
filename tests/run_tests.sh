@@ -239,6 +239,19 @@ if [ -f /tmp/t_internal_call_save.asm ]; then
     fi
 fi
 
+# Indirect calls must save live registers not preserved by the extern
+# descriptor.
+if [ -f /tmp/t_icall_save.asm ]; then
+    call_window=$(sed -n '/push DI/,/pop DI/p' /tmp/t_icall_save.asm)
+    if echo "$call_window" | grep -q 'push DI' &&
+       echo "$call_window" | grep -q 'call far \[SS:BX\]' &&
+       echo "$call_window" | grep -q 'pop DI'; then
+        pass "icall-save: live DI saved across indirect call"
+    else
+        fail "icall-save" "missing DI save around indirect call"
+    fi
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f /tmp/t_port_io.asm ]; then
     if grep -q 'out 0x50, AL' /tmp/t_port_io.asm && grep -q 'in AL, 0x60' /tmp/t_port_io.asm; then

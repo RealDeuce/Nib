@@ -1,0 +1,11 @@
+// Test: indirect calls must save live caller registers that the extern
+// descriptor does not preserve.
+
+pub extern fn target() preserves(BX, BP, DS, ES, SS);
+
+fn caller() -> u16 {
+    u16 DI = 0x113B;
+    far32 addr = 0xE000:0x0100;
+    addr as target from mod();
+    return DI;
+}

@@ -2561,6 +2561,62 @@ static void insert_fixup_moves(func_t *fn) {
             continue;
         }
 
+        /* ---- Indirect far call caller-save ---- */
+        if (ins->op == IR_ICALL) {
+            bool callee_preserves[NUM_PREGS];
+            memset(callee_preserves, 0, sizeof(callee_preserves));
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    for (int pp = 0; pp < externs[e].npreserves; pp++)
+                        callee_preserves[externs[e].preserves[pp]] = true;
+                    break;
+                }
+            }
+
+            int call_saved[16];
+            int call_nsaved = 0;
+            bool call_use_pusha = false;
+            if (fn->needs_frame && !callee_preserves[PREG_BP]) {
+                call_saved[call_nsaved++] = PREG_BP;
+            }
+            for (int v = 0; v < fn->nvregs; v++) {
+                int preg = fn->vregs[v].assigned;
+                if (preg == PREG_NONE || preg == PREG_SP) continue;
+                if (fn->vregs[v].is_seg) continue;
+                if (fn->vregs[v].last_use <= (int)i) continue;
+                if (fn->vregs[v].def_pos > (int)i) continue;
+                int push_reg = preg;
+                if (preg >= PREG_AL && preg <= PREG_BH)
+                    push_reg = preg_alias_parent[preg];
+                if (callee_preserves[push_reg]) continue;
+                bool dup = false;
+                for (int s = 0; s < call_nsaved; s++)
+                    if (call_saved[s] == push_reg) { dup = true; break; }
+                if (dup) continue;
+                if (call_nsaved < 16)
+                    call_saved[call_nsaved++] = push_reg;
+            }
+
+            if (call_nsaved >= 6) {
+                rins_asm(fn, "    pusha");
+                call_use_pusha = true;
+            } else {
+                for (int s = 0; s < call_nsaved; s++)
+                    rins_asm(fn, "    push %s", preg_name[call_saved[s]]);
+            }
+
+            rins_ir(fn, i);
+
+            if (call_use_pusha) {
+                rins_asm(fn, "    popa");
+            } else {
+                for (int s = call_nsaved - 1; s >= 0; s--)
+                    rins_asm(fn, "    pop %s", preg_name[call_saved[s]]);
+            }
+
+            continue;
+        }
+
         /* Default: pass through unchanged */
         rins_ir(fn, i);
     }
