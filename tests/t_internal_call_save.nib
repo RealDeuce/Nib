@@ -1,0 +1,16 @@
+// Test: caller-save insertion must see clobbers for later-defined
+// internal callees. ptr(SI) and len(CX) remain live after helper().
+
+fn caller(ptr: u16 in SI, len: u16 in CX) -> u16 {
+    if (len == 0) {
+        return ptr;
+    }
+    helper(1, 2, 3, 4, 5);
+    ptr := ptr + 1;
+    len := len - 1;
+    return ptr + len;
+}
+
+fn helper(a: u16, b: u16, c: u16, d: u16, e: u16) -> u16 {
+    return a + b + c + d + e;
+}

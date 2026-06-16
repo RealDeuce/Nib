@@ -1,0 +1,9 @@
+// Test: byte read-modify-write with two live masked intermediates.
+// The left side (buf[idx] & ~mask) must survive while (~src & mask)
+// is computed, then be copied into the OR destination before the OR.
+
+u8[256] buf;
+
+fn copy_inv(idx: u16, src: u8, mask: u8) {
+    buf[idx] := (buf[idx] & ~mask) | (~src & mask);
+}

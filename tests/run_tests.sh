@@ -225,6 +225,20 @@ if [ -f /tmp/t_call_clobber.asm ]; then
     fi
 fi
 
+# Internal calls to later-defined callees must save live caller registers.
+if [ -f /tmp/t_internal_call_save.asm ]; then
+    call_window=$(sed -n '/push SI/,/pop SI/p' /tmp/t_internal_call_save.asm)
+    if echo "$call_window" | grep -q 'push SI' &&
+       echo "$call_window" | grep -q 'push CX' &&
+       echo "$call_window" | grep -q 'call t_internal_call_save_helper' &&
+       echo "$call_window" | grep -q 'pop CX' &&
+       echo "$call_window" | grep -q 'pop SI'; then
+        pass "internal-call-save: live SI/CX saved across call"
+    else
+        fail "internal-call-save" "missing SI/CX save around internal helper call"
+    fi
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f /tmp/t_port_io.asm ]; then
     if grep -q 'out 0x50, AL' /tmp/t_port_io.asm && grep -q 'in AL, 0x60' /tmp/t_port_io.asm; then
@@ -323,6 +337,24 @@ if [ -f /tmp/t_byte_array.asm ]; then
         pass "byte-array: u8 elements use byte registers"
     else
         fail "byte-array" "u8 array access using word registers"
+    fi
+fi
+
+# Byte RMW inverted copy: left masked byte must be copied into the OR dst.
+if [ -f /tmp/t_byte_rmw_inv.asm ]; then
+    if awk '
+        /^[[:space:]]*or [A-D][HL],/ {
+            split($1, op, " "); split($2, or_dst, ",");
+            split(prev, p, /[[:space:],]+/);
+            if (p[1] == "mov" && p[2] == or_dst[1] && p[3] != or_dst[1])
+                ok = 1;
+        }
+        /^[[:space:]]*(mov|and|not|or) / { prev = $0; sub(/^[[:space:]]+/, "", prev); }
+        END { exit ok ? 0 : 1 }
+    ' /tmp/t_byte_rmw_inv.asm; then
+        pass "byte-rmw-inv: OR dst preserves masked framebuffer byte"
+    else
+        fail "byte-rmw-inv" "OR does not reload the preserved left intermediate"
     fi
 fi
 
