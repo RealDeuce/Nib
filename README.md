@@ -41,6 +41,7 @@ far[256] ivt at(0x0000:0x0000) = {&handler0, &handler1};
 - [SPEC.md](SPEC.md) — Language specification
 - [USAGE.md](USAGE.md) — Command-line reference
 - [BINDER.md](BINDER.md) — Register allocator design
+- [V20_INSTRUCTIONS.md](V20_INSTRUCTIONS.md) — nibasm instruction reference
 
 ## Toolchain
 
