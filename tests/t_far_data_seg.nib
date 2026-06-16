@@ -1,4 +1,4 @@
-// Test: @far initialized data uses the emitted label segment.
+// Test: placed initialized data uses its emitted label segment.
 
 at(0xE000:0x0000);
 
@@ -6,12 +6,20 @@ at(0x0000:0x0700);
 u8 scratch;
 end at;
 
-far u8[2] far_data = {0x11, 0x22};
+u8[2] far_data = {0x11, 0x22};
+
+fn read_same_segment(idx: u16) -> u8 {
+    return far_data[idx];
+}
+end at;
+
+at(0xF000:0x0000);
 
 fn get_far_data() -> far32 {
     return @far_data;
 }
 
-fn read_far_data(idx: u16) -> u8 {
+fn read_other_segment(idx: u16) -> u8 {
     return far_data[idx];
 }
+end at;

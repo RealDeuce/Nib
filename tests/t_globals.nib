@@ -26,4 +26,6 @@ u16 counter;
 u16 magic = 0xDEAD;
 
 // Byte array with partial init (remaining zero-filled)
+at(0xE000:0x0000);
 u8[8] buffer = {0x41, 0x42, 0x43};
+end at;

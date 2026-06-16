@@ -286,14 +286,11 @@ global_decl
     | type reg_name at_clause ';'
         { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, NULL, $3.has_at, $3.seg, $3.off, yyline); }
     | KW_FAR type IDENT at_clause '=' expr ';'
-        { $$ = mk_decl_global($2, $3, REG_NONE, REGCLASS_WORD, $6, $4.has_at, $4.seg, $4.off, yyline);
-          $$->u.global.is_cs_data = true; }
+        { yyerror("far is not valid on data declarations; use at() for placement and far32 for pointer data"); YYERROR; }
     | KW_FAR type IDENT at_clause '=' '{' arg_list '}' ';'
-        { $$ = mk_decl_global($2, $3, REG_NONE, REGCLASS_WORD, mk_expr_array_init($7, yyline), $4.has_at, $4.seg, $4.off, yyline);
-          $$->u.global.is_cs_data = true; }
+        { yyerror("far is not valid on data declarations; use at() for placement and far32 for pointer data"); YYERROR; }
     | KW_FAR type IDENT at_clause ';'
-        { $$ = mk_decl_global($2, $3, REG_NONE, REGCLASS_WORD, NULL, $4.has_at, $4.seg, $4.off, yyline);
-          $$->u.global.is_cs_data = true; }
+        { yyerror("far is not valid on data declarations; use at() for placement and far32 for pointer data"); YYERROR; }
     | KW_EXTERN type IDENT ';'
         { $$ = mk_decl_extern_global($2, $3, yyline); }
     | KW_EXTERN type reg_name ';'

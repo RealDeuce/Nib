@@ -157,6 +157,7 @@ typedef struct {
     int     use_count;         /* number of instructions referencing this vreg */
     bool    in_loop;           /* true if live range spans a loop back-edge */
     bool    is_cs_ref;         /* true if this vreg points to constant pool (CS segment) */
+    char    data_label[64];    /* initialized data label this vreg is based on */
     bool    is_local_slot;     /* true if this vreg names a source stack local */
     int     local_size;        /* bytes reserved for the source local */
     int     local_offset;      /* positive offset within the local area */
@@ -321,10 +322,11 @@ static fn_assignment_t fn_assigns[MAX_FNS];
 #define MAX_DATA_ENTRIES 1024
 typedef struct {
     char label[64];
-    bool is_cs_data;
     bool has_at;
     int  at_seg;
     int  at_off;
+    bool has_emit_seg;
+    int  emit_seg;
     /* Entries: raw assembly lines to emit */
     char entries[MAX_DATA_ENTRIES][512];
     int  nentries;
@@ -333,6 +335,27 @@ typedef struct {
 
 static data_block_t data_blocks[MAX_DATA_BLOCKS];
 static int ndata_blocks = 0;
+static int bind_errors = 0;
+
+static data_block_t *find_data_block(const char *label) {
+    for (int i = 0; i < ndata_blocks; i++)
+        if (strcmp(data_blocks[i].label, label) == 0)
+            return &data_blocks[i];
+    return NULL;
+}
+
+static const char *vreg_data_label(func_t *fn, int v) {
+    if (v < 0 || v >= MAX_VREGS || fn->vregs[v].data_label[0] == '\0')
+        return NULL;
+    return fn->vregs[v].data_label;
+}
+
+static void set_vreg_data_label(func_t *fn, int v, const char *label) {
+    if (v < 0 || v >= MAX_VREGS || !label || !label[0])
+        return;
+    strncpy(fn->vregs[v].data_label, label, sizeof(fn->vregs[v].data_label) - 1);
+    fn->vregs[v].data_label[sizeof(fn->vregs[v].data_label) - 1] = '\0';
+}
 
 /* Global variable declarations */
 #define MAX_GLOBALS 256
@@ -1530,8 +1553,6 @@ static void parse_nir(const char *path) {
             int llen = strlen(db->label);
             if (llen > 0 && db->label[llen-1] == ',') db->label[llen-1] = '\0';
             char *opts = p;
-            if (strstr(opts, ", cs") || strstr(opts, ",cs"))
-                db->is_cs_data = true;
             /* scan for at() anywhere on the rest of the line */
             char *at_ptr = strstr(opts, "at(");
             if (at_ptr) {
@@ -2147,6 +2168,42 @@ static void build_igraph(func_t *fn) {
                 bits1 &= bits1 - 1;
             }
         }
+    }
+}
+
+static void annotate_data_refs(void) {
+    for (int fi = 0; fi < nfunctions; fi++) {
+        func_t *fn = &functions[fi];
+        bool changed;
+
+        for (int i = 0; i < fn->ninsns; i++) {
+            ir_insn_t *ins = &fn->insns[i];
+            if (ins->op == IR_MOV && ins->name[0] &&
+                strncmp(ins->name, "SEG ", 4) != 0 &&
+                find_data_block(ins->name)) {
+                set_vreg_data_label(fn, ins->dst, ins->name);
+            }
+        }
+
+        do {
+            changed = false;
+            for (int i = 0; i < fn->ninsns; i++) {
+                ir_insn_t *ins = &fn->insns[i];
+                const char *label = NULL;
+                if (ins->op == IR_MOV && !ins->has_imm && ins->src1 >= 0) {
+                    label = vreg_data_label(fn, ins->src1);
+                } else if (ins->op == IR_ALU && strcmp(ins->name, "add") == 0) {
+                    label = vreg_data_label(fn, ins->src1);
+                    if (!label)
+                        label = vreg_data_label(fn, ins->src2);
+                }
+                if (label && ins->dst >= 0 &&
+                    strcmp(fn->vregs[ins->dst].data_label, label) != 0) {
+                    set_vreg_data_label(fn, ins->dst, label);
+                    changed = true;
+                }
+            }
+        } while (changed);
     }
 }
 
@@ -3110,6 +3167,44 @@ static void emit_mov(func_t *fn, int dst, int src) {
 
 /* ---- Emission helpers for hardware workarounds ---- */
 
+static bool emit_es_data_prefix(func_t *fn, int addr_vreg) {
+    const char *label = vreg_data_label(fn, addr_vreg);
+    if (!label)
+        return false;
+    data_block_t *db = find_data_block(label);
+    if (!db || !db->has_emit_seg)
+        return false;
+    if (fn->emit_seg >= 0 && db->emit_seg == fn->emit_seg)
+        return false;
+
+    fprintf(out_asm, "    push ES\n");
+    fprintf(out_asm, "    push AX\n");
+    fprintf(out_asm, "    mov AX, SEG %s\n", label);
+    fprintf(out_asm, "    mov ES, AX\n");
+    fprintf(out_asm, "    pop AX\n");
+    return true;
+}
+
+static const char *near_data_seg_prefix(func_t *fn, int addr_vreg) {
+    const char *label = vreg_data_label(fn, addr_vreg);
+    if (label) {
+        data_block_t *db = find_data_block(label);
+        if (db && db->has_emit_seg &&
+            fn->emit_seg >= 0 && db->emit_seg == fn->emit_seg)
+            return "CS:";
+        return "";
+    }
+    if (addr_vreg >= 0 && addr_vreg < MAX_VREGS &&
+        fn->vregs[addr_vreg].is_cs_ref)
+        return "CS:";
+    return "";
+}
+
+static void emit_es_data_suffix(bool used_es) {
+    if (used_es)
+        fprintf(out_asm, "    pop ES\n");
+}
+
 /* Emit an ALU instruction (handles special ops, spill combinations,
  * three-address lowering, byte IMUL, and shift CL routing fallback) */
 static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
@@ -3143,9 +3238,8 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
 
     /* --- Far pointer ops (spill handling for BX base) --- */
     if (strcmp(op, "far.off") == 0) {
-        bool cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                   fn->vregs[ins->src1].is_cs_ref);
-        const char *seg = cs ? "CS:" : "";
+        bool use_es = emit_es_data_prefix(fn, ins->src1);
+        const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
         if (is_spilled(fn, ins->src1)) {
             fprintf(out_asm, "    push BX\n");
             fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
@@ -3163,15 +3257,33 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             fprintf(out_asm, "    mov %s, [%s%s]\n",
                     vreg_asm(fn, ins->dst), seg, vreg_asm(fn, ins->src1));
         }
+        emit_es_data_suffix(use_es);
         return;
     }
     if (strcmp(op, "far.seg") == 0) {
-        bool cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                   fn->vregs[ins->src1].is_cs_ref);
-        const char *seg = cs ? "CS:" : "";
+        bool use_es = emit_es_data_prefix(fn, ins->src1);
+        const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
         const char *d = vreg_asm(fn, ins->dst);
         bool dst_seg = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
                         fn->vregs[ins->dst].is_seg);
+        bool dst_is_es = (use_es && ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                          fn->vregs[ins->dst].assigned == PREG_ES &&
+                          !is_spilled(fn, ins->dst));
+        if (dst_is_es) {
+            fprintf(out_asm, "    push AX\n");
+            if (is_spilled(fn, ins->src1)) {
+                fprintf(out_asm, "    push BX\n");
+                fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+                fprintf(out_asm, "    mov AX, [%sBX+2]\n", seg);
+                fprintf(out_asm, "    pop BX\n");
+            } else {
+                fprintf(out_asm, "    mov AX, [%s%s+2]\n", seg, vreg_asm(fn, ins->src1));
+            }
+            emit_es_data_suffix(use_es);
+            fprintf(out_asm, "    mov ES, AX\n");
+            fprintf(out_asm, "    pop AX\n");
+            return;
+        }
         if (is_spilled(fn, ins->src1)) {
             fprintf(out_asm, "    push BX\n");
             fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
@@ -3191,6 +3303,7 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
                 fprintf(out_asm, "    mov %s, [%s%s+2]\n", d, seg, s);
             }
         }
+        emit_es_data_suffix(use_es);
         return;
     }
 
@@ -3304,9 +3417,8 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
     const char *base_str;
     const char *idx_str = NULL;
     bool pushed_bx = false, pushed_si = false;
-    bool cs_ref = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                   fn->vregs[ins->src1].is_cs_ref);
-    const char *seg_pfx = cs_ref ? "CS:" : "";
+    bool use_es = emit_es_data_prefix(fn, ins->src1);
+    const char *seg_pfx = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
     bool base_spilled = is_spilled(fn, ins->src1);
     bool idx_spilled = (ins->src2 >= 0 && is_spilled(fn, ins->src2));
     bool dst_conflicts_with_scratch = false;
@@ -3336,6 +3448,21 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
         idx_str = vreg_asm(fn, ins->src2);
     }
 
+    if (use_es && !is_spilled(fn, ins->dst) &&
+        fn->vregs[ins->dst].assigned == PREG_ES) {
+        fprintf(out_asm, "    push AX\n");
+        if (idx_str)
+            fprintf(out_asm, "    mov AX, [%s%s+%s]\n", seg_pfx, base_str, idx_str);
+        else
+            fprintf(out_asm, "    mov AX, [%s%s]\n", seg_pfx, base_str);
+        if (pushed_si) fprintf(out_asm, "    pop SI\n");
+        if (pushed_bx) fprintf(out_asm, "    pop BX\n");
+        emit_es_data_suffix(use_es);
+        fprintf(out_asm, "    mov ES, AX\n");
+        fprintf(out_asm, "    pop AX\n");
+        return;
+    }
+
     if (is_spilled(fn, ins->dst) || dst_conflicts_with_scratch) {
         bool ld_byte = fn->vregs[ins->dst].is_byte;
         const char *acc = ld_byte ? "AL" : "AX";
@@ -3348,6 +3475,7 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
         fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
         if (dst_conflicts_with_scratch)
             fprintf(out_asm, "    pop AX\n");
+        emit_es_data_suffix(use_es);
     } else {
         if (idx_str)
             fprintf(out_asm, "    mov %s, [%s%s+%s]\n",
@@ -3357,6 +3485,7 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
                     vreg_asm(fn, ins->dst), seg_pfx, base_str);
         if (pushed_si) fprintf(out_asm, "    pop SI\n");
         if (pushed_bx) fprintf(out_asm, "    pop BX\n");
+        emit_es_data_suffix(use_es);
     }
 }
 
@@ -3366,6 +3495,9 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
     const char *base_str;
     const char *idx_str = NULL;
     bool pushed_bx = false, pushed_si = false;
+    bool need_es = vreg_data_label(fn, ins->src1) &&
+        strcmp(near_data_seg_prefix(fn, ins->src1), "CS:") != 0;
+    bool pushed_val_ax = false;
 
     if (is_spilled(fn, ins->dst)) {
         bool st_byte = fn->vregs[ins->dst].is_byte;
@@ -3374,6 +3506,12 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
         val_str = acc;
     } else {
         val_str = vreg_asm(fn, ins->dst);
+        if (need_es && fn->vregs[ins->dst].assigned == PREG_ES) {
+            fprintf(out_asm, "    push AX\n");
+            fprintf(out_asm, "    mov AX, ES\n");
+            val_str = "AX";
+            pushed_val_ax = true;
+        }
     }
     if (is_spilled(fn, ins->src1)) {
         /* Check for conflict: if value is in BX or BL/BH,
@@ -3411,12 +3549,17 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
     } else if (ins->src2 >= 0) {
         idx_str = vreg_asm(fn, ins->src2);
     }
+    bool use_es = emit_es_data_prefix(fn, ins->src1);
+    const char *seg_pfx = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
     if (idx_str)
-        fprintf(out_asm, "    mov [%s+%s], %s\n", base_str, idx_str, val_str);
+        fprintf(out_asm, "    mov [%s%s+%s], %s\n", seg_pfx, base_str, idx_str, val_str);
     else
-        fprintf(out_asm, "    mov [%s], %s\n", base_str, val_str);
+        fprintf(out_asm, "    mov [%s%s], %s\n", seg_pfx, base_str, val_str);
     if (pushed_si) fprintf(out_asm, "    pop SI\n");
     if (pushed_bx) fprintf(out_asm, "    pop BX\n");
+    emit_es_data_suffix(use_es);
+    if (pushed_val_ax)
+        fprintf(out_asm, "    pop AX\n");
 }
 
 static void emit_function(func_t *fn) {
@@ -3843,14 +3986,19 @@ static void emit_function(func_t *fn) {
                 fprintf(out_asm, "    add SP, 4\n");
             } else {
                 const char *addr = vreg_asm(fn, ins->src1);
-                bool ic_cs = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                              fn->vregs[ins->src1].is_cs_ref);
-                const char *ic_seg = ic_cs ? "CS:" : "";
-                if (is_spilled(fn, ins->src1)) {
+                bool use_es = emit_es_data_prefix(fn, ins->src1);
+                const char *ic_seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
+                if (is_spilled(fn, ins->src1) && vreg_data_label(fn, ins->src1)) {
+                    fprintf(out_asm, "    push BX\n");
+                    fprintf(out_asm, "    mov BX, %s\n", addr);
+                    fprintf(out_asm, "    call far [%sBX]\n", ic_seg);
+                    fprintf(out_asm, "    pop BX\n");
+                } else if (is_spilled(fn, ins->src1)) {
                     fprintf(out_asm, "    call far %s\n", addr);
                 } else {
                     fprintf(out_asm, "    call far [%s%s]\n", ic_seg, addr);
                 }
+                emit_es_data_suffix(use_es);
             }
             break;
         }
@@ -3967,15 +4115,15 @@ static void emit_function(func_t *fn) {
                         }
                     } else {
                         /* Near: mov dst, [off] or [CS:off] */
-                        bool cs_ref = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                                       fn->vregs[ins->src1].is_cs_ref);
-                        const char *seg = cs_ref ? "CS:" : "";
+                        bool use_es = emit_es_data_prefix(fn, ins->src1);
+                        const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
                         if (is_spilled(fn, ins->dst)) {
                             fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg, off_reg);
                             fprintf(out_asm, "    mov %s, %s\n", d, acc);
                         } else {
                             fprintf(out_asm, "    mov %s, [%s%s]\n", d, seg, off_reg);
                         }
+                        emit_es_data_suffix(use_es);
                     }
                     if (off_spilled)
                         fprintf(out_asm, "    pop BX\n");
@@ -4028,10 +4176,10 @@ static void emit_function(func_t *fn) {
                         fprintf(out_asm, "    mov [ES:%s], %s\n", off_reg, val_reg);
                     } else {
                         /* Near store, check CS: override */
-                        bool cs_ref = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
-                                       fn->vregs[ins->dst].is_cs_ref);
-                        const char *seg = cs_ref ? "CS:" : "";
+                        bool use_es = emit_es_data_prefix(fn, ins->dst);
+                        const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->dst);
                         fprintf(out_asm, "    mov [%s%s], %s\n", seg, off_reg, val_reg);
+                        emit_es_data_suffix(use_es);
                     }
                     if (off_spilled)
                         fprintf(out_asm, "    pop BX\n");
@@ -4552,6 +4700,93 @@ static int current_seg = -1;    /* segment from last at() directive */
 static int seg_stack[MAX_AT_DIRECTIVES];
 static int seg_sp = 0;
 
+static int place_at_depth = 0;
+static int place_current_seg = -1;
+static int place_seg_stack[MAX_AT_DIRECTIVES];
+static int place_seg_sp = 0;
+static char placed_modules[128][64];
+static int nplaced_modules = 0;
+
+static void place_push_seg(int seg) {
+    if (place_seg_sp < MAX_AT_DIRECTIVES)
+        place_seg_stack[place_seg_sp++] = place_current_seg;
+    place_current_seg = seg;
+    place_at_depth++;
+}
+
+static void place_pop_seg(void) {
+    if (place_at_depth > 0) place_at_depth--;
+    if (place_seg_sp > 0)
+        place_current_seg = place_seg_stack[--place_seg_sp];
+}
+
+static void place_item(int ei) {
+    int kind = emit_order[ei].kind;
+    int idx = emit_order[ei].index;
+
+    if (kind == EMIT_FN) {
+        functions[idx].emit_seg = functions[idx].has_at
+            ? functions[idx].at_seg : place_current_seg;
+    } else if (kind == EMIT_DATA) {
+        data_block_t *db = &data_blocks[idx];
+        if (db->has_at) {
+            place_push_seg(db->at_seg);
+            db->emit_seg = db->at_seg;
+            db->has_emit_seg = true;
+        } else if (place_current_seg >= 0) {
+            db->emit_seg = place_current_seg;
+            db->has_emit_seg = true;
+        } else {
+            fprintf(stderr, "%s: initialized data requires explicit at() placement\n",
+                    db->label);
+            bind_errors++;
+        }
+    } else if (kind == EMIT_GLOB) {
+        global_var_t *g = &globals[idx];
+        if (g->has_at)
+            place_push_seg(g->at_seg);
+    } else if (kind == EMIT_AT) {
+        place_push_seg(at_directives[idx].seg);
+    } else if (kind == EMIT_ENDAT) {
+        place_pop_seg();
+    }
+}
+
+static void place_module(const char *path) {
+    char mod[64];
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    strncpy(mod, base, 63);
+    char *dot = strrchr(mod, '.');
+    if (dot) *dot = '\0';
+
+    for (int i = 0; i < nplaced_modules; i++)
+        if (strcmp(placed_modules[i], mod) == 0) return;
+    strncpy(placed_modules[nplaced_modules++], mod, 63);
+
+    for (int ei = 0; ei < nemit_order; ei++) {
+        if (strcmp(emit_order[ei].module, mod) != 0) continue;
+        if (emit_order[ei].kind == EMIT_USE) {
+            char use_path[128];
+            const char *use_mod = use_modules[emit_order[ei].index];
+            const char *slash = strrchr(path, '/');
+            if (slash) {
+                int dirlen = (int)(slash - path) + 1;
+                snprintf(use_path, sizeof(use_path), "%.*s%s.nir",
+                         dirlen, path, use_mod);
+            } else {
+                snprintf(use_path, sizeof(use_path), "%s.nir", use_mod);
+            }
+            int saved_depth = place_at_depth;
+            place_module(use_path);
+            while (place_at_depth > saved_depth)
+                place_pop_seg();
+        } else {
+            place_item(ei);
+        }
+    }
+}
+
 static void emit_item(int ei) {
     int kind = emit_order[ei].kind;
     int idx = emit_order[ei].index;
@@ -4572,8 +4807,8 @@ static void emit_item(int ei) {
             fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
             current_seg = db->at_seg;
             at_depth++;
-        } else if (db->is_cs_data && current_seg >= 0) {
-            fprintf(out_asm, "    seg 0x%04X\n", current_seg);
+        } else if (db->has_emit_seg) {
+            fprintf(out_asm, "    seg 0x%04X\n", db->emit_seg);
         }
         fprintf(out_asm, "%s:\n", db->label);
         for (int j = 0; j < db->nentries; j++) {
@@ -4693,6 +4928,16 @@ int main(int argc, char **argv) {
         parse_nir(inputs[i]);
 
     fprintf(stderr, "Loaded %d functions\n", nfunctions);
+
+    nplaced_modules = 0;
+    place_current_seg = -1;
+    place_at_depth = 0;
+    place_seg_sp = 0;
+    place_module(inputs[ninputs - 1]);
+    if (bind_errors > 0)
+        return 1;
+
+    annotate_data_refs();
 
     /* Inter-procedural register propagation */
     build_call_graph();

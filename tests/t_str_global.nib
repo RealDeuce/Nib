@@ -2,9 +2,11 @@
 // u8[] with a string literal must infer the array size and emit
 // the string bytes as a data block, not a zero-filled global.
 
+at(0xE000:0x0000);
 pub u8[] message = "Hello";
 pub u8[10] padded = "Hi";
 
 fn use_it() -> u16 {
     return &message;
 }
+end at;

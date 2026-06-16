@@ -520,7 +520,6 @@ decl_t *mk_decl_global(type_t *type, const char *name,
     d->u.global.has_at = has_at;
     d->u.global.at_seg = at_seg;
     d->u.global.at_off = at_off;
-    d->u.global.is_cs_data = false;
     return d;
 }
 

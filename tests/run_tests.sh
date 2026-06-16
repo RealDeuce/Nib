@@ -334,18 +334,43 @@ if [ -f "$TEST_TMPDIR"/t_local_addr.asm ]; then
     fi
 fi
 
-# @far initialized data must use the segment where the data label is emitted.
+# Initialized data must use the segment where the data label is emitted.
 if [ -f "$TEST_TMPDIR"/t_far_data_seg.asm ]; then
     data_window=$(sed -n '/; === data: far_data ===/,/; === t_far_data_seg_get_far_data ===/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
     get_window=$(sed -n '/t_far_data_seg_get_far_data:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
-    read_window=$(sed -n '/t_far_data_seg_read_far_data:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
+    same_window=$(sed -n '/t_far_data_seg_read_same_segment:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
+    other_window=$(sed -n '/t_far_data_seg_read_other_segment:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
     if printf "%s\n" "$data_window" | grep -q 'seg 0xE000' &&
        printf "%s\n" "$get_window" | grep -q 'SEG far_data' &&
-       printf "%s\n" "$read_window" | grep -q '\[CS:.*far_data\|\[CS:.*BX'; then
-        pass "far-data-seg: @far data uses emitted segment"
+       printf "%s\n" "$same_window" | grep -q '\[CS:.*far_data\|\[CS:.*BX' &&
+       printf "%s\n" "$other_window" | grep -q 'mov AX, SEG far_data' &&
+       printf "%s\n" "$other_window" | grep -q '\[ES:.*far_data\|\[ES:.*BX'; then
+        pass "init-data-seg: placed data uses CS/ES by emitted segment"
     else
-        fail "far-data-seg" "far initialized data segment was not preserved"
+        fail "init-data-seg" "initialized data segment was not preserved"
     fi
+fi
+
+cat > "$TEST_TMPDIR"/bad_far_data.nib <<'NIB'
+far u8[1] table;
+NIB
+if ./nib "$TEST_TMPDIR"/bad_far_data.nib --parse-only >/dev/null 2>&1; then
+    fail "far-data-reject" "far data declaration was accepted"
+else
+    pass "far-data-reject: far is not valid on data"
+fi
+
+cat > "$TEST_TMPDIR"/bad_unplaced_data.nib <<'NIB'
+u8[1] table = {0x01};
+fn addr() -> far32 {
+    return @table;
+}
+NIB
+if ./nib "$TEST_TMPDIR"/bad_unplaced_data.nib >/dev/null 2>&1 &&
+   ./nibbind "$TEST_TMPDIR"/bad_unplaced_data.nir -o "$TEST_TMPDIR"/bad_unplaced_data.asm >/dev/null 2>&1; then
+    fail "init-data-placement" "unplaced initialized data bound successfully"
+else
+    pass "init-data-placement: initialized data requires at()"
 fi
 
 # Indirect calls must save live registers not preserved by the extern

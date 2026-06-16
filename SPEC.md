@@ -188,28 +188,34 @@ Arrays can be initialized with C-style brace syntax. Short initializers
 are zero-filled to the declared size.
 
 ```
+at(0xE000:0x0000);
 u8[8] buf = {0x41, 0x42, 0x43};    // 3 bytes + 5 zero bytes
 u16[4] table = {100, 200, 300, 400};
 far32[4] ivt = {@handler_a, @handler_b, @handler_c, @handler_d};
+end at;
 ```
 
 Array indexing scales automatically by element size: `u8[]` uses byte
 offsets, `u16[]` scales by 2, `far32[]` scales by 4.
 
-### CS-resident globals
+### Initialized data placement
 
-The `far` storage qualifier marks a global as living in the code
-segment (CS/ROM). All accesses use a `CS:` segment override:
+Initialized top-level data must have explicit placement, either from an
+enclosing `at()` block or a declaration-level `at(...)`. The binder uses
+the emitted placement to choose the direct access segment:
 
 ```
-pub far far32[5] lcd_table = {@blit, @print, @cursor, @setpos, @clear};
+at(0xE000:0x0000);
+pub far32[5] lcd_table = {@blit, @print, @cursor, @setpos, @clear};
+end at;
 
-far32 entry = lcd_table[1];   // reads from [CS:base+idx*4]
+far32 entry = lcd_table[1];   // CS: if caller is in E000, ES: otherwise
 ```
 
-The qualifier is exported to the `.nif` so importing modules also
-use CS-relative addressing. Without `far`, globals are accessed
-through DS (RAM).
+The `far` keyword is not a data placement qualifier. Use `far32` for
+segment:offset values and `at()` for storage placement. Uninitialized
+globals keep DS-default access; the programmer is responsible for DS
+setup for those objects.
 
 ### Constants
 

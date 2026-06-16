@@ -31,10 +31,10 @@ typedef struct symbol {
     reg_class_t pin_class;
     bool        is_global;
     bool        is_const;       /* const qualifier — prevents reassignment */
-    bool        is_cs_data;     /* far-qualified global: lives in CS segment */
     bool        has_at;         /* global with at() placement */
     int         at_seg;
     int         at_off;
+    bool        is_init_data;   /* initialized global emitted as a .data block */
     bool        is_stack_local; /* source local stored in this function frame */
     int         stack_size;
 } symbol_t;
@@ -157,11 +157,11 @@ static symbol_t *sym_add(const char *name, type_t *type, bool is_global) {
     sym->vreg_seg = -1;
     sym->is_global = is_global;
     sym->is_const = false;
-    sym->is_cs_data = false;
     sym->is_pinned = false;
     sym->pinned_reg = REG_NONE;
     sym->is_stack_local = false;
     sym->stack_size = 0;
+    sym->is_init_data = false;
     return sym;
 }
 
@@ -842,18 +842,16 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                              sym->type->kind == TYPE_SEG);
             if (is_scalar) {
                 /* Scalar global: load value from memory */
-                if (sym->has_at)
+                if (sym->has_at && !sym->is_init_data)
                     fprintf(C.nir, "    loadmem %%%d, [0x%04X]\n", r, sym->at_off);
                 else
                     fprintf(C.nir, "    loadmem %%%d, [%s]\n", r, sym->name);
             } else {
                 /* Aggregate global: load address (passed by reference) */
-                if (sym->has_at)
+                if (sym->has_at && !sym->is_init_data)
                     fprintf(C.nir, "    mov %%%d, 0x%04X\n", r, sym->at_off);
                 else
                     fprintf(C.nir, "    mov %%%d, %s\n", r, sym->name);
-                if (sym->is_cs_data)
-                    fprintf(C.nir, ".vreg %%%d, u16, csref\n", r);
             }
             return TV(r, sym->type);
         }
@@ -1460,10 +1458,6 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             /* Far32 element: load both offset and segment halves */
             int addr = alloc_vreg();
             fprintf(C.nir, "    add %%%d, %%%d, %%%d\n", addr, arr.vreg, scaled_idx);
-            symbol_t *arr_sym = (e->u.index.array->kind == EXPR_IDENT)
-                ? sym_lookup(e->u.index.array->u.ident) : NULL;
-            if (arr_sym && arr_sym->is_cs_data)
-                fprintf(C.nir, ".vreg %%%d, u16, csref\n", addr);
             int off_v = alloc_vreg();
             int seg_v = alloc_vreg();
             fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, addr);
@@ -1473,10 +1467,6 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (type_is_aggregate(elem)) {
             /* Aggregate elements: return address of element (by reference) */
             fprintf(C.nir, "    add %%%d, %%%d, %%%d\n", dst, arr.vreg, scaled_idx);
-            symbol_t *arr_sym = (e->u.index.array->kind == EXPR_IDENT)
-                ? sym_lookup(e->u.index.array->u.ident) : NULL;
-            if (arr_sym && arr_sym->is_cs_data)
-                fprintf(C.nir, ".vreg %%%d, u16, csref\n", dst);
             return TV(dst, elem);
         }
         const char *op = (elem->kind == TYPE_U8) ? "loadb" : "load";
@@ -2757,13 +2747,9 @@ static void compile_global(decl_t *d) {
         gsym->at_seg = d->u.global.at_seg;
         gsym->at_off = d->u.global.at_off;
     }
-    if (d->u.global.is_cs_data)
-        gsym->is_cs_data = true;
-
     /* Emit .nif entry */
     if (d->is_pub) {
         fprintf(C.nif, ".global %s, %s", name, type_str(d->u.global.type));
-        if (d->u.global.is_cs_data) fprintf(C.nif, ", cs");
         fprintf(C.nif, "\n");
     }
 
@@ -2790,10 +2776,10 @@ static void compile_global(decl_t *d) {
             return;
         }
 
+        gsym->is_init_data = true;
+
         /* Emit .data block */
         fprintf(C.nir, "\n.data %s, %s", name, type_str(ty));
-        if (d->u.global.is_cs_data)
-            fprintf(C.nir, ", cs");
         if (d->u.global.has_at)
             fprintf(C.nir, ", at(0x%04X:0x%04X)",
                     d->u.global.at_seg, d->u.global.at_off);
@@ -2865,9 +2851,8 @@ static void compile_global(decl_t *d) {
             cerr(d->line, "string initializer too long for %s", type_str(ty));
             return;
         }
+        gsym->is_init_data = true;
         fprintf(C.nir, "\n.data %s, %s", name, type_str(ty));
-        if (d->u.global.is_cs_data)
-            fprintf(C.nir, ", cs");
         if (d->u.global.has_at)
             fprintf(C.nir, ", at(0x%04X:0x%04X)",
                     d->u.global.at_seg, d->u.global.at_off);
@@ -3191,7 +3176,7 @@ static void import_nif(const char *path, int use_line) {
             continue;
         }
 
-        /* .global name, type [, cs] */
+        /* .global name, type */
         if (strncmp(p, ".global ", 8) == 0) {
             p += 8;
             char name[64];
@@ -3201,18 +3186,8 @@ static void import_nif(const char *path, int use_line) {
             if (*p == ',') p++;
             char type[64];
             p = nif_read_word(p, type, sizeof(type));
-            /* Check for cs qualifier */
-            bool cs_data = false;
-            p = nif_skip_ws(p);
-            if (*p == ',') {
-                p++;
-                char qual[16];
-                nif_read_word(p, qual, sizeof(qual));
-                if (strcmp(qual, "cs") == 0) cs_data = true;
-            }
             /* Add to global scope */
-            symbol_t *gsym = sym_add(name, nif_parse_type(type), true);
-            gsym->is_cs_data = cs_data;
+            sym_add(name, nif_parse_type(type), true);
             continue;
         }
 
