@@ -2665,8 +2665,9 @@ static void validate_clobbers(fn_modifiers_t *mods, int line) {
     if (!mods->has_preserves || !mods->is_clobbers)
         return;
     for (reg_list_t *r = mods->preserves; r; r = r->next) {
-        if (r->rclass == REGCLASS_SEG && r->id == SREG_CS)
-            cerr(line, "functions cannot clobber CS");
+        if (r->rclass == REGCLASS_SEG &&
+            (r->id == SREG_CS || r->id == SREG_SS))
+            cerr(line, "functions cannot clobber CS or SS");
     }
 }
 

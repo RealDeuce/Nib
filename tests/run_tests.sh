@@ -60,7 +60,7 @@ for f in tests/t_*.nir; do
     name=$(basename "$f" .nir)
     # Skip multi-module tests (they need special handling)
     case "$name" in
-        t_modules_app|t_const_scope|t_icall|t_api_descriptor) continue ;;
+        t_modules_app|t_const_scope|t_icall|t_api_descriptor|t_param_overflow) continue ;;
     esac
     outasm="$TEST_TMPDIR/${name}.asm"
     if ./nibbind "$f" -o "$outasm" >/dev/null 2>&1; then
@@ -134,6 +134,17 @@ if [ -f tests/t_api_descriptor_lib.nir ] && [ -f tests/t_api_descriptor.nir ]; t
     fi
 else
     skip "t_api_descriptor" "nir files not generated"
+fi
+
+if [ -f tests/t_param_overflow.nir ]; then
+    outasm="$TEST_TMPDIR/t_param_overflow.asm"
+    if ./nibbind tests/t_param_overflow.nir -o "$outasm" >/dev/null 2>&1; then
+        fail "param-overflow" "binder accepted function with too many ABI params"
+    else
+        pass "param-overflow: too many ABI params rejected"
+    fi
+else
+    skip "param-overflow" "nir file not generated"
 fi
 echo ""
 
@@ -455,13 +466,14 @@ else
     pass "api-clobbers-require: api functions require clobbers()"
 fi
 
-cat > "$TEST_TMPDIR"/bad_clobber_cs.nib <<'NIB'
-extern fn far bad() clobbers(CS);
+cat > "$TEST_TMPDIR"/bad_clobber_cs_ss.nib <<'NIB'
+extern fn far bad_cs() clobbers(CS);
+extern fn far bad_ss() clobbers(SS);
 NIB
-if ./nib "$TEST_TMPDIR"/bad_clobber_cs.nib >/dev/null 2>&1; then
-    fail "clobber-cs-reject" "clobbers(CS) was accepted"
+if ./nib "$TEST_TMPDIR"/bad_clobber_cs_ss.nib >/dev/null 2>&1; then
+    fail "clobber-cs-ss-reject" "clobbers(CS/SS) was accepted"
 else
-    pass "clobber-cs-reject: functions cannot clobber CS"
+    pass "clobber-cs-ss-reject: functions cannot clobber CS or SS"
 fi
 
 cat > "$TEST_TMPDIR"/bad_ds_symbol.nib <<'NIB'

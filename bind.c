@@ -5069,7 +5069,7 @@ static void propagate_preferences(void) {
                 if (fn->param_vregs[p] == ins->src1 &&
                     fa->param_regs[p] == PREG_NONE) {
                     if (!reg_used[dst_pref]) {
-                            fa->param_regs[p] = dst_pref;
+                        fa->param_regs[p] = dst_pref;
                         reg_used[dst_pref] = true;
                         if (dst_pref < 4) {
                             reg_used[preg_alias_lo[dst_pref]] = true;
@@ -5118,6 +5118,15 @@ static void propagate_preferences(void) {
                     reg_used[preg_alias_hi[preg]] = true;
                 }
                 break;
+            }
+        }
+
+        for (int p = 0; p < fn->nparams; p++) {
+            if (fa->param_regs[p] == PREG_NONE) {
+                fprintf(stderr,
+                        "%s: no available ABI register for parameter %d '%s'\n",
+                        fn->name, p, fn->param_names[p]);
+                bind_errors++;
             }
         }
 
@@ -5470,6 +5479,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, " %s", functions[topo_order[i]].name);
     fprintf(stderr, "\n");
     propagate_preferences();
+    if (bind_errors > 0)
+        return 1;
 
     /* For each function: liveness and allocation. */
     for (int i = 0; i < nfunctions; i++) {

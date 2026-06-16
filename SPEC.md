@@ -429,8 +429,9 @@ fn api_memcopy(dst: u16 in DI, src: u16 in SI, len: u16 in CX)
 
 `clobbers()` and `preserves()` are mutually exclusive on a declaration.
 The compiler inverts `clobbers()` to `preserves` in the IR — the binder
-only ever sees `preserves`. `CS` cannot be listed in `clobbers()`;
-changing it is not a valid function boundary effect.
+only ever sees `preserves`. `CS` and `SS` cannot be listed in
+`clobbers()`; changing either one is not a valid function boundary
+effect.
 
 `api` functions and `extern fn` declarations must use `clobbers(...)`,
 even when the list is empty:
@@ -637,8 +638,8 @@ The `clobbers` clause lists which registers the function may modify.
 Registers not listed are treated as not modified by that call. Return
 registers are implicitly clobbered by the return value. Extern
 declarations and `api` functions require `clobbers(...)` so the ABI
-contract is explicit, even for zero-clobber routines. `CS` is not a
-valid clobber.
+contract is explicit, even for zero-clobber routines. `CS` and `SS` are
+not valid clobbers.
 
 ```
 // Multiple parameters, all pinned
