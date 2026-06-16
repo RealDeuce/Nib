@@ -5338,12 +5338,17 @@ static void emit_item(int ei) {
             at_depth++;
         }
         fprintf(out_asm, "%s:", g->name);
-        if (g->size <= 2)
+        if (g->size == 1)
+            fprintf(out_asm, " db 0\n");
+        else if (g->size == 2)
             fprintf(out_asm, " dw 0\n");
         else {
             fprintf(out_asm, "\n");
-            for (int b = 0; b < g->size; b += 2)
+            int b = 0;
+            for (; b + 1 < g->size; b += 2)
                 fprintf(out_asm, "    dw 0\n");
+            if (b < g->size)
+                fprintf(out_asm, "    db 0\n");
         }
     } else if (kind == EMIT_AT) {
         int s = at_directives[idx].seg;

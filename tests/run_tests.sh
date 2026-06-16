@@ -526,10 +526,15 @@ fi
 
 # Scalar globals: must use memory-indirect loads, not address loads
 if [ -f "$TEST_TMPDIR"/t_globals_rw.asm ]; then
-    if grep -q '\[counter\]' "$TEST_TMPDIR"/t_globals_rw.asm && grep -q '\[flag\]' "$TEST_TMPDIR"/t_globals_rw.asm; then
-        pass "globals-rw: scalar globals accessed through memory"
+    if grep -q '^flag: db 0$' "$TEST_TMPDIR"/t_globals_rw.asm &&
+       grep -q '^counter: dw 0$' "$TEST_TMPDIR"/t_globals_rw.asm &&
+       grep -q '\[counter\]' "$TEST_TMPDIR"/t_globals_rw.asm &&
+       grep -q '\[flag\]' "$TEST_TMPDIR"/t_globals_rw.asm &&
+       grep -q 'mov \[flag\], [A-D]L' "$TEST_TMPDIR"/t_globals_rw.asm &&
+       ! grep -q 'mov \[flag\], [A-D]X' "$TEST_TMPDIR"/t_globals_rw.asm; then
+        pass "globals-rw: scalar globals use correct memory width"
     else
-        fail "globals-rw" "scalar global loaded as address instead of memory"
+        fail "globals-rw" "scalar global layout or access width is wrong"
     fi
 fi
 

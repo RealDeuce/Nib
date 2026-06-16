@@ -1812,6 +1812,8 @@ static void emit_assign_simple(expr_t *t, typed_vreg_t val, int line) {
         if (sym->is_global && sym->type &&
             (sym->type->kind == TYPE_U8 || sym->type->kind == TYPE_U16 ||
              sym->type->kind == TYPE_U32 || sym->type->kind == TYPE_SEG)) {
+            if (sym->type->kind == TYPE_U8 && !val.type)
+                fprintf(C.nir, ".vreg %%%d, u8\n", val.vreg);
             if (sym->has_at)
                 fprintf(C.nir, "    storemem [0x%04X], %%%d\n", sym->at_off, val.vreg);
             else
@@ -2192,6 +2194,8 @@ static void emit_stmt(stmt_t *s) {
                     /* Scalar global: store literal to memory */
                     int tmp = alloc_vreg();
                     fprintf(C.nir, "    mov %%%d, %d\n", tmp, val_expr->u.lit_int);
+                    if (sym->type->kind == TYPE_U8)
+                        fprintf(C.nir, ".vreg %%%d, u8\n", tmp);
                     if (sym->has_at)
                         fprintf(C.nir, "    storemem [0x%04X], %%%d\n", sym->at_off, tmp);
                     else
@@ -2229,6 +2233,8 @@ static void emit_stmt(stmt_t *s) {
                     (sym->type->kind == TYPE_U8 || sym->type->kind == TYPE_U16 ||
                      sym->type->kind == TYPE_U32 || sym->type->kind == TYPE_SEG)) {
                     /* Scalar global: store value to memory */
+                    if (sym->type->kind == TYPE_U8 && !val.type)
+                        fprintf(C.nir, ".vreg %%%d, u8\n", val.vreg);
                     if (sym->has_at)
                         fprintf(C.nir, "    storemem [0x%04X], %%%d\n", sym->at_off, val.vreg);
                     else
