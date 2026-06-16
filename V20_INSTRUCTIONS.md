@@ -6,10 +6,9 @@ where one exists; V20 instructions without an Intel spelling are listed
 under their NEC manual names. NEC/V20 names are listed where they
 differ.
 
-The source for instruction behavior is Section 12 of the NEC
-uPD70108/uPD70116 User's Manual. V30-only instructions are omitted.
-Assembler support notes are secondary to the hardware forms documented
-by the manual.
+The source for instruction behavior is Section 12 of the NEC user's
+manual. This document covers only the V20/uPD70108. Assembler support
+notes are secondary to the hardware forms documented by the manual.
 
 ## Naming
 
@@ -53,6 +52,11 @@ Memory addressing supports the V20/8086 address forms using `BX`, `BP`,
 other base/index forms default to `DS`. Segment overrides use Intel
 prefix syntax through the parsed memory operand.
 
+## Timing Notation
+
+Timing and transfer counts come from the V20/uPD70108 rows in Section
+12 of the NEC manual. `none` is the manual's `Transfers: None`.
+
 ## Flag Notation
 
 | Mark | Meaning |
@@ -66,13 +70,13 @@ prefix syntax through the parsed memory operand.
 
 ## Prefixes
 
-| Mnemonic | NEC name | Opcode | Meaning |
-|----------|----------|--------|---------|
-| `lock` | `BUSLOCK` | `F0` | Assert bus lock for the following instruction. |
-| `rep`, `repe`, `repz` | `REP`, `REPE`, `REPZ` | `F3` | Repeat while `CX != 0`; string compare/scan also require `ZF=1`. |
-| `repne`, `repnz` | `REPNE`, `REPNZ` | `F2` | Repeat while `CX != 0`; string compare/scan also require `ZF=0`. |
-| `repc` | `REPC` | `65` | V20 repeat while carry. |
-| `repnc` | `REPNC` | `64` | V20 repeat while not carry. |
+| Mnemonic | NEC name | Opcode | Clocks | Transfers | Meaning |
+|----------|----------|--------|--------|-----------|---------|
+| `lock` | `BUSLOCK` | `F0` | 2 | none | Assert bus lock for the following instruction. |
+| `rep`, `repe`, `repz` | `REP`, `REPE`, `REPZ` | `F3` | 2 | none | Repeat while `CX != 0`; string compare/scan also require `ZF=1`. |
+| `repne`, `repnz` | `REPNE`, `REPNZ` | `F2` | 2 | none | Repeat while `CX != 0`; string compare/scan also require `ZF=0`. |
+| `repc` | `REPC` | `65` | 2 | none | V20 repeat while carry. |
+| `repnc` | `REPNC` | `64` | 2 | none | V20 repeat while not carry. |
 
 ## Instruction Reference
 
@@ -85,9 +89,9 @@ two ASCII/unpacked decimal digits.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `aaa` | `37` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `aaa` | `37` | 1 | 3 | none |
 
 Operation: if low nibble of `AL` is greater than 9 or `AF=1`, add
 `0x06` to `AL`, increment `AH`, and set `AF`/`CF`; otherwise clear
@@ -104,9 +108,9 @@ to binary in `AL`.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `aad` | `D5 0A` | 2 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `aad` | `D5 0A` | 2 | 7 | none |
 
 Operation: `AL := AH * 10 + AL`; `AH := 0`.
 
@@ -121,9 +125,9 @@ digits in `AH:AL`.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `aam` | `D4 0A` | 2 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `aam` | `D4 0A` | 2 | 15 | none |
 
 Operation: `AH := AL / 10`; `AL := AL % 10`.
 
@@ -138,9 +142,9 @@ subtracting two ASCII/unpacked decimal digits.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `aas` | `3F` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `aas` | `3F` | 1 | 7 | none |
 
 Operation: if low nibble of `AL` is greater than 9 or `AF=1`, subtract
 `0x06` from `AL`, decrement `AH`, and set `AF`/`CF`; otherwise clear
@@ -156,17 +160,22 @@ Add with carry.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `adc r/m8, reg8` | `10 /r` | 2-4 |
-| `adc r/m16, reg16` | `11 /r` | 2-4 |
-| `adc reg8, r/m8` | `12 /r` | 2-4 |
-| `adc reg16, r/m16` | `13 /r` | 2-4 |
-| `adc AL, imm8` | `14 ib` | 2 |
-| `adc AX, imm16` | `15 iw` | 3 |
-| `adc r/m8, imm8` | `80 /2 ib` | 3-5 |
-| `adc r/m16, imm16` | `81 /2 iw` | 4-6 |
-| `adc r/m16, imm8` | `83 /2 ib` | 3-5 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `adc r8, reg8` | `10 /r` | 2 | 2 | none |
+| `adc r16, reg16` | `11 /r` | 2 | 2 | none |
+| `adc mem8, reg8` | `10 /r` | 2-4 | 16 | 2 |
+| `adc mem16, reg16` | `11 /r` | 2-4 | 24 | 2 |
+| `adc reg8, mem8` | `12 /r` | 2-4 | 11 | 1 |
+| `adc reg16, mem16` | `13 /r` | 2-4 | 15 | 1 |
+| `adc reg8, imm8` | `80 /2 ib` | 3 | 4 | none |
+| `adc reg16, imm16` | `81 /2 iw` | 4 | 4 | none |
+| `adc reg16, imm8` | `83 /2 ib` | 3 | 4 | none |
+| `adc mem8, imm8` | `80 /2 ib` | 3-5 | 18 | 2 |
+| `adc mem16, imm16` | `81 /2 iw` | 4-6 | 26 | 2 |
+| `adc mem16, imm8` | `83 /2 ib` | 3-5 | 26 | 2 |
+| `adc AL, imm8` | `14 ib` | 2 | 4 | none |
+| `adc AX, imm16` | `15 iw` | 3 | 4 | none |
 
 Operation: `dst := dst + src + CF`.
 
@@ -180,17 +189,22 @@ Add.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `add r/m8, reg8` | `00 /r` | 2-4 |
-| `add r/m16, reg16` | `01 /r` | 2-4 |
-| `add reg8, r/m8` | `02 /r` | 2-4 |
-| `add reg16, r/m16` | `03 /r` | 2-4 |
-| `add AL, imm8` | `04 ib` | 2 |
-| `add AX, imm16` | `05 iw` | 3 |
-| `add r/m8, imm8` | `80 /0 ib` | 3-5 |
-| `add r/m16, imm16` | `81 /0 iw` | 4-6 |
-| `add r/m16, imm8` | `83 /0 ib` | 3-5 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `add r8, reg8` | `00 /r` | 2 | 2 | none |
+| `add r16, reg16` | `01 /r` | 2 | 2 | none |
+| `add mem8, reg8` | `00 /r` | 2-4 | 16 | 2 |
+| `add mem16, reg16` | `01 /r` | 2-4 | 24 | 2 |
+| `add reg8, mem8` | `02 /r` | 2-4 | 11 | 1 |
+| `add reg16, mem16` | `03 /r` | 2-4 | 15 | 1 |
+| `add reg8, imm8` | `80 /0 ib` | 3 | 4 | none |
+| `add reg16, imm16` | `81 /0 iw` | 4 | 4 | none |
+| `add reg16, imm8` | `83 /0 ib` | 3 | 4 | none |
+| `add mem8, imm8` | `80 /0 ib` | 3-5 | 18 | 2 |
+| `add mem16, imm16` | `81 /0 iw` | 4-6 | 26 | 2 |
+| `add mem16, imm8` | `83 /0 ib` | 3-5 | 26 | 2 |
+| `add AL, imm8` | `04 ib` | 2 | 4 | none |
+| `add AX, imm16` | `05 iw` | 3 | 4 | none |
 
 Operation: `dst := dst + src`.
 
@@ -204,10 +218,10 @@ Packed BCD string addition.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `add4s [ES:]dst-string, [seg:]src-string` | `0F 20` | 2 |
-| `add4s` | `0F 20` | 2 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `add4s [ES:]dst-string, [seg:]src-string` | `0F 20` | 2 | `7 + 19*n` | `3*n` |
+| `add4s` | `0F 20` | 2 | `7 + 19*n` | `3*n` |
 
 Operation: add the packed BCD string at `DS:SI` to the packed BCD
 string at `ES:DI`, storing the result at `ES:DI`. `CL` is the digit
@@ -219,8 +233,7 @@ The destination string is always in `ES` (`DS1` in the NEC manual);
 segment override is prohibited. Source defaults to `DS` and may use a
 segment override.
 
-V20 timing: `7 + 19*n` clocks, where `n` is half the digit count.
-Transfers: `3*n`.
+Timing: `n` is half the digit count.
 
 Flags: for even `CL`, `ZF` and `CF` reflect the result; `PF=u CF=x`.
 For odd `CL`, `ZF` and `CF` may not be reliable and the high nibble of
@@ -232,17 +245,22 @@ Logical AND.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `and r/m8, reg8` | `20 /r` | 2-4 |
-| `and r/m16, reg16` | `21 /r` | 2-4 |
-| `and reg8, r/m8` | `22 /r` | 2-4 |
-| `and reg16, r/m16` | `23 /r` | 2-4 |
-| `and AL, imm8` | `24 ib` | 2 |
-| `and AX, imm16` | `25 iw` | 3 |
-| `and r/m8, imm8` | `80 /4 ib` | 3-5 |
-| `and r/m16, imm16` | `81 /4 iw` | 4-6 |
-| `and r/m16, imm8` | `83 /4 ib` | 3-5 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `and r8, reg8` | `20 /r` | 2 | 2 | none |
+| `and r16, reg16` | `21 /r` | 2 | 2 | none |
+| `and mem8, reg8` | `20 /r` | 2-4 | 16 | 2 |
+| `and mem16, reg16` | `21 /r` | 2-4 | 24 | 2 |
+| `and reg8, mem8` | `22 /r` | 2-4 | 11 | 1 |
+| `and reg16, mem16` | `23 /r` | 2-4 | 15 | 1 |
+| `and reg8, imm8` | `80 /4 ib` | 3 | 4 | none |
+| `and reg16, imm16` | `81 /4 iw` | 4 | 4 | none |
+| `and reg16, imm8` | `83 /4 ib` | 3 | 4 | none |
+| `and mem8, imm8` | `80 /4 ib` | 3-5 | 18 | 2 |
+| `and mem16, imm16` | `81 /4 iw` | 4-6 | 26 | 2 |
+| `and mem16, imm8` | `83 /4 ib` | 3-5 | 26 | 2 |
+| `and AL, imm8` | `24 ib` | 2 | 4 | none |
+| `and AX, imm16` | `25 iw` | 3 | 4 | none |
 
 Operation: `dst := dst & src`.
 
@@ -257,10 +275,10 @@ to avoid collision with Intel string input mnemonics.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `bext reg8, reg8` | `0F 33 /r` | 3 |
-| `bext reg8, imm4` | `0F 3B /r ib` | 4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `bext reg8, reg8` | `0F 33 /r` | 3 | 34-59 | 1 or 2 |
+| `bext reg8, imm4` | `0F 3B /r ib` | 4 | 25-52 | 1 or 2 |
 
 Operation: load a bit field from memory into `AX`, zero-filling the
 upper unused bits. The bit field begins at bit offset `reg1 & 0x0F`
@@ -269,13 +287,6 @@ or `imm4 + 1`. After the transfer, `SI` and the first operand register
 advance to the next bit field.
 
 Implicit operands: source `DS:SI`, result `AX`.
-
-V20 timing:
-
-| Form | Clocks | Transfers |
-|------|--------|-----------|
-| register length | 26-55 even address, 34-59 odd address | 1 or 2 |
-| immediate length | 21-44 even address, 25-52 odd address | 1 or 2 |
 
 Flags: `AF=u PF=u CF=u`; other flags unchanged.
 
@@ -292,10 +303,10 @@ to avoid collision with Intel string input mnemonics.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `bins reg8, reg8` | `0F 31 /r` | 3 |
-| `bins reg8, imm4` | `0F 39 /r ib` | 4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `bins reg8, reg8` | `0F 31 /r` | 3 | 35-113 | 2 or 4 |
+| `bins reg8, imm4` | `0F 39 /r ib` | 4 | 75-103 | 2 or 4 |
 
 Operation: store the low bits of `AX` into a bit field in memory. The
 field begins at bit offset `reg1 & 0x0F` within the byte addressed by
@@ -304,13 +315,6 @@ transfer, `DI` and the first operand register advance to the next bit
 field.
 
 Implicit operands: source `AX`, destination `ES:DI`.
-
-V20 timing:
-
-| Form | Clocks | Transfers |
-|------|--------|-----------|
-| register length | 31-117 even address, 35-113 odd address | 2 or 4 |
-| immediate length | 67-87 even address, 75-103 odd address | 2 or 4 |
 
 Flags: `PF=u CF=u`; other flags unchanged.
 
@@ -326,9 +330,10 @@ Check array index against memory bounds.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `bound reg16, mem32` | `62 /r` | 2-4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `bound reg16, mem32`, in bounds | `62 /r` | 2-4 | 26 | 2 |
+| `bound reg16, mem32`, traps | `62 /r` | 2-4 | 73-76 | 7 |
 
 Operation: compare signed `reg16` with the lower and upper 16-bit bounds
 stored at `mem32`. Trap through interrupt 5 if `reg16 < lower` or
@@ -344,16 +349,13 @@ Enter 8080 emulation mode through an interrupt vector.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `brkem imm8` | `0F FF ib` | 3 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `brkem imm8` | `0F FF ib` | 3 | 50 | 5 |
 
 Operation: push native `FLAGS`, `CS`, and `IP`; clear the native/emulate
 mode bit; load `CS:IP` from vector `imm8`; then execute the target as
 8080 code.
-
-V20 timing: 38 clocks on even-address uPD70116 fetches, 50 clocks on
-odd-address uPD70116 fetches. Transfers: 5.
 
 Flags: saved on stack; execution continues in emulation mode.
 
@@ -366,12 +368,13 @@ Call procedure.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `call rel16` | `E8 cw` | 3 |
-| `call far seg:off` | `9A cd` | 5 |
-| `call r/m16` | `FF /2` | 2-4 |
-| `call far mem32` | `FF /3` | 2-4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `call rel16` | `E8 cw` | 3 | 20 | 1 |
+| `call reg16` | `FF /2` | 2 | 18 | 1 |
+| `call mem16` | `FF /2` | 2-4 | 31 | 2 |
+| `call far seg:off` | `9A cd` | 5 | 29 | 2 |
+| `call far mem32` | `FF /3` | 2-4 | 47 | 4 |
 
 Operation: push return address and transfer control. Far calls also push
 `CS` and load a new `CS:IP`.
@@ -386,9 +389,9 @@ Call a native-mode interrupt routine from 8080 emulation mode.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `calln imm8` | `ED ED ib` | 3 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `calln imm8` | `ED ED ib` | 3 | 58 | 5 |
 
 Operation: save emulation-mode `PSW`, `CS`, and `IP`, set native mode,
 and load `CS:IP` from interrupt vector `imm8`.
@@ -403,9 +406,9 @@ Convert byte to word.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `cbw` | `98` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `cbw` | `98` | 1 | 2 | none |
 
 Operation: sign-extend `AL` into `AX`.
 
@@ -417,12 +420,12 @@ NEC names: `CLR1 CY`, `CLR1 DIR`, `DI`, `NOT1 CY`.
 
 Flag control.
 
-| Form | Opcode | Operation | Flags |
-|------|--------|-----------|-------|
-| `clc` / `clr1 CF` | `F8` | `CF := 0` | `CF=0` |
-| `cld` / `clr1 DF` | `FC` | `DF := 0` | `DF=0` |
-| `cli` / `di` | `FA` | `IF := 0` | `IF=0` |
-| `cmc` / `not1 CF` | `F5` | `CF := !CF` | `CF=x` |
+| Form | Opcode | Operation | Clocks | Transfers | Flags |
+|------|--------|-----------|--------|-----------|-------|
+| `clc` / `clr1 CF` | `F8` | `CF := 0` | 2 | none | `CF=0` |
+| `cld` / `clr1 DF` | `FC` | `DF := 0` | 2 | none | `DF=0` |
+| `cli` / `di` | `FA` | `IF := 0` | 2 | none | `IF=0` |
+| `cmc` / `not1 CF` | `F5` | `CF := !CF` | 2 | none | `CF=x` |
 
 Other flags are unchanged.
 
@@ -432,17 +435,22 @@ Compare.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `cmp r/m8, reg8` | `38 /r` | 2-4 |
-| `cmp r/m16, reg16` | `39 /r` | 2-4 |
-| `cmp reg8, r/m8` | `3A /r` | 2-4 |
-| `cmp reg16, r/m16` | `3B /r` | 2-4 |
-| `cmp AL, imm8` | `3C ib` | 2 |
-| `cmp AX, imm16` | `3D iw` | 3 |
-| `cmp r/m8, imm8` | `80 /7 ib` | 3-5 |
-| `cmp r/m16, imm16` | `81 /7 iw` | 4-6 |
-| `cmp r/m16, imm8` | `83 /7 ib` | 3-5 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `cmp r8, reg8` | `38 /r` | 2 | 2 | none |
+| `cmp r16, reg16` | `39 /r` | 2 | 2 | none |
+| `cmp mem8, reg8` | `38 /r` | 2-4 | 11 | 1 |
+| `cmp mem16, reg16` | `39 /r` | 2-4 | 15 | 1 |
+| `cmp reg8, mem8` | `3A /r` | 2-4 | 11 | 1 |
+| `cmp reg16, mem16` | `3B /r` | 2-4 | 15 | 1 |
+| `cmp reg8, imm8` | `80 /7 ib` | 3 | 4 | none |
+| `cmp reg16, imm16` | `81 /7 iw` | 4 | 4 | none |
+| `cmp reg16, imm8` | `83 /7 ib` | 3 | 4 | none |
+| `cmp mem8, imm8` | `80 /7 ib` | 3-5 | 13 | 1 |
+| `cmp mem16, imm16` | `81 /7 iw` | 4-6 | 17 | 1 |
+| `cmp mem16, imm8` | `83 /7 ib` | 3-5 | 17 | 1 |
+| `cmp AL, imm8` | `3C ib` | 2 | 4 | none |
+| `cmp AX, imm16` | `3D iw` | 3 | 4 | none |
 
 Operation: compute `dst - src` for flags only; `dst` is not modified.
 
@@ -456,10 +464,10 @@ Packed BCD string compare.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `cmp4s [ES:]dst-string, [seg:]src-string` | `0F 26` | 2 |
-| `cmp4s` | `0F 26` | 2 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `cmp4s [ES:]dst-string, [seg:]src-string` | `0F 26` | 2 | `7 + 19*n` | 2 |
+| `cmp4s` | `0F 26` | 2 | `7 + 19*n` | 2 |
 
 Operation: compare the packed BCD string at `ES:DI` with the packed BCD
 string at `DS:SI`. The result is not stored. `CL` is the digit count,
@@ -469,8 +477,7 @@ Implicit operands: source `DS:SI`, destination `ES:DI`, length `CL`.
 Source defaults to `DS` and may use a segment override. The manual also
 shows an explicit destination operand in `ES:DI`.
 
-V20 timing: `7 + 19*n` clocks, where `n` is half the digit count.
-Transfers: 2.
+Timing: `n` is half the digit count.
 
 Flags: `OF=u SF=u ZF=x AF=u PF=u CF=x`. For odd `CL`, `ZF` and `CF` may
 not be reliable.
@@ -483,11 +490,12 @@ Compare string element.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `cmpbk [seg:]src-block, [ES:]dst-block` | `A6`/`A7` | 1 |
-| `cmpsb` | `A6` | 1 |
-| `cmpsw` | `A7` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `cmpbk [seg:]src-block, [ES:]dst-block` byte | `A6` | 1 | single 13; repeat `7 + 14*n` | single 2; repeat `n` |
+| `cmpbk [seg:]src-block, [ES:]dst-block` word | `A7` | 1 | single 21; repeat `7 + 22*n` | single 2; repeat `n` |
+| `cmpsb` | `A6` | 1 | single 13; repeat `7 + 14*n` | single 2; repeat `n` |
+| `cmpsw` | `A7` | 1 | single 21; repeat `7 + 22*n` | single 2; repeat `n` |
 
 Operation: compare `[DS:SI] - [ES:DI]`, then update `SI` and `DI` by
 1 or 2 according to operand size and `DF`.
@@ -502,9 +510,9 @@ Convert word to doubleword.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `cwd` | `99` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `cwd` | `99` | 1 | 4 or 5 | none |
 
 Operation: sign-extend `AX` into `DX:AX`.
 
@@ -516,10 +524,10 @@ NEC names: `ADJBA`, `ADJBS`.
 
 Decimal adjust after addition/subtraction.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `daa` | `27` | adjust packed BCD result in `AL` after addition |
-| `das` | `2F` | adjust packed BCD result in `AL` after subtraction |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `daa` | `27` | adjust packed BCD result in `AL` after addition | 3 | none |
+| `das` | `2F` | adjust packed BCD result in `AL` after subtraction | 7 | none |
 
 Flags: `SF=x ZF=x AF=x PF=x CF=x OF=u`.
 
@@ -529,11 +537,12 @@ Decrement.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `dec reg16` | `48+rw` | 1 |
-| `dec r/m8` | `FE /1` | 2-4 |
-| `dec r/m16` | `FF /1` | 2-4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `dec reg8` | `FE /1` | 2 | 2 | none |
+| `dec reg16` | `48+rw` | 1 | 2 | none |
+| `dec mem8` | `FE /1` | 2-4 | 16 | 2 |
+| `dec mem16` | `FF /1` | 2-4 | 24 | 2 |
 
 Operation: `dst := dst - 1`.
 
@@ -545,12 +554,16 @@ NEC names: `DIVU`, `DIV`.
 
 Unsigned and signed divide.
 
-| Form | Opcode | Dividend | Quotient | Remainder |
-|------|--------|----------|----------|-----------|
-| `div r/m8` | `F6 /6` | `AX` | `AL` | `AH` |
-| `div r/m16` | `F7 /6` | `DX:AX` | `AX` | `DX` |
-| `idiv r/m8` | `F6 /7` | `AX` | `AL` | `AH` |
-| `idiv r/m16` | `F7 /7` | `DX:AX` | `AX` | `DX` |
+| Form | Opcode | Dividend | Quotient | Remainder | Clocks | Transfers |
+|------|--------|----------|----------|-----------|--------|-----------|
+| `div reg8` | `F6 /6` | `AX` | `AL` | `AH` | 19 | none |
+| `div mem8` | `F6 /6` | `AX` | `AL` | `AH` | 25 | 1 |
+| `div reg16` | `F7 /6` | `DX:AX` | `AX` | `DX` | 25 | none |
+| `div mem16` | `F7 /6` | `DX:AX` | `AX` | `DX` | 35 | 1 |
+| `idiv reg8` | `F6 /7` | `AX` | `AL` | `AH` | 29-34 | none |
+| `idiv mem8` | `F6 /7` | `AX` | `AL` | `AH` | 35-40 | 1 |
+| `idiv reg16` | `F7 /7` | `DX:AX` | `AX` | `DX` | 38-43 | none |
+| `idiv mem16` | `F7 /7` | `DX:AX` | `AX` | `DX` | 48-53 | 1 |
 
 Trap through interrupt 0 on divide error.
 
@@ -562,10 +575,11 @@ NEC names: `PREPARE`, `DISPOSE`.
 
 Stack frame setup and teardown.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `enter imm16, imm8` | `C8 iw ib` | allocate stack frame |
-| `leave` | `C9` | restore caller frame pointer |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `enter imm16, 0` | `C8 iw 00` | allocate stack frame | 16 | none |
+| `enter imm16, imm8>0` | `C8 iw ib` | allocate stack frame | `23 + 16*(imm8 - 1)` | `1 + 2*(imm8 - 1)` |
+| `leave` | `C9` | restore caller frame pointer | 10 | 1 |
 
 `enter` pushes `BP`, copies `SP` to `BP`, optionally builds nested frame
 links, then subtracts the frame size from `SP`. `leave` performs
@@ -582,12 +596,12 @@ processor.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `fp01 fp-op` | `D8-DF /r` with `mod=11` | 2 |
-| `fp01 fp-op, mem` | `D8-DF /r` | 2-4 |
-| `fp02 fp-op` | `66/67 /r` with `mod=11` | 2 |
-| `fp02 fp-op, mem` | `66/67 /r` | 2-4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `fp01 fp-op` | `D8-DF /r` with `mod=11` | 2 | 2 | none |
+| `fp01 fp-op, mem` | `D8-DF /r` | 2-4 | 15 | 1 |
+| `fp02 fp-op` | `66/67 /r` with `mod=11` | 2 | 2 | none |
+| `fp02 fp-op, mem` | `66/67 /r` | 2-4 | 15 | 1 |
 
 Operation: delegate the encoded floating-point operation to an
 externally connected floating-point arithmetic chip. Memory forms also
@@ -602,9 +616,9 @@ NEC name: `HALT`.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `hlt` | `F4` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `hlt` | `F4` | 1 | 2 | none |
 
 Operation: stop instruction execution until interrupt, reset, or bus
 event resumes the processor.
@@ -619,9 +633,9 @@ Poll and wait.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `poll` | `9B` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `poll` | `9B` | 1 | `2 + 5*n` | none |
 
 Operation: keep the CPU idle until the `POLL` pin becomes active low.
 
@@ -633,16 +647,20 @@ NEC names: `MUL`, `MULU`.
 
 Signed and unsigned multiply.
 
-| Form | Opcode | Result |
-|------|--------|--------|
-| `mul r/m8` | `F6 /4` | `AX := AL * r/m8` |
-| `mul r/m16` | `F7 /4` | `DX:AX := AX * r/m16` |
-| `imul r/m8` | `F6 /5` | `AX := AL * r/m8` |
-| `imul r/m16` | `F7 /5` | `DX:AX := AX * r/m16` |
-| `imul reg16, r/m16, imm16` | `69 /r iw` | `reg16 := r/m16 * imm16` |
-| `imul reg16, r/m16, imm8` | `6B /r ib` | `reg16 := r/m16 * sign_extend(imm8)` |
-| `imul reg16, imm16` | `69 /r iw` | `reg16 := reg16 * imm16` |
-| `imul reg16, imm8` | `6B /r ib` | `reg16 := reg16 * sign_extend(imm8)` |
+| Form | Opcode | Result | Clocks | Transfers |
+|------|--------|--------|--------|-----------|
+| `mul reg8` | `F6 /4` | `AX := AL * reg8` | 21 or 22 | none |
+| `mul mem8` | `F6 /4` | `AX := AL * mem8` | 27 or 28 | 1 |
+| `mul reg16` | `F7 /4` | `DX:AX := AX * reg16` | 29 or 30 | none |
+| `mul mem16` | `F7 /4` | `DX:AX := AX * mem16` | 39 or 40 | 1 |
+| `imul reg8` | `F6 /5` | `AX := AL * reg8` | 33-39 | none |
+| `imul mem8` | `F6 /5` | `AX := AL * mem8` | 39-45 | 1 |
+| `imul reg16` | `F7 /5` | `DX:AX := AX * reg16` | 41-47 | none |
+| `imul mem16` | `F7 /5` | `DX:AX := AX * mem16` | 51-57 | 1 |
+| `imul reg16, reg16, imm16` | `69 /r iw` | `reg16 := reg16 * imm16` | 36-42 | none |
+| `imul reg16, mem16, imm16` | `69 /r iw` | `reg16 := mem16 * imm16` | 46-52 | 1 |
+| `imul reg16, reg16, imm8` | `6B /r ib` | `reg16 := reg16 * sign_extend(imm8)` | 28-34 | none |
+| `imul reg16, mem16, imm8` | `6B /r ib` | `reg16 := mem16 * sign_extend(imm8)` | 38-44 | 1 |
 
 One-operand forms set `CF` and `OF` if the upper half of the result is
 not the sign/zero extension of the lower half. Other flags are
@@ -653,16 +671,16 @@ similarly for truncation to 16 bits.
 
 Port I/O.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `in AL, imm8` | `E4 ib` | `AL := port[imm8]` |
-| `in AX, imm8` | `E5 ib` | `AX := port[imm8]` |
-| `in AL, DX` | `EC` | `AL := port[DX]` |
-| `in AX, DX` | `ED` | `AX := port[DX]` |
-| `out imm8, AL` | `E6 ib` | `port[imm8] := AL` |
-| `out imm8, AX` | `E7 ib` | `port[imm8] := AX` |
-| `out DX, AL` | `EE` | `port[DX] := AL` |
-| `out DX, AX` | `EF` | `port[DX] := AX` |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `in AL, imm8` | `E4 ib` | `AL := port[imm8]` | 9 | 1 |
+| `in AX, imm8` | `E5 ib` | `AX := port[imm8]` | 13 | 1 |
+| `in AL, DX` | `EC` | `AL := port[DX]` | 8 | 1 |
+| `in AX, DX` | `ED` | `AX := port[DX]` | 12 | 1 |
+| `out imm8, AL` | `E6 ib` | `port[imm8] := AL` | 8 | 1 |
+| `out imm8, AX` | `E7 ib` | `port[imm8] := AX` | 12 | 1 |
+| `out DX, AL` | `EE` | `port[DX] := AL` | 8 | 1 |
+| `out DX, AX` | `EF` | `port[DX] := AX` | 12 | 1 |
 
 Flags: unchanged.
 
@@ -672,11 +690,12 @@ Increment.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `inc reg16` | `40+rw` | 1 |
-| `inc r/m8` | `FE /0` | 2-4 |
-| `inc r/m16` | `FF /0` | 2-4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `inc reg8` | `FE /0` | 2 | 2 | none |
+| `inc reg16` | `40+rw` | 1 | 2 | none |
+| `inc mem8` | `FE /0` | 2-4 | 16 | 2 |
+| `inc mem16` | `FF /0` | 2-4 | 24 | 2 |
 
 Operation: `dst := dst + 1`.
 
@@ -688,14 +707,16 @@ NEC names: `INM`, `OUTM`.
 
 String port I/O.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `inm dst-block, DX` | `6C`/`6D` | `[ES:DI] := port[DX]`; update `DI` |
-| `insb` | `6C` | `[ES:DI] := port[DX]`; update `DI` by 1 |
-| `insw` | `6D` | `[ES:DI] := port[DX]`; update `DI` by 2 |
-| `outm DX, src-block` | `6E`/`6F` | `port[DX] := [DS:SI]`; update `SI` |
-| `outsb` | `6E` | `port[DX] := [DS:SI]`; update `SI` by 1 |
-| `outsw` | `6F` | `port[DX] := [DS:SI]`; update `SI` by 2 |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `inm dst-block, DX` byte | `6C` | `[ES:DI] := port[DX]`; update `DI` | single 10; repeat `9 + 8*n` | single 2; repeat `2*n` |
+| `inm dst-block, DX` word | `6D` | `[ES:DI] := port[DX]`; update `DI` | single 18; repeat `9 + 16*n` | single 2; repeat `2*n` |
+| `insb` | `6C` | `[ES:DI] := port[DX]`; update `DI` by 1 | single 10; repeat `9 + 8*n` | single 2; repeat `2*n` |
+| `insw` | `6D` | `[ES:DI] := port[DX]`; update `DI` by 2 | single 18; repeat `9 + 16*n` | single 2; repeat `2*n` |
+| `outm DX, src-block` byte | `6E` | `port[DX] := [DS:SI]`; update `SI` | single 10; repeat `9 + 8*n` | single 2; repeat `2*n` |
+| `outm DX, src-block` word | `6F` | `port[DX] := [DS:SI]`; update `SI` | single 18; repeat `9 + 16*n` | single 2; repeat `2*n` |
+| `outsb` | `6E` | `port[DX] := [DS:SI]`; update `SI` by 1 | single 10; repeat `9 + 8*n` | single 2; repeat `2*n` |
+| `outsw` | `6F` | `port[DX] := [DS:SI]`; update `SI` by 2 | single 18; repeat `9 + 16*n` | single 2; repeat `2*n` |
 
 Direction is controlled by `DF`. Repeat prefixes may be used.
 
@@ -707,12 +728,13 @@ NEC names: `BRK`, `BRKV`, `RETI`.
 
 Interrupt control.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `int 3` / `brk 3` | `CC` | one-byte breakpoint interrupt |
-| `int imm8` / `brk imm8` | `CD ib` | software interrupt |
-| `into` / `brkv` | `CE` | interrupt 4 if `OF=1` |
-| `iret` / `reti` | `CF` | return from interrupt |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `int 3` / `brk 3` | `CC` | one-byte breakpoint interrupt | 50 | 5 |
+| `int imm8` / `brk imm8` | `CD ib` | software interrupt | 50 | 5 |
+| `into` / `brkv`, taken | `CE` | interrupt 4 if `OF=1` | 52 | 5 |
+| `into` / `brkv`, not taken | `CE` | continue if `OF=0` | 4 | none |
+| `iret` / `reti` | `CF` | return from interrupt | 39 | 3 |
 
 `int` pushes `FLAGS`, `CS`, and `IP`, clears interrupt/trap state as the
 processor enters the handler, then loads `CS:IP` from the vector table.
@@ -738,10 +760,12 @@ Conditional branch.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `jcc rel8` | `70+cc rb` | 2 |
-| `jcxz rel8` | `E3 rb` | 2 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `jcc rel8`, taken | `70+cc rb` | 2 | 14 | none |
+| `jcc rel8`, not taken | `70+cc rb` | 2 | 4 | none |
+| `jcxz rel8`, taken | `E3 rb` | 2 | 13 | none |
+| `jcxz rel8`, not taken | `E3 rb` | 2 | 5 | none |
 
 Flags: unchanged.
 
@@ -751,13 +775,14 @@ NEC name: `BR`.
 
 Jump.
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `jmp rel8` | `EB rb` | 2 |
-| `jmp rel16` | `E9 cw` | 3 |
-| `jmp far seg:off` | `EA cd` | 5 |
-| `jmp r/m16` | `FF /4` | 2-4 |
-| `jmp far mem32` | `FF /5` | 2-4 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `jmp rel8` | `EB rb` | 2 | 12 | none |
+| `jmp rel16` | `E9 cw` | 3 | 12 | none |
+| `jmp reg16` | `FF /4` | 2 | 11 | none |
+| `jmp mem16` | `FF /4` | 2-4 | 24 | 1 |
+| `jmp far seg:off` | `EA cd` | 5 | 15 | none |
+| `jmp far mem32` | `FF /5` | 2-4 | 35 | 2 |
 
 Flags: unchanged.
 
@@ -767,10 +792,10 @@ NEC names: `MOV AH,PSW`, `MOV PSW,AH`.
 
 Load/store low flags through `AH`.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `lahf` | `9F` | `AH := SF:ZF:0:AF:0:PF:1:CF` |
-| `sahf` | `9E` | low flags loaded from `AH` |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `lahf` | `9F` | `AH := SF:ZF:0:AF:0:PF:1:CF` | 2 | none |
+| `sahf` | `9E` | low flags loaded from `AH` | 3 | none |
 
 `sahf` affects `SF ZF AF PF CF`; `OF` is unchanged.
 
@@ -780,11 +805,11 @@ NEC names: `MOV DS0,reg16,mem32`, `MOV DS1,reg16,mem32`, `LDEA`.
 
 Address loading.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `lea reg16, mem` | `8D /r` | load effective offset |
-| `lds reg16, mem32` | `C5 /r` | load `reg16` and `DS` from far pointer |
-| `les reg16, mem32` | `C4 /r` | load `reg16` and `ES` from far pointer |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `lea reg16, mem` | `8D /r` | load effective offset | 4 | none |
+| `lds reg16, mem32` | `C5 /r` | load `reg16` and `DS` from far pointer | 26 | 2 |
+| `les reg16, mem32` | `C4 /r` | load `reg16` and `ES` from far pointer | 26 | 2 |
 
 Flags: unchanged.
 
@@ -794,11 +819,12 @@ NEC names: `LDM`, `LDMB`, `LDMW`.
 
 Load string element.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `ldm [seg:]src-block` | `AC`/`AD` | `AL`/`AX := [DS:SI]`; update `SI` |
-| `lodsb` | `AC` | `AL := [DS:SI]`; update `SI` by 1 |
-| `lodsw` | `AD` | `AX := [DS:SI]`; update `SI` by 2 |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `ldm [seg:]src-block` byte | `AC` | `AL := [DS:SI]`; update `SI` | single 7; repeat `7 + 9*n` | single 1; repeat `n` |
+| `ldm [seg:]src-block` word | `AD` | `AX := [DS:SI]`; update `SI` | single 11; repeat `7 + 13*n` | single 1; repeat `n` |
+| `lodsb` | `AC` | `AL := [DS:SI]`; update `SI` by 1 | single 7; repeat `7 + 9*n` | single 1; repeat `n` |
+| `lodsw` | `AD` | `AX := [DS:SI]`; update `SI` by 2 | single 11; repeat `7 + 13*n` | single 1; repeat `n` |
 
 Direction is controlled by `DF`. Flags are unchanged.
 
@@ -808,11 +834,14 @@ NEC names: `DBNZ`, `DBNZE`, `DBNZNE`.
 
 Counted branch.
 
-| Form | Opcode | Condition after `CX := CX - 1` |
-|------|--------|--------------------------------|
-| `loop rel8` / `dbnz rel8` | `E2 rb` | `CX != 0` |
-| `loope rel8`, `loopz rel8` / `dbnze rel8` | `E1 rb` | `CX != 0 && ZF=1` |
-| `loopne rel8`, `loopnz rel8` / `dbnzne rel8` | `E0 rb` | `CX != 0 && ZF=0` |
+| Form | Opcode | Condition after `CX := CX - 1` | Clocks | Transfers |
+|------|--------|--------------------------------|--------|-----------|
+| `loop rel8` / `dbnz rel8`, taken | `E2 rb` | `CX != 0` | 13 | none |
+| `loop rel8` / `dbnz rel8`, not taken | `E2 rb` | `CX == 0` | 5 | none |
+| `loope rel8`, `loopz rel8` / `dbnze rel8`, taken | `E1 rb` | `CX != 0 && ZF=1` | 14 | none |
+| `loope rel8`, `loopz rel8` / `dbnze rel8`, not taken | `E1 rb` | otherwise | 5 | none |
+| `loopne rel8`, `loopnz rel8` / `dbnzne rel8`, taken | `E0 rb` | `CX != 0 && ZF=0` | 14 | none |
+| `loopne rel8`, `loopnz rel8` / `dbnzne rel8`, not taken | `E0 rb` | otherwise | 5 | none |
 
 Flags: unchanged.
 
@@ -820,22 +849,26 @@ Flags: unchanged.
 
 Move data.
 
-| Form | Opcode |
-|------|--------|
-| `mov r/m8, reg8` | `88 /r` |
-| `mov r/m16, reg16` | `89 /r` |
-| `mov reg8, r/m8` | `8A /r` |
-| `mov reg16, r/m16` | `8B /r` |
-| `mov r/m16, sreg` | `8C /r` |
-| `mov sreg, r/m16` | `8E /r` |
-| `mov AL, mem8` | `A0 iw` |
-| `mov AX, mem16` | `A1 iw` |
-| `mov mem8, AL` | `A2 iw` |
-| `mov mem16, AX` | `A3 iw` |
-| `mov reg8, imm8` | `B0+rb ib` |
-| `mov reg16, imm16` | `B8+rw iw` |
-| `mov r/m8, imm8` | `C6 /0 ib` |
-| `mov r/m16, imm16` | `C7 /0 iw` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `mov reg8, reg8` | `88`/`8A /r` | 2 | 2 | none |
+| `mov reg16, reg16` | `89`/`8B /r` | 2 | 2 | none |
+| `mov mem8, reg8` | `88 /r` | 2-4 | 9 | 1 |
+| `mov mem16, reg16` | `89 /r` | 2-4 | 13 | 1 |
+| `mov reg8, mem8` | `8A /r` | 2-4 | 11 | 1 |
+| `mov reg16, mem16` | `8B /r` | 2-4 | 15 | 1 |
+| `mov reg8, imm8` | `B0+rb ib` | 2 | 4 | none |
+| `mov reg16, imm16` | `B8+rw iw` | 3 | 4 | none |
+| `mov mem8, imm8` | `C6 /0 ib` | 3-5 | 11 | 1 |
+| `mov mem16, imm16` | `C7 /0 iw` | 4-6 | 15 | 1 |
+| `mov AL, mem8` | `A0 iw` | 3 | 10 | 1 |
+| `mov AX, mem16` | `A1 iw` | 3 | 14 | 1 |
+| `mov mem8, AL` | `A2 iw` | 3 | 9 | 1 |
+| `mov mem16, AX` | `A3 iw` | 3 | 13 | 1 |
+| `mov sreg, reg16` | `8E /r` | 2 | 2 | none |
+| `mov sreg, mem16` | `8E /r` | 2-4 | 15 | 1 |
+| `mov reg16, sreg` | `8C /r` | 2 | 2 | none |
+| `mov mem16, sreg` | `8C /r` | 2-4 | 14 | 1 |
 
 Operation: copy source to destination.
 
@@ -847,11 +880,12 @@ NEC names: `MOVBK`, `MOVBKB`, `MOVBKW`.
 
 Move string element.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `movbk [ES:]dst-block, [seg:]src-block` | `A4`/`A5` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` |
-| `movsb` | `A4` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` by 1 |
-| `movsw` | `A5` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` by 2 |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `movbk [ES:]dst-block, [seg:]src-block` byte | `A4` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` | single 11; repeat `11 + 8*n` | single 2; repeat `2*n` |
+| `movbk [ES:]dst-block, [seg:]src-block` word | `A5` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` | single 19; repeat `11 + 16*n` | single 2; repeat `2*n` |
+| `movsb` | `A4` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` by 1 | single 11; repeat `11 + 8*n` | single 2; repeat `2*n` |
+| `movsw` | `A5` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` by 2 | single 19; repeat `11 + 16*n` | single 2; repeat `2*n` |
 
 Direction is controlled by `DF`. Repeat prefixes may be used.
 Destination is always in `ES`; source defaults to `DS` and may use a
@@ -863,10 +897,12 @@ Flags: unchanged.
 
 Two's-complement negate.
 
-| Form | Opcode |
-|------|--------|
-| `neg r/m8` | `F6 /3` |
-| `neg r/m16` | `F7 /3` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `neg reg8` | `F6 /3` | 2 | 2 | none |
+| `neg reg16` | `F7 /3` | 2 | 2 | none |
+| `neg mem8` | `F6 /3` | 2-4 | 16 | 2 |
+| `neg mem16` | `F7 /3` | 2-4 | 24 | 2 |
 
 Operation: `dst := 0 - dst`.
 
@@ -877,9 +913,9 @@ operand was zero.
 
 No operation.
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `nop` | `90` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `nop` | `90` | 1 | 3 | none |
 
 Flags: unchanged.
 
@@ -887,10 +923,12 @@ Flags: unchanged.
 
 One's-complement invert.
 
-| Form | Opcode |
-|------|--------|
-| `not r/m8` | `F6 /2` |
-| `not r/m16` | `F7 /2` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `not reg8` | `F6 /2` | 2 | 2 | none |
+| `not reg16` | `F7 /2` | 2 | 2 | none |
+| `not mem8` | `F6 /2` | 2-4 | 16 | 2 |
+| `not mem16` | `F7 /2` | 2-4 | 24 | 2 |
 
 Operation: `dst := ~dst`.
 
@@ -902,24 +940,40 @@ V20 single-bit operations.
 
 Forms:
 
-| Form | Opcode |
-|------|--------|
-| `test1 r/m8, CL` | `0F 10 /0` |
-| `test1 r/m16, CL` | `0F 11 /0` |
-| `test1 r/m8, imm3` | `0F 18 /0 ib` |
-| `test1 r/m16, imm4` | `0F 19 /0 ib` |
-| `clr1 r/m8, CL` | `0F 12 /0` |
-| `clr1 r/m16, CL` | `0F 13 /0` |
-| `clr1 r/m8, imm3` | `0F 1A /0 ib` |
-| `clr1 r/m16, imm4` | `0F 1B /0 ib` |
-| `set1 r/m8, CL` | `0F 14 /0` |
-| `set1 r/m16, CL` | `0F 15 /0` |
-| `set1 r/m8, imm3` | `0F 1C /0 ib` |
-| `set1 r/m16, imm4` | `0F 1D /0 ib` |
-| `not1 r/m8, CL` | `0F 16 /0` |
-| `not1 r/m16, CL` | `0F 17 /0` |
-| `not1 r/m8, imm3` | `0F 1E /0 ib` |
-| `not1 r/m16, imm4` | `0F 1F /0 ib` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `test1 reg8, CL` | `0F 10 /0` | 3 | 3 | 1 |
+| `test1 mem8, CL` | `0F 10 /0` | 3-5 | 12 | 1 |
+| `test1 reg16, CL` | `0F 11 /0` | 3 | 3 | 1 |
+| `test1 mem16, CL` | `0F 11 /0` | 3-5 | 16 | 1 |
+| `test1 reg8, imm3` | `0F 18 /0 ib` | 4 | 4 | none |
+| `test1 mem8, imm3` | `0F 18 /0 ib` | 4-6 | 13 | 1 |
+| `test1 reg16, imm4` | `0F 19 /0 ib` | 4 | 4 | none |
+| `test1 mem16, imm4` | `0F 19 /0 ib` | 4-6 | 17 | 1 |
+| `clr1 reg8, CL` | `0F 12 /0` | 3 | 5 | none |
+| `clr1 mem8, CL` | `0F 12 /0` | 3-5 | 14 | 2 |
+| `clr1 reg16, CL` | `0F 13 /0` | 3 | 5 | none |
+| `clr1 mem16, CL` | `0F 13 /0` | 3-5 | 22 | 2 |
+| `clr1 reg8, imm3` | `0F 1A /0 ib` | 4 | 6 | none |
+| `clr1 mem8, imm3` | `0F 1A /0 ib` | 4-6 | 15 | 2 |
+| `clr1 reg16, imm4` | `0F 1B /0 ib` | 4 | 6 | none |
+| `clr1 mem16, imm4` | `0F 1B /0 ib` | 4-6 | 23 | 2 |
+| `set1 reg8, CL` | `0F 14 /0` | 3 | 4 | none |
+| `set1 mem8, CL` | `0F 14 /0` | 3-5 | 13 | 2 |
+| `set1 reg16, CL` | `0F 15 /0` | 3 | 4 | none |
+| `set1 mem16, CL` | `0F 15 /0` | 3-5 | 21 | 2 |
+| `set1 reg8, imm3` | `0F 1C /0 ib` | 4 | 5 | none |
+| `set1 mem8, imm3` | `0F 1C /0 ib` | 4-6 | 14 | 2 |
+| `set1 reg16, imm4` | `0F 1D /0 ib` | 4 | 5 | none |
+| `set1 mem16, imm4` | `0F 1D /0 ib` | 4-6 | 22 | 2 |
+| `not1 reg8, CL` | `0F 16 /0` | 3 | 4 | none |
+| `not1 mem8, CL` | `0F 16 /0` | 3-5 | 18 | 2 |
+| `not1 reg16, CL` | `0F 17 /0` | 3 | 4 | none |
+| `not1 mem16, CL` | `0F 17 /0` | 3-5 | 26 | 2 |
+| `not1 reg8, imm3` | `0F 1E /0 ib` | 4 | 5 | none |
+| `not1 mem8, imm3` | `0F 1E /0 ib` | 4-6 | 19 | 2 |
+| `not1 reg16, imm4` | `0F 1F /0 ib` | 4 | 5 | none |
+| `not1 mem16, imm4` | `0F 1F /0 ib` | 4-6 | 27 | 2 |
 
 Operation:
 
@@ -944,17 +998,22 @@ Logical OR.
 
 Forms:
 
-| Form | Opcode |
-|------|--------|
-| `or r/m8, reg8` | `08 /r` |
-| `or r/m16, reg16` | `09 /r` |
-| `or reg8, r/m8` | `0A /r` |
-| `or reg16, r/m16` | `0B /r` |
-| `or AL, imm8` | `0C ib` |
-| `or AX, imm16` | `0D iw` |
-| `or r/m8, imm8` | `80 /1 ib` |
-| `or r/m16, imm16` | `81 /1 iw` |
-| `or r/m16, imm8` | `83 /1 ib` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `or r8, reg8` | `08 /r` | 2 | 2 | none |
+| `or r16, reg16` | `09 /r` | 2 | 2 | none |
+| `or mem8, reg8` | `08 /r` | 2-4 | 16 | 2 |
+| `or mem16, reg16` | `09 /r` | 2-4 | 24 | 2 |
+| `or reg8, mem8` | `0A /r` | 2-4 | 11 | 1 |
+| `or reg16, mem16` | `0B /r` | 2-4 | 15 | 1 |
+| `or reg8, imm8` | `80 /1 ib` | 3 | 4 | none |
+| `or reg16, imm16` | `81 /1 iw` | 4 | 4 | none |
+| `or reg16, imm8` | `83 /1 ib` | 3 | 4 | none |
+| `or mem8, imm8` | `80 /1 ib` | 3-5 | 18 | 2 |
+| `or mem16, imm16` | `81 /1 iw` | 4-6 | 26 | 2 |
+| `or mem16, imm8` | `83 /1 ib` | 3-5 | 26 | 2 |
+| `or AL, imm8` | `0C ib` | 2 | 4 | none |
+| `or AX, imm16` | `0D iw` | 3 | 4 | none |
 
 Operation: `dst := dst | src`.
 
@@ -966,13 +1025,13 @@ NEC names: `POP`, `POPR`, `POP PSW`.
 
 Pop from stack.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `pop reg16` | `58+rw` | pop word into register |
-| `pop r/m16` | `8F /0` | pop word into memory/register |
-| `pop sreg` | `07+sr*8` | pop word into segment register |
-| `popa` / `pop R` | `61` | pop `DI SI BP`, discard saved `SP`, pop `BX DX CX AX` |
-| `popf` / `pop PSW` | `9D` | pop flags |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `pop reg16` | `58+rw` | pop word into register | 12 | 1 |
+| `pop mem16` | `8F /0` | pop word into memory | 25 | 2 |
+| `pop sreg` | `07+sr*8` | pop word into segment register | 12 | 1 |
+| `popa` / `pop R` | `61` | pop `DI SI BP`, discard saved `SP`, pop `BX DX CX AX` | 75 | 7 |
+| `popf` / `pop PSW` | `9D` | pop flags | 12 | 1 |
 
 Flags: only `popf` restores flags.
 
@@ -982,15 +1041,15 @@ NEC names: `PUSH`, `PUSHR`, `PUSH PSW`.
 
 Push to stack.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `push reg16` | `50+rw` | push register |
-| `push r/m16` | `FF /6` | push memory/register |
-| `push sreg` | `06+sr*8` | push segment register |
-| `push imm16` | `68 iw` | push word immediate |
-| `push imm8` | `6A ib` | push sign-extended byte immediate |
-| `pusha` / `push R` | `60` | push `AX CX DX BX` original `SP`, `BP SI DI` |
-| `pushf` / `push PSW` | `9C` | push flags |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `push reg16` | `50+rw` | push register | 12 | 1 |
+| `push mem16` | `FF /6` | push memory word | 26 | 2 |
+| `push sreg` | `06+sr*8` | push segment register | 12 | 1 |
+| `push imm16` | `68 iw` | push word immediate | 12 | 1 |
+| `push imm8` | `6A ib` | push sign-extended byte immediate | 11 | 1 |
+| `pusha` / `push R` | `60` | push `AX CX DX BX` original `SP`, `BP SI DI` | 67 | 8 |
+| `pushf` / `push PSW` | `9C` | push flags | 12 | 1 |
 
 Flags: unchanged.
 
@@ -998,20 +1057,17 @@ Flags: unchanged.
 
 Rotate.
 
-| Form | Opcode |
-|------|--------|
-| `rol r/m, 1` | `D0/D1 /0` |
-| `rol r/m, CL` | `D2/D3 /0` |
-| `rol r/m, imm8` | `C0/C1 /0 ib` |
-| `ror r/m, 1` | `D0/D1 /1` |
-| `ror r/m, CL` | `D2/D3 /1` |
-| `ror r/m, imm8` | `C0/C1 /1 ib` |
-| `rcl r/m, 1` | `D0/D1 /2` |
-| `rcl r/m, CL` | `D2/D3 /2` |
-| `rcl r/m, imm8` | `C0/C1 /2 ib` |
-| `rcr r/m, 1` | `D0/D1 /3` |
-| `rcr r/m, CL` | `D2/D3 /3` |
-| `rcr r/m, imm8` | `C0/C1 /3 ib` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `rol`/`ror`/`rcl`/`rcr reg, 1` | `D0/D1 /0-/3` | 2 | 2 | none |
+| `rol`/`ror`/`rcl`/`rcr mem8, 1` | `D0 /0-/3` | 2-4 | 16 | 2 |
+| `rol`/`ror`/`rcl`/`rcr mem16, 1` | `D1 /0-/3` | 2-4 | 24 | 2 |
+| `rol`/`ror`/`rcl`/`rcr reg, CL` | `D2/D3 /0-/3` | 2 | `7 + n` | none |
+| `rol`/`ror`/`rcl`/`rcr mem8, CL` | `D2 /0-/3` | 2-4 | `19 + n` | 2 |
+| `rol`/`ror`/`rcl`/`rcr mem16, CL` | `D3 /0-/3` | 2-4 | `27 + n` | 2 |
+| `rol`/`ror`/`rcl`/`rcr reg, imm8` | `C0/C1 /0-/3 ib` | 3 | `7 + n` | none |
+| `rol`/`ror`/`rcl`/`rcr mem8, imm8` | `C0 /0-/3 ib` | 3-5 | `19 + n` | 2 |
+| `rol`/`ror`/`rcl`/`rcr mem16, imm8` | `C1 /0-/3 ib` | 3-5 | `27 + n` | 2 |
 
 `D0/D2/C0` are byte forms; `D1/D3/C1` are word forms.
 
@@ -1022,12 +1078,12 @@ counts, `OF=u`. Other flags are unchanged.
 
 Return from procedure.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `ret` | `C3` | pop `IP` |
-| `ret imm16` | `C2 iw` | pop `IP`, then add `imm16` to `SP` |
-| `retf` | `CB` | pop `IP`, then `CS` |
-| `retf imm16` | `CA iw` | pop `IP`, `CS`, then add `imm16` to `SP` |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `ret` | `C3` | pop `IP` | 19 | 1 |
+| `ret imm16` | `C2 iw` | pop `IP`, then add `imm16` to `SP` | 24 | 1 |
+| `retf` | `CB` | pop `IP`, then `CS` | 29 | 2 |
+| `retf imm16` | `CA iw` | pop `IP`, `CS`, then add `imm16` to `SP` | 32 | 2 |
 
 Flags: unchanged.
 
@@ -1039,9 +1095,9 @@ Return from 8080 emulation mode.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `retem` | `ED FD` | 2 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `retem` | `ED FD` | 2 | 39 | 3 |
 
 Operation: restore `IP`, `CS`, and `PSW` from the stack frame saved by
 `brkem`, advance `SP` by 6, and write-disable the mode flag.
@@ -1054,12 +1110,12 @@ V20 nibble rotate through `AL`.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `rol4 reg8` | `0F 28 C0+reg` | 3 |
-| `rol4 mem8` | `0F 28 /0` | 3-5 |
-| `ror4 reg8` | `0F 2A C0+reg` | 3 |
-| `ror4 mem8` | `0F 2A /0` | 3-5 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `rol4 reg8` | `0F 28 C0+reg` | 3 | 25 | none |
+| `rol4 mem8` | `0F 28 /0` | 3-5 | 28 | 2 |
+| `ror4 reg8` | `0F 2A C0+reg` | 3 | 29 | none |
+| `ror4 mem8` | `0F 2A /0` | 3-5 | 33 | 2 |
 
 Operation: rotate nibbles between the low nibble of `AL` and the byte
 operand. The upper nibble of `AL` is undefined after the operation.
@@ -1073,17 +1129,17 @@ Flags: unchanged.
 
 Shift.
 
-| Form | Opcode |
-|------|--------|
-| `shl r/m, 1`, `sal r/m, 1` | `D0/D1 /4` |
-| `shl r/m, CL`, `sal r/m, CL` | `D2/D3 /4` |
-| `shl r/m, imm8`, `sal r/m, imm8` | `C0/C1 /4 ib` |
-| `shr r/m, 1` | `D0/D1 /5` |
-| `shr r/m, CL` | `D2/D3 /5` |
-| `shr r/m, imm8` | `C0/C1 /5 ib` |
-| `sar r/m, 1` | `D0/D1 /7` |
-| `sar r/m, CL` | `D2/D3 /7` |
-| `sar r/m, imm8` | `C0/C1 /7 ib` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `shl`/`sal`/`shr`/`sar reg, 1` | `D0/D1 /4,/5,/7` | 2 | 2 | none |
+| `shl`/`sal`/`shr`/`sar mem8, 1` | `D0 /4,/5,/7` | 2-4 | 16 | 2 |
+| `shl`/`sal`/`shr`/`sar mem16, 1` | `D1 /4,/5,/7` | 2-4 | 24 | 2 |
+| `shl`/`sal`/`shr`/`sar reg, CL` | `D2/D3 /4,/5,/7` | 2 | `7 + n` | none |
+| `shl`/`sal`/`shr`/`sar mem8, CL` | `D2 /4,/5,/7` | 2-4 | `19 + n` | 2 |
+| `shl`/`sal`/`shr`/`sar mem16, CL` | `D3 /4,/5,/7` | 2-4 | `27 + n` | 2 |
+| `shl`/`sal`/`shr`/`sar reg, imm8` | `C0/C1 /4,/5,/7 ib` | 3 | `7 + n` | none |
+| `shl`/`sal`/`shr`/`sar mem8, imm8` | `C0 /4,/5,/7 ib` | 3-5 | `19 + n` | 2 |
+| `shl`/`sal`/`shr`/`sar mem16, imm8` | `C1 /4,/5,/7 ib` | 3-5 | `27 + n` | 2 |
 
 `D0/D2/C0` are byte forms; `D1/D3/C1` are word forms. `sal` is an alias
 for `shl`.
@@ -1099,17 +1155,22 @@ Subtract with borrow.
 
 Forms:
 
-| Form | Opcode |
-|------|--------|
-| `sbb r/m8, reg8` | `18 /r` |
-| `sbb r/m16, reg16` | `19 /r` |
-| `sbb reg8, r/m8` | `1A /r` |
-| `sbb reg16, r/m16` | `1B /r` |
-| `sbb AL, imm8` | `1C ib` |
-| `sbb AX, imm16` | `1D iw` |
-| `sbb r/m8, imm8` | `80 /3 ib` |
-| `sbb r/m16, imm16` | `81 /3 iw` |
-| `sbb r/m16, imm8` | `83 /3 ib` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `sbb r8, reg8` | `18 /r` | 2 | 2 | none |
+| `sbb r16, reg16` | `19 /r` | 2 | 2 | none |
+| `sbb mem8, reg8` | `18 /r` | 2-4 | 16 | 2 |
+| `sbb mem16, reg16` | `19 /r` | 2-4 | 24 | 2 |
+| `sbb reg8, mem8` | `1A /r` | 2-4 | 11 | 1 |
+| `sbb reg16, mem16` | `1B /r` | 2-4 | 15 | 1 |
+| `sbb reg8, imm8` | `80 /3 ib` | 3 | 4 | none |
+| `sbb reg16, imm16` | `81 /3 iw` | 4 | 4 | none |
+| `sbb reg16, imm8` | `83 /3 ib` | 3 | 4 | none |
+| `sbb mem8, imm8` | `80 /3 ib` | 3-5 | 18 | 2 |
+| `sbb mem16, imm16` | `81 /3 iw` | 4-6 | 26 | 2 |
+| `sbb mem16, imm8` | `83 /3 ib` | 3-5 | 26 | 2 |
+| `sbb AL, imm8` | `1C ib` | 2 | 4 | none |
+| `sbb AX, imm16` | `1D iw` | 3 | 4 | none |
 
 Operation: `dst := dst - src - CF`.
 
@@ -1121,11 +1182,12 @@ NEC names: `CMPM`, `CMPMB`, `CMPMW`.
 
 Scan string element.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `cmpm [ES:]dst-block` | `AE`/`AF` | compare `AL`/`AX - [ES:DI]`; update `DI` |
-| `scasb` | `AE` | compare `AL - [ES:DI]`; update `DI` by 1 |
-| `scasw` | `AF` | compare `AX - [ES:DI]`; update `DI` by 2 |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `cmpm [ES:]dst-block` byte | `AE` | compare `AL - [ES:DI]`; update `DI` | single 7; repeat `7 + 10*n` | single 1; repeat `n` |
+| `cmpm [ES:]dst-block` word | `AF` | compare `AX - [ES:DI]`; update `DI` | single 11; repeat `7 + 14*n` | single 1; repeat `n` |
+| `scasb` | `AE` | compare `AL - [ES:DI]`; update `DI` by 1 | single 7; repeat `7 + 10*n` | single 1; repeat `n` |
+| `scasw` | `AF` | compare `AX - [ES:DI]`; update `DI` by 2 | single 11; repeat `7 + 14*n` | single 1; repeat `n` |
 
 Direction is controlled by `DF`. Repeat prefixes may be used.
 
@@ -1137,11 +1199,11 @@ NEC names: `SET1 CY`, `SET1 DIR`, `EI`.
 
 Flag set instructions.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `stc` / `set1 CF` | `F9` | `CF := 1` |
-| `std` / `set1 DF` | `FD` | `DF := 1` |
-| `sti` / `ei` | `FB` | `IF := 1` |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `stc` / `set1 CF` | `F9` | `CF := 1` | 2 | none |
+| `std` / `set1 DF` | `FD` | `DF := 1` | 2 | none |
+| `sti` / `ei` | `FB` | `IF := 1` | 2 | none |
 
 Other flags are unchanged.
 
@@ -1151,11 +1213,12 @@ NEC names: `STM`, `STMB`, `STMW`.
 
 Store string element.
 
-| Form | Opcode | Operation |
-|------|--------|-----------|
-| `stm [ES:]dst-block` | `AA`/`AB` | `[ES:DI] := AL`/`AX`; update `DI` |
-| `stosb` | `AA` | `[ES:DI] := AL`; update `DI` by 1 |
-| `stosw` | `AB` | `[ES:DI] := AX`; update `DI` by 2 |
+| Form | Opcode | Operation | Clocks | Transfers |
+|------|--------|-----------|--------|-----------|
+| `stm [ES:]dst-block` byte | `AA` | `[ES:DI] := AL`; update `DI` | single 7; repeat `7 + 4*n` | single 1; repeat `n` |
+| `stm [ES:]dst-block` word | `AB` | `[ES:DI] := AX`; update `DI` | single 11; repeat `7 + 8*n` | single 1; repeat `n` |
+| `stosb` | `AA` | `[ES:DI] := AL`; update `DI` by 1 | single 7; repeat `7 + 4*n` | single 1; repeat `n` |
+| `stosw` | `AB` | `[ES:DI] := AX`; update `DI` by 2 | single 11; repeat `7 + 8*n` | single 1; repeat `n` |
 
 Direction is controlled by `DF`. Repeat prefixes may be used.
 
@@ -1167,17 +1230,22 @@ Subtract.
 
 Forms:
 
-| Form | Opcode |
-|------|--------|
-| `sub r/m8, reg8` | `28 /r` |
-| `sub r/m16, reg16` | `29 /r` |
-| `sub reg8, r/m8` | `2A /r` |
-| `sub reg16, r/m16` | `2B /r` |
-| `sub AL, imm8` | `2C ib` |
-| `sub AX, imm16` | `2D iw` |
-| `sub r/m8, imm8` | `80 /5 ib` |
-| `sub r/m16, imm16` | `81 /5 iw` |
-| `sub r/m16, imm8` | `83 /5 ib` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `sub r8, reg8` | `28 /r` | 2 | 2 | none |
+| `sub r16, reg16` | `29 /r` | 2 | 2 | none |
+| `sub mem8, reg8` | `28 /r` | 2-4 | 16 | 2 |
+| `sub mem16, reg16` | `29 /r` | 2-4 | 24 | 2 |
+| `sub reg8, mem8` | `2A /r` | 2-4 | 11 | 1 |
+| `sub reg16, mem16` | `2B /r` | 2-4 | 15 | 1 |
+| `sub reg8, imm8` | `80 /5 ib` | 3 | 4 | none |
+| `sub reg16, imm16` | `81 /5 iw` | 4 | 4 | none |
+| `sub reg16, imm8` | `83 /5 ib` | 3 | 4 | none |
+| `sub mem8, imm8` | `80 /5 ib` | 3-5 | 18 | 2 |
+| `sub mem16, imm16` | `81 /5 iw` | 4-6 | 26 | 2 |
+| `sub mem16, imm8` | `83 /5 ib` | 3-5 | 26 | 2 |
+| `sub AL, imm8` | `2C ib` | 2 | 4 | none |
+| `sub AX, imm16` | `2D iw` | 3 | 4 | none |
 
 Operation: `dst := dst - src`.
 
@@ -1191,10 +1259,10 @@ Packed BCD string subtraction.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `sub4s [ES:]dst-string, [seg:]src-string` | `0F 22` | 2 |
-| `sub4s` | `0F 22` | 2 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `sub4s [ES:]dst-string, [seg:]src-string` | `0F 22` | 2 | `7 + 19*n` | `3*n` |
+| `sub4s` | `0F 22` | 2 | `7 + 19*n` | `3*n` |
 
 Operation: subtract the packed BCD string at `DS:SI` from the packed BCD
 string at `ES:DI`, storing the result at `ES:DI`. `CL` is the digit
@@ -1205,8 +1273,7 @@ The destination string is always in `ES` (`DS1` in the NEC manual);
 segment override is prohibited. Source defaults to `DS` and may use a
 segment override.
 
-V20 timing: `7 + 19*n` clocks, where `n` is half the digit count.
-Transfers: `3*n`.
+Timing: `n` is half the digit count.
 
 Flags: for even `CL`, `ZF` and `CF` reflect the result; `PF=u CF=x`.
 For odd `CL`, `ZF` and `CF` may not be reliable and the high nibble of
@@ -1218,14 +1285,18 @@ Logical test.
 
 Forms:
 
-| Form | Opcode |
-|------|--------|
-| `test r/m8, reg8` | `84 /r` |
-| `test r/m16, reg16` | `85 /r` |
-| `test AL, imm8` | `A8 ib` |
-| `test AX, imm16` | `A9 iw` |
-| `test r/m8, imm8` | `F6 /0 ib` |
-| `test r/m16, imm16` | `F7 /0 iw` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `test r8, reg8` | `84 /r` | 2 | 2 | none |
+| `test r16, reg16` | `85 /r` | 2 | 2 | none |
+| `test mem8, reg8` | `84 /r` | 2-4 | 11 | 1 |
+| `test mem16, reg16` | `85 /r` | 2-4 | 15 | 1 |
+| `test reg8, imm8` | `F6 /0 ib` | 3 | 4 | none |
+| `test reg16, imm16` | `F7 /0 iw` | 4 | 4 | none |
+| `test mem8, imm8` | `F6 /0 ib` | 3-5 | 11 | 1 |
+| `test mem16, imm16` | `F7 /0 iw` | 4-6 | 15 | 1 |
+| `test AL, imm8` | `A8 ib` | 2 | 4 | none |
+| `test AX, imm16` | `A9 iw` | 3 | 4 | none |
 
 Operation: compute `dst & src` for flags only; `dst` is not modified.
 
@@ -1237,12 +1308,14 @@ NEC name: `XCH`.
 
 Exchange operands.
 
-| Form | Opcode |
-|------|--------|
-| `xchg AX, reg16` | `90+rw` |
-| `xchg reg16, AX` | `90+rw` |
-| `xchg r/m8, reg8` | `86 /r` |
-| `xchg r/m16, reg16` | `87 /r` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `xchg AX, reg16` | `90+rw` | 1 | 3 | none |
+| `xchg reg16, AX` | `90+rw` | 1 | 3 | none |
+| `xchg reg8, reg8` | `86 /r` | 2 | 3 | none |
+| `xchg reg16, reg16` | `87 /r` | 2 | 3 | none |
+| `xchg mem8, reg8` | `86 /r` | 2-4 | 16 | 2 |
+| `xchg mem16, reg16` | `87 /r` | 2-4 | 24 | 2 |
 
 Operation: swap source and destination.
 
@@ -1256,10 +1329,10 @@ Translate byte through table.
 
 Forms:
 
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `trans src-table` | `D7` | 1 |
-| `xlat` | `D7` | 1 |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `trans src-table` | `D7` | 1 | 9 | 1 |
+| `xlat` | `D7` | 1 | 9 | 1 |
 
 Operation: `AL := [DS:BX + zero_extend(AL)]`.
 
@@ -1271,17 +1344,22 @@ Logical XOR.
 
 Forms:
 
-| Form | Opcode |
-|------|--------|
-| `xor r/m8, reg8` | `30 /r` |
-| `xor r/m16, reg16` | `31 /r` |
-| `xor reg8, r/m8` | `32 /r` |
-| `xor reg16, r/m16` | `33 /r` |
-| `xor AL, imm8` | `34 ib` |
-| `xor AX, imm16` | `35 iw` |
-| `xor r/m8, imm8` | `80 /6 ib` |
-| `xor r/m16, imm16` | `81 /6 iw` |
-| `xor r/m16, imm8` | `83 /6 ib` |
+| Form | Opcode | Bytes | Clocks | Transfers |
+|------|--------|-------|--------|-----------|
+| `xor r8, reg8` | `30 /r` | 2 | 2 | none |
+| `xor r16, reg16` | `31 /r` | 2 | 2 | none |
+| `xor mem8, reg8` | `30 /r` | 2-4 | 16 | 2 |
+| `xor mem16, reg16` | `31 /r` | 2-4 | 24 | 2 |
+| `xor reg8, mem8` | `32 /r` | 2-4 | 11 | 1 |
+| `xor reg16, mem16` | `33 /r` | 2-4 | 15 | 1 |
+| `xor reg8, imm8` | `80 /6 ib` | 3 | 4 | none |
+| `xor reg16, imm16` | `81 /6 iw` | 4 | 4 | none |
+| `xor reg16, imm8` | `83 /6 ib` | 3 | 4 | none |
+| `xor mem8, imm8` | `80 /6 ib` | 3-5 | 18 | 2 |
+| `xor mem16, imm16` | `81 /6 iw` | 4-6 | 26 | 2 |
+| `xor mem16, imm8` | `83 /6 ib` | 3-5 | 26 | 2 |
+| `xor AL, imm8` | `34 ib` | 2 | 4 | none |
+| `xor AX, imm16` | `35 iw` | 3 | 4 | none |
 
 Operation: `dst := dst ^ src`.
 
