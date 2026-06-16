@@ -750,6 +750,17 @@ static typed_vreg_t TV_FAR(int off_vreg, int seg_vreg) {
     return tv;
 }
 
+static typed_vreg_t TV_PIN(int vreg, type_t *type, const char *pin) {
+    typed_vreg_t tv = { vreg, -1, type };
+    const char *type_name = "u16";
+    if (type && type->kind == TYPE_U8)
+        type_name = "u8";
+    else if (type && type->kind == TYPE_SEG)
+        type_name = "seg";
+    fprintf(C.nir, ".vreg %%%d, %s, pin=%s\n", vreg, type_name, pin);
+    return tv;
+}
+
 static int emit_stack_addr(symbol_t *sym) {
     int dst = alloc_vreg();
     fprintf(C.nir, "    lea %%%d, %%%d\n", dst, sym->vreg);
@@ -870,9 +881,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                         mk_type(TYPE_U8) : mk_type(TYPE_U16);
             sym = sym_add_pinned(t, e->u.reg.id, e->u.reg.rclass);
             fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
-            fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
         }
-        return TV(sym->vreg, sym->type);
+        return TV_PIN(sym->vreg, sym->type, name);
     }
     case EXPR_SREG: {
         const char *name = sreg_name(e->u.reg.id);
@@ -881,9 +891,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             /* Auto-declare segment register on first use */
             sym = sym_add_pinned(mk_type(TYPE_SEG), e->u.reg.id, REGCLASS_SEG);
             fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
-            fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
         }
-        return TV(sym->vreg, sym->type);
+        return TV_PIN(sym->vreg, sym->type, name);
     }
     case EXPR_FLAG: {
         int r = alloc_vreg();
@@ -1044,6 +1053,49 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, result_type);
     }
     case EXPR_CALL: {
+        const char *early_fn_name = "?";
+        if (e->u.call.func->kind == EXPR_IDENT)
+            early_fn_name = e->u.call.func->u.ident;
+
+        if (strcmp(early_fn_name, "port_in") == 0) {
+            int dst = alloc_vreg();
+            expr_t *port_expr = e->u.call.args;
+            if (port_expr) {
+                int port_imm;
+                if (eval_const_expr(port_expr, &port_imm)) {
+                    fprintf(C.nir, "    inb %%%d, %d\n", dst, port_imm);
+                } else {
+                    typed_vreg_t port = emit_expr_typed(port_expr);
+                    fprintf(C.nir, "    inb %%%d, %%%d\n", dst, port.vreg);
+                }
+            }
+            return TV(dst, mk_type(TYPE_U8));
+        }
+
+        if (strcmp(early_fn_name, "port_out") == 0) {
+            int dst = alloc_vreg();
+            expr_t *port_expr = e->u.call.args;
+            expr_t *value_expr = port_expr ? port_expr->next : NULL;
+            if (port_expr && value_expr) {
+                int port_imm;
+                typed_vreg_t port = { -1, -1, NULL };
+                bool have_imm = eval_const_expr(port_expr, &port_imm);
+                if (!have_imm)
+                    port = emit_expr_typed(port_expr);
+
+                typed_vreg_t value = emit_expr_typed(value_expr);
+                bool byte_io = !value.type || type_size(value.type) == 1;
+                const char *op = byte_io ? "outb" : "out";
+                if (have_imm)
+                    fprintf(C.nir, "    %s %d, %%%d\n", op, port_imm,
+                            value.vreg);
+                else
+                    fprintf(C.nir, "    %s %%%d, %%%d\n", op, port.vreg,
+                            value.vreg);
+            }
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+
         /* Emit arguments */
         int argc = 0;
         int arg_vregs[16];
@@ -1107,31 +1159,6 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (strcmp(fn_name, "salc") == 0) {
             fprintf(C.nir, "    salc %%%d\n", dst);
             return TV(dst, mk_type(TYPE_U8));
-        }
-        if (strcmp(fn_name, "port_in") == 0) {
-            if (argc >= 1) {
-                expr_t *port_expr = e->u.call.args;
-                if (port_expr && port_expr->kind == EXPR_LIT_INT)
-                    fprintf(C.nir, "    inb %%%d, %d\n", dst, port_expr->u.lit_int);
-                else
-                    fprintf(C.nir, "    inb %%%d, %%%d\n", dst, arg_vregs[0]);
-            }
-            return TV(dst, mk_type(TYPE_U8));
-        }
-        if (strcmp(fn_name, "port_out") == 0) {
-            if (argc >= 2) {
-                /* Use outb for byte data, out for word.
-                 * Literals (NULL type) default to byte if they fit */
-                bool byte_io = !arg_types[1] ||
-                               type_size(arg_types[1]) == 1;
-                const char *op = byte_io ? "outb" : "out";
-                expr_t *port_expr = e->u.call.args;
-                if (port_expr && port_expr->kind == EXPR_LIT_INT)
-                    fprintf(C.nir, "    %s %d, %%%d\n", op, port_expr->u.lit_int, arg_vregs[1]);
-                else
-                    fprintf(C.nir, "    %s %%%d, %%%d\n", op, arg_vregs[0], arg_vregs[1]);
-            }
-            return TV(dst, mk_type(TYPE_VOID));
         }
         if (strcmp(fn_name, "memcopy") == 0) {
             /* REP MOVSB: ES:DI=dst, DS:SI=src, CX=count.
@@ -1764,7 +1791,7 @@ static void emit_assign_simple(expr_t *t, typed_vreg_t val, int line) {
                 sym = sym_add_pinned(rt, t->u.reg.id, t->u.reg.rclass);
             }
             fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
-            fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
+            TV_PIN(sym->vreg, sym->type, name);
         }
         if (!type_assignable(sym->type, val.type))
             cerr(line, "assignment type mismatch: '%s' is %s, got %s",
@@ -2103,7 +2130,7 @@ static void emit_stmt(stmt_t *s) {
                         sym = sym_add_pinned(rt, t->u.reg.id, t->u.reg.rclass);
                     }
                     fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
-                    fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
+                    TV_PIN(sym->vreg, sym->type, name);
                 }
             }
             if (sym) {
@@ -2180,7 +2207,7 @@ static void emit_stmt(stmt_t *s) {
                     sym = sym_add_pinned(rt, t->u.reg.id, t->u.reg.rclass);
                 }
                 fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
-                fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
+                TV_PIN(sym->vreg, sym->type, name);
             }
             if (val.type && sym->type && !types_equal(sym->type, val.type)) {
                 bool ok = false;

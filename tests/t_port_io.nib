@@ -1,8 +1,16 @@
 // Test: port_out must use AL for the value, port_in must read into AL.
 // OUT always sources from AL/AX, IN always reads into AL/AX.
 
+const PORT_LO = 0x50;
+const PORT_HI = 0x51;
+
 fn test_out(val: u8) {
     port_out(0x50, val);
+}
+
+fn test_out_accum(divisor: u16 in AX) {
+    port_out(PORT_LO, AL);
+    port_out(PORT_HI, AH);
 }
 
 fn test_in() -> u8 {

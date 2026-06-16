@@ -480,7 +480,13 @@ fi
 
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
-    if grep -q 'out 0x50, AL' "$TEST_TMPDIR"/t_port_io.asm && grep -q 'in AL, 0x60' "$TEST_TMPDIR"/t_port_io.asm; then
+    port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
+    if grep -q 'out 0x50, AL' "$TEST_TMPDIR"/t_port_io.asm &&
+       grep -q 'in AL, 0x60' "$TEST_TMPDIR"/t_port_io.asm &&
+       printf "%s\n" "$port_accum_window" | grep -q 'out 0x50, AL' &&
+       printf "%s\n" "$port_accum_window" | grep -q 'mov AL, AH' &&
+       printf "%s\n" "$port_accum_window" | grep -q 'out 0x51, AL' &&
+       ! printf "%s\n" "$port_accum_window" | grep -q 'mov [A-D]X, 8[01]'; then
         pass "port-io: IN/OUT use AL accumulator"
     else
         fail "port-io" "IN/OUT not using AL"

@@ -154,6 +154,7 @@ typedef struct {
 /* Virtual register info */
 typedef struct {
     int     prefer;         /* preferred physical reg (PREG_*) or PREG_NONE */
+    bool    fixed;          /* true if this vreg denotes an exact register */
     bool    is_byte;        /* true if this vreg is 8-bit */
     bool    is_seg;         /* true if segment register */
     bool    needs_addressable; /* true if used in memory operand (any of base/index) */
@@ -749,6 +750,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                     else if (strncmp(tok, "pin=", 4) == 0) {
                         int preg = parse_preg(tok + 4);
                         fn->vregs[v].prefer = preg;
+                        fn->vregs[v].fixed = (preg != PREG_NONE);
                         if (preg >= PREG_ES && preg <= PREG_DS)
                             fn->vregs[v].is_seg = true;
                     }
@@ -2548,12 +2550,20 @@ static void allocate_registers(func_t *fn, bool bp_available) {
      * with the same register class — byte vregs don't compete with
      * word vregs for the same pool slots, but they DO alias) */
 
-    /* Phase 1: Pre-color — assign preferred registers where possible.
+    /* Phase 1: Pre-color — assign fixed and preferred registers.
+     * Fixed vregs come from explicit register expressions and denote the
+     * hardware register itself, not an allocator preference.
+     *
      * A byte preference (AH, DL, etc.) on a word vreg is valid —
      * the vreg adapts to the preference's register class. But
      * addressing constraints must still be respected. */
     for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].fixed && fn->vregs[i].prefer != PREG_NONE)
+            fn->vregs[i].assigned = fn->vregs[i].prefer;
+    }
+    for (int i = 0; i < nv; i++) {
         if (fn->vregs[i].is_local_slot) continue;
+        if (fn->vregs[i].fixed) continue;
         if (fn->vregs[i].prefer == PREG_NONE) continue;
         int preg = fn->vregs[i].prefer;
         if (!bp_available && preg == PREG_BP)
