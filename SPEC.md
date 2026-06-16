@@ -717,15 +717,16 @@ Works between two registers, or between a register and memory.
 
 ```
 u16 addr = &variable        // LEA — load effective address
-u16 buf_addr = &local_buf   // BP-relative offset for stack locals
+u16 buf_addr = &local_buf   // effective offset in SS for stack locals
 u16 entry = &my_function    // offset of function within its segment
 ```
 
 `&` returns the offset (`u16`) of a variable or function within its
 segment. For address-taken local variables and fixed-size local arrays,
 the compiler allocates storage in the function frame and returns the
-local's BP-relative offset. The frame remains live across calls made
-with that address. For struct fields:
+local's effective offset in `SS`, computed at runtime from `BP` plus
+the local's frame displacement. The frame remains live across calls
+made with that address. For struct fields:
 
 ```
 u16 addr = &record.field    // LEA with displacement
@@ -742,7 +743,7 @@ far32 stack_ptr = @local_buf      // SS:offset pointer to stack local
 `@` returns a `far32` address (segment:offset). For function names and
 global variables, the address is resolved at link time by the binder.
 For address-taken stack locals, the compiler emits runtime code that
-materializes `SS:<BP-relative offset>`.
+materializes `SS:<effective offset>`.
 
 `@local` works for scalar locals and fixed-size local arrays. It is the
 normal way to pass a temporary stack object to an API that accepts a
