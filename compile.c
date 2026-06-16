@@ -574,6 +574,11 @@ static void resolve_constants_expr(expr_t *e) {
         for (expr_t *a = e->u.call.args; a; a = a->next)
             resolve_constants_expr(a);
         break;
+    case EXPR_INDIRECT_CALL:
+        resolve_constants_expr(e->u.indirect_call.addr);
+        for (expr_t *a = e->u.indirect_call.args; a; a = a->next)
+            resolve_constants_expr(a);
+        break;
     case EXPR_INDEX:
         resolve_constants_expr(e->u.index.array);
         resolve_constants_expr(e->u.index.index);

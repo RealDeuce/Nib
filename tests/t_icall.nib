@@ -3,10 +3,13 @@
 
 use "t_icall_lib.nif";
 
+const GREET_MSG = 42;
+const GREET_LEN = 5;
+
 fn main() {
     // Simulated far pointer (would come from lookup in real code)
     far32 addr = 0xE000:0x0100;
 
     // Indirect call through the far pointer using greet's convention
-    addr as greet from t_icall_lib(42, 5);
+    addr as greet from t_icall_lib(GREET_MSG, GREET_LEN);
 }
