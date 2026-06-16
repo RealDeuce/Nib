@@ -73,6 +73,16 @@ Requires: bison 3.8+, flex 2.6+, clang (FreeBSD base).
 ./nibdis -m tests/allops.map tests/allops.bin
 ```
 
+## Debugging workflow
+
+- When fixing codegen or binder bugs, add a focused regression test under
+  `tests/` once the failure mode is understood.
+- After a bug has a regression test and the fix is confirmed with
+  `make test`, commit the fix and regression together.
+- Commit messages should match the existing style: concise subject,
+  explanatory body wrapped to 72 columns, and the project co-author trailer
+  when applicable.
+
 ## Files
 
 | File | Purpose |
