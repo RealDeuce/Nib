@@ -1,0 +1,28 @@
+// Test: functions can return multiple scalar values and callers can
+// destructure the result into separate destinations.
+
+pub fn split_pair(x: u16) -> u8, u16 {
+    const u8 lo = x as (u8);
+    const u16 hi = x >> 8;
+    return lo, hi;
+}
+
+pub fn split_pair_pinned(x: u16) -> (u8 in AL, u16 in DX) {
+    const u8 lo = x as (u8);
+    const u16 hi = x >> 8;
+    return (lo, hi);
+}
+
+fn use_pair(x: u16) -> u16 {
+    u8 lo;
+    u16 hi;
+    lo, hi := split_pair(x);
+    return zero_extend(lo) + hi;
+}
+
+fn use_pair_pinned(x: u16) -> u16 {
+    u8 lo;
+    u16 hi;
+    (lo, hi) := split_pair_pinned(x);
+    return zero_extend(lo) + hi;
+}

@@ -401,6 +401,39 @@ param_t *mk_param_far_pinned(const char *name,
     return p;
 }
 
+/* ---- Return values ---- */
+
+return_t *mk_return(type_t *type) {
+    return_t *r = xalloc(sizeof(return_t));
+    r->type = type;
+    r->pinned_reg = REG_NONE;
+    r->pin_class = REGCLASS_WORD;
+    return r;
+}
+
+return_t *mk_return_pinned(type_t *type, int pinned_reg,
+                            reg_class_t pin_class) {
+    return_t *r = mk_return(type);
+    r->pinned_reg = pinned_reg;
+    r->pin_class = pin_class;
+    r->has_pin = true;
+    return r;
+}
+
+return_t *return_list_append(return_t *list, return_t *item) {
+    if (!list) return item;
+    return_t *p = list;
+    while (p->next) p = p->next;
+    p->next = item;
+    return list;
+}
+
+int return_list_count(return_t *list) {
+    int n = 0;
+    for (return_t *r = list; r; r = r->next) n++;
+    return n;
+}
+
 /* ---- Fields ---- */
 
 field_t *mk_field(const char *name, type_t *type) {
@@ -452,12 +485,14 @@ static decl_t *mk_decl(decl_kind_t kind, int line) {
 }
 
 decl_t *mk_decl_fn(const char *name, fn_modifiers_t mods,
-                    param_t *params, type_t *ret, stmt_t *body, int line) {
+                    param_t *params, return_t *rets, stmt_t *body, int line) {
     decl_t *d = mk_decl(DECL_FN, line);
     d->u.fn.name = xstrdup(name);
     d->u.fn.mods = mods;
     d->u.fn.params = params;
-    d->u.fn.return_type = ret;
+    d->u.fn.return_type = rets ? rets->type : NULL;
+    d->u.fn.returns = rets;
+    d->u.fn.nreturns = return_list_count(rets);
     d->u.fn.body = body;
     return d;
 }
@@ -499,19 +534,20 @@ decl_t *mk_decl_extern_global(type_t *type, const char *name, int line) {
 }
 
 decl_t *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
-                           param_t *params, type_t *ret,
-                           int ret_pin, reg_class_t ret_pin_class,
-                           bool has_ret_pin, reg_list_t *preserves,
+                           param_t *params, return_t *rets,
+                           reg_list_t *preserves,
                            bool has_addr, int addr_seg, int addr_off,
                            int line) {
     decl_t *d = mk_decl(DECL_EXTERN_FN, line);
     d->u.extern_fn.name = xstrdup(name);
     d->u.extern_fn.mods = mods;
     d->u.extern_fn.params = params;
-    d->u.extern_fn.return_type = ret;
-    d->u.extern_fn.ret_pinned_reg = ret_pin;
-    d->u.extern_fn.ret_pin_class = ret_pin_class;
-    d->u.extern_fn.has_ret_pin = has_ret_pin;
+    d->u.extern_fn.return_type = rets ? rets->type : NULL;
+    d->u.extern_fn.returns = rets;
+    d->u.extern_fn.nreturns = return_list_count(rets);
+    d->u.extern_fn.ret_pinned_reg = rets && rets->has_pin ? rets->pinned_reg : REG_NONE;
+    d->u.extern_fn.ret_pin_class = rets ? rets->pin_class : REGCLASS_WORD;
+    d->u.extern_fn.has_ret_pin = rets && rets->has_pin;
     d->u.extern_fn.preserves = preserves;
     d->u.extern_fn.has_address = has_addr;
     d->u.extern_fn.addr_seg = addr_seg;

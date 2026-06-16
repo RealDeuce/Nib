@@ -124,6 +124,7 @@ static void program_splice(program_t *prog, decl_t *list) {
     stmt_t        *stmt;
     decl_t        *decl;
     param_t       *param;
+    return_t      *retlist;
     field_t       *field;
     reg_list_t    *rlist;
     fn_modifiers_t mods;
@@ -171,16 +172,16 @@ static void program_splice(program_t *prog, decl_t *list) {
 %token OP_ARROW OP_DOTDOT
 
 /* ---- Nonterminal types ---- */
-%type <type>   type return_clause
-%type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list
-%type <stmt>   stmt stmt_list var_decl assignment checked_assignment if_stmt while_stmt for_stmt asm_block when_stmt
+%type <type>   type
+%type <retlist> return_clause return_list return_item
+%type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list return_expr_list return_expr_multi assign_targets assign_target_list assign_target
+%type <stmt>   stmt stmt_list var_decl assignment if_stmt while_stmt for_stmt asm_block when_stmt
 %type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl when_body when_block at_decl end_at_decl
 %type <param>  param param_list extern_param extern_param_list
 %type <field>  struct_field struct_fields
 %type <rlist>  reg_flag_list reg_or_flag asm_annotation preserves_clause
 %type <regval> reg_name word_reg byte_reg seg_reg flag mem_base
-%type <type>   return_clause_extern_type
-%type <regval> return_clause_extern_pin
+%type <retlist> return_clause_extern
 %type <sval>   any_ident
 %type <fcase>  flag_block flag_cases flag_case
 %type <fexpr>  flag_expr flag_atom
@@ -370,12 +371,18 @@ fn_modifier
 
 return_clause
     : /* empty */               { $$ = NULL; }
-    | OP_ARROW type             { $$ = $2; }
-    | OP_ARROW type KW_IN reg_name
-        { $$ = $2;
-          current_mods.has_ret_pin = true;
-          current_mods.ret_pinned_reg = $4.reg;
-          current_mods.ret_pin_class = $4.rclass; }
+    | OP_ARROW return_list      { $$ = $2; }
+    | OP_ARROW '(' return_list ')' { $$ = $3; }
+    ;
+
+return_list
+    : return_item               { $$ = $1; }
+    | return_list ',' return_item { $$ = return_list_append($1, $3); }
+    ;
+
+return_item
+    : type                      { $$ = mk_return($1); }
+    | type KW_IN reg_name       { $$ = mk_return_pinned($1, $3.reg, $3.rclass); }
     ;
 
 /* ==== Extern declarations ==== */
@@ -385,32 +392,26 @@ extern_fn_start
     ;
 
 extern_decl
-    : extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
+    : extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern preserves_clause ';'
         { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
-              $8.reg, $8.rclass, ($8.reg != REG_NONE),
-              $9, false, 0, 0, yyline); }
-    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
-        { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
-              $7.reg, $7.rclass, ($7.reg != REG_NONE),
               $8, false, 0, 0, yyline); }
-    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' extern_param_list ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
-        { $$ = mk_decl_extern_fn($8, current_mods, $10, $12,
-              $13.reg, $13.rclass, ($13.reg != REG_NONE),
-              $14, true, $4, $6, yyline); }
-    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' ')' return_clause_extern_type return_clause_extern_pin preserves_clause ';'
-        { $$ = mk_decl_extern_fn($8, current_mods, NULL, $11,
-              $12.reg, $12.rclass, ($12.reg != REG_NONE),
-              $13, true, $4, $6, yyline); }
-    | extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern_type return_clause_extern_pin preserves_clause '{' stmt_list '}'
-        { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
-              $8.reg, $8.rclass, ($8.reg != REG_NONE),
-              $9, false, 0, 0, yyline);
-          $$->u.extern_fn.body = $11; }
-    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern_type return_clause_extern_pin preserves_clause '{' stmt_list '}'
+    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern preserves_clause ';'
         { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
-              $7.reg, $7.rclass, ($7.reg != REG_NONE),
+              $7, false, 0, 0, yyline); }
+    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' extern_param_list ')' return_clause_extern preserves_clause ';'
+        { $$ = mk_decl_extern_fn($8, current_mods, $10, $12,
+              $13, true, $4, $6, yyline); }
+    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' ')' return_clause_extern preserves_clause ';'
+        { $$ = mk_decl_extern_fn($8, current_mods, NULL, $11,
+              $12, true, $4, $6, yyline); }
+    | extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern preserves_clause '{' stmt_list '}'
+        { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
               $8, false, 0, 0, yyline);
           $$->u.extern_fn.body = $10; }
+    | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern preserves_clause '{' stmt_list '}'
+        { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
+              $7, false, 0, 0, yyline);
+          $$->u.extern_fn.body = $9; }
     ;
 
 extern_modifiers
@@ -422,14 +423,10 @@ extern_modifier
     : KW_FAR                            { current_mods.is_far = true; }
     ;
 
-return_clause_extern_type
+return_clause_extern
     : /* empty */               { $$ = NULL; }
-    | OP_ARROW type             { $$ = $2; }
-    ;
-
-return_clause_extern_pin
-    : /* empty */               { $$.reg = REG_NONE; $$.rclass = REGCLASS_WORD; }
-    | KW_IN reg_name            { $$ = $2; }
+    | OP_ARROW return_list      { $$ = $2; }
+    | OP_ARROW '(' return_list ')' { $$ = $3; }
     ;
 
 preserves_clause
@@ -484,12 +481,13 @@ stmt_list
 stmt
     : var_decl ';'                  { $$ = $1; }
     | assignment ';'                { $$ = $1; }
-    | checked_assignment            { $$ = $1; }
+    | assignment flag_block         { $$ = $1; $$->u.assign.flag_checks = $2; }
     | expr ';'                      { $$ = mk_stmt_expr($1, yyline); }
     | if_stmt                       { $$ = $1; }
     | while_stmt                    { $$ = $1; }
     | for_stmt                      { $$ = $1; }
-    | KW_RETURN expr ';'            { $$ = mk_stmt_return($2, yyline); }
+    | KW_RETURN return_expr_list ';' { $$ = mk_stmt_return($2, yyline); }
+    | KW_RETURN '(' return_expr_multi ')' ';' { $$ = mk_stmt_return($3, yyline); }
     | KW_RETURN ';'                 { $$ = mk_stmt_return(NULL, yyline); }
     | KW_BREAK ';'                  { $$ = mk_stmt_break(yyline); }
     | KW_CONTINUE ';'              { $$ = mk_stmt_continue(yyline); }
@@ -532,17 +530,35 @@ var_decl
 /* ---- Assignment ---- */
 
 assignment
-    : expr OP_ASSIGN expr
+    : assign_targets OP_ASSIGN expr
         { $$ = mk_stmt_assign($1, $3, yyline); }
-    | expr OP_TOGGLEASSIGN expr
+    | assign_target OP_TOGGLEASSIGN expr
         { $$ = mk_stmt_toggle($1, $3, yyline); }
     ;
 
-checked_assignment
-    : expr OP_ASSIGN expr flag_block
-        { $$ = mk_stmt_assign_checked($1, $3, $4, yyline); }
-    | expr OP_TOGGLEASSIGN expr flag_block
-        { $$ = mk_stmt_toggle_checked($1, $3, $4, yyline); }
+assign_targets
+    : assign_target                 { $$ = $1; }
+    | assign_target_list            { $$ = $1; }
+    | '(' assign_target_list ')'    { $$ = $2; }
+    ;
+
+assign_target_list
+    : assign_target ',' assign_target { $$ = expr_list_append($1, $3); }
+    | assign_target_list ',' assign_target { $$ = expr_list_append($1, $3); }
+    ;
+
+assign_target
+    : expr                          { $$ = $1; }
+    ;
+
+return_expr_list
+    : expr                          { $$ = $1; }
+    | return_expr_multi             { $$ = $1; }
+    ;
+
+return_expr_multi
+    : expr ',' expr                 { $$ = expr_list_append($1, $3); }
+    | return_expr_multi ',' expr    { $$ = expr_list_append($1, $3); }
     ;
 
 /* ---- Flag-check blocks ---- */

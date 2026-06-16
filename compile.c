@@ -19,6 +19,7 @@
  * ================================================================ */
 
 #define MAX_SYMBOLS 256
+#define MAX_RETURNS 8
 
 typedef struct symbol {
     char        name[64];
@@ -65,6 +66,8 @@ typedef struct {
     const char *cur_fn_name;
     param_t    *cur_fn_params;
     type_t     *cur_fn_ret;
+    return_t   *cur_fn_returns;
+    int         cur_fn_nreturns;
     fn_modifiers_t cur_fn_mods;
 
     /* Known functions (for call checking) */
@@ -73,6 +76,8 @@ typedef struct {
         int     nparams;        /* source-level param count */
         int     nparams_ir;     /* IR param count (far splits add 1) */
         type_t *return_type;
+        int     nreturns;
+        type_t *return_types[MAX_RETURNS];
         bool    param_is_far[16]; /* which params are far type */
     } functions[512];
     int nfunctions;
@@ -260,13 +265,17 @@ static int find_function(const char *name) {
     return -1;
 }
 
-static void register_function(const char *name, int nparams, type_t *ret,
-                              param_t *params) {
+static void register_function_returns(const char *name, int nparams,
+                                      return_t *rets, param_t *params) {
     if (C.nfunctions >= 512) return;
     int fi = C.nfunctions++;
     strncpy(C.functions[fi].name, name, 63);
     C.functions[fi].nparams = nparams;
-    C.functions[fi].return_type = ret;
+    C.functions[fi].return_type = rets ? rets->type : NULL;
+    C.functions[fi].nreturns = return_list_count(rets);
+    int ri = 0;
+    for (return_t *r = rets; r && ri < MAX_RETURNS; r = r->next, ri++)
+        C.functions[fi].return_types[ri] = r->type;
     /* Track which params are far (for call-site splitting) */
     int ir_count = 0;
     int pi = 0;
@@ -419,6 +428,25 @@ static type_t *type_of_element(type_t *t) {
     if (!t) return NULL;
     if (t->kind == TYPE_ARRAY) return t->element_type;
     return NULL;
+}
+
+static int expr_list_count(expr_t *list) {
+    int n = 0;
+    for (expr_t *e = list; e; e = e->next) n++;
+    return n;
+}
+
+static return_t *return_nth(return_t *list, int idx) {
+    for (return_t *r = list; r; r = r->next, idx--)
+        if (idx == 0) return r;
+    return NULL;
+}
+
+static bool type_assignable(type_t *dst, type_t *src) {
+    if (!src || !dst) return true;
+    if (types_equal(dst, src)) return true;
+    return type_is_integer(dst) && type_is_integer(src) &&
+           type_size(src) <= type_size(dst);
 }
 
 /* Check two types are compatible for a binary arithmetic operation.
@@ -1118,6 +1146,9 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 if (C.functions[fi].nparams != argc)
                     cerr(e->line, "'%s' expects %d arguments, got %d",
                          fn_name, C.functions[fi].nparams, argc);
+                if (C.functions[fi].nreturns > 1)
+                    cerr(e->line, "'%s' returns multiple values; use destructuring assignment",
+                         fn_name);
                 ret_type = C.functions[fi].return_type;
             }
         }
@@ -1537,6 +1568,148 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
 static void emit_stmt(stmt_t *s);
 static void emit_stmts(stmt_t *list);
 
+static void emit_assign_simple(expr_t *t, typed_vreg_t val, int line) {
+    if (t->kind == EXPR_IDENT) {
+        symbol_t *sym = sym_lookup(t->u.ident);
+        if (!sym) {
+            cerr(line, "undefined variable '%s'", t->u.ident);
+            return;
+        }
+        if (!type_assignable(sym->type, val.type))
+            cerr(line, "assignment type mismatch: '%s' is %s, got %s",
+                 t->u.ident, type_str(sym->type), type_str(val.type));
+        if (sym->is_global && sym->type &&
+            (sym->type->kind == TYPE_U8 || sym->type->kind == TYPE_U16 ||
+             sym->type->kind == TYPE_U32 || sym->type->kind == TYPE_SEG)) {
+            if (sym->has_at)
+                fprintf(C.nir, "    storemem [0x%04X], %%%d\n", sym->at_off, val.vreg);
+            else
+                fprintf(C.nir, "    storemem [%s], %%%d\n", sym->name, val.vreg);
+        } else {
+            fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
+        }
+        return;
+    }
+
+    if (t->kind == EXPR_REG || t->kind == EXPR_SREG) {
+        const char *name = (t->kind == EXPR_REG) ?
+            reg_name_str(t->u.reg.id, t->u.reg.rclass) :
+            sreg_name(t->u.reg.id);
+        symbol_t *sym = sym_lookup(name);
+        if (!sym) {
+            if (t->kind == EXPR_SREG) {
+                sym = sym_add_pinned(mk_type(TYPE_SEG), t->u.reg.id, REGCLASS_SEG);
+            } else {
+                type_t *rt = (t->u.reg.rclass == REGCLASS_BYTE) ?
+                             mk_type(TYPE_U8) : mk_type(TYPE_U16);
+                sym = sym_add_pinned(rt, t->u.reg.id, t->u.reg.rclass);
+            }
+            fprintf(C.nir, "    ; pin %%%d -> %s\n", sym->vreg, name);
+            fprintf(C.nir, ".prefer %%%d, %s\n", sym->vreg, name);
+        }
+        if (!type_assignable(sym->type, val.type))
+            cerr(line, "assignment type mismatch: '%s' is %s, got %s",
+                 name, type_str(sym->type), type_str(val.type));
+        fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
+        return;
+    }
+
+    cerr(line, "multi-return assignment target must be a variable or register");
+}
+
+static bool emit_multi_call_assign(expr_t *targets, expr_t *value, int line) {
+    if (!targets || !targets->next)
+        return false;
+    if (!value || value->kind != EXPR_CALL ||
+        value->u.call.func->kind != EXPR_IDENT) {
+        cerr(line, "multi-return assignment requires a direct function call");
+        return true;
+    }
+
+    const char *fn_name = value->u.call.func->u.ident;
+    int fi = find_function(fn_name);
+    if (fi < 0) {
+        cerr(line, "unknown function '%s'", fn_name);
+        return true;
+    }
+
+    int ntargets = expr_list_count(targets);
+    if (C.functions[fi].nreturns != ntargets)
+        cerr(line, "'%s' returns %d values, assignment has %d targets",
+             fn_name, C.functions[fi].nreturns, ntargets);
+    if (ntargets > MAX_RETURNS)
+        cerr(line, "too many return targets");
+
+    int argc = 0;
+    int arg_vregs[16];
+    int arg_seg_vregs[16];
+    expr_t *arg_exprs[16];
+    memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
+    for (expr_t *a = value->u.call.args; a; a = a->next) {
+        if (argc < 16) {
+            typed_vreg_t av = emit_expr_typed(a);
+            arg_vregs[argc] = av.vreg;
+            arg_seg_vregs[argc] = av.vreg_seg;
+            arg_exprs[argc] = a;
+        }
+        argc++;
+    }
+    if (C.functions[fi].nparams != argc)
+        cerr(line, "'%s' expects %d arguments, got %d",
+             fn_name, C.functions[fi].nparams, argc);
+
+    int ir_args[32];
+    int nir_args = 0;
+    for (int i = 0; i < argc && i < 16; i++) {
+        if (C.functions[fi].param_is_far[i]) {
+            symbol_t *asym = NULL;
+            if (arg_seg_vregs[i] >= 0) {
+                ir_args[nir_args++] = arg_vregs[i];
+                ir_args[nir_args++] = arg_seg_vregs[i];
+            } else {
+                if (arg_exprs[i] && arg_exprs[i]->kind == EXPR_IDENT)
+                    asym = sym_lookup(arg_exprs[i]->u.ident);
+                if (asym && asym->vreg_seg >= 0) {
+                    ir_args[nir_args++] = asym->vreg;
+                    ir_args[nir_args++] = asym->vreg_seg;
+                } else {
+                    int off_v = alloc_vreg();
+                    int seg_v = alloc_vreg();
+                    fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, arg_vregs[i]);
+                    fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, arg_vregs[i]);
+                    ir_args[nir_args++] = off_v;
+                    ir_args[nir_args++] = seg_v;
+                }
+            }
+        } else {
+            ir_args[nir_args++] = arg_vregs[i];
+        }
+    }
+
+    int ret_vregs[MAX_RETURNS];
+    fprintf(C.nir, "    mcall");
+    for (int i = 0; i < ntargets && i < MAX_RETURNS; i++) {
+        ret_vregs[i] = alloc_vreg();
+        fprintf(C.nir, " %%%d,", ret_vregs[i]);
+    }
+    fprintf(C.nir, " %s", fn_name);
+    for (int i = 0; i < nir_args; i++)
+        fprintf(C.nir, ", %%%d", ir_args[i]);
+    fprintf(C.nir, "\n");
+    for (int i = 0; i < ntargets && i < MAX_RETURNS; i++) {
+        type_t *rt = C.functions[fi].return_types[i];
+        if (rt)
+            fprintf(C.nir, ".vreg %%%d, %s\n", ret_vregs[i], type_str(rt));
+    }
+
+    int i = 0;
+    for (expr_t *t = targets; t && i < ntargets && i < MAX_RETURNS; t = t->next, i++) {
+        typed_vreg_t tv = TV(ret_vregs[i], C.functions[fi].return_types[i]);
+        emit_assign_simple(t, tv, line);
+    }
+    return true;
+}
+
 /* Emit flag expression as conditional jumps.
  * Emits code that jumps to skip_label if the condition is NOT met. */
 
@@ -1708,6 +1881,8 @@ static void emit_stmt(stmt_t *s) {
         break;
     }
     case STMT_ASSIGN: {
+        if (emit_multi_call_assign(s->u.assign.target, s->u.assign.value, s->line))
+            break;
         /* Check for assignment to const variable */
         expr_t *t = s->u.assign.target;
         if (t->kind == EXPR_IDENT) {
@@ -2020,22 +2195,32 @@ static void emit_stmt(stmt_t *s) {
     }
     case STMT_RETURN: {
         if (s->u.ret_expr) {
-            typed_vreg_t val = emit_expr_typed(s->u.ret_expr);
-            if (C.cur_fn_ret) {
-                if (val.type && !types_equal(C.cur_fn_ret, val.type)) {
-                    if (!(type_is_integer(C.cur_fn_ret) && type_is_integer(val.type) &&
-                          type_size(val.type) <= type_size(C.cur_fn_ret)) &&
-                        val.type->kind != TYPE_VOID)
-                        cerr(s->line, "return type mismatch: function returns %s, got %s",
-                             type_str(C.cur_fn_ret), type_str(val.type));
-                }
-            } else {
+            int nexprs = expr_list_count(s->u.ret_expr);
+            if (C.cur_fn_nreturns == 0) {
                 cerr(s->line, "return with value in void function");
+            } else if (nexprs != C.cur_fn_nreturns) {
+                cerr(s->line, "function returns %d values, got %d",
+                     C.cur_fn_nreturns, nexprs);
             }
-            fprintf(C.nir, "    retval %%%d\n", val.vreg);
-        } else if (C.cur_fn_ret) {
-            cerr(s->line, "return without value in function returning %s",
-                 type_str(C.cur_fn_ret));
+            int vals[MAX_RETURNS];
+            int i = 0;
+            for (expr_t *e = s->u.ret_expr; e && i < MAX_RETURNS; e = e->next, i++) {
+                typed_vreg_t val = emit_expr_typed(e);
+                return_t *ret = return_nth(C.cur_fn_returns, i);
+                if (ret && val.type && !type_assignable(ret->type, val.type) &&
+                    val.type->kind != TYPE_VOID)
+                    cerr(s->line, "return type mismatch: return %d is %s, got %s",
+                         i + 1, type_str(ret->type), type_str(val.type));
+                vals[i] = val.vreg;
+            }
+            fprintf(C.nir, "    retval");
+            for (int j = 0; j < i; j++) {
+                fprintf(C.nir, "%s %%%d", j == 0 ? "" : ",", vals[j]);
+            }
+            fprintf(C.nir, "\n");
+        } else if (C.cur_fn_nreturns > 0) {
+            cerr(s->line, "return without value in function returning %d value%s",
+                 C.cur_fn_nreturns, C.cur_fn_nreturns == 1 ? "" : "s");
         }
         fprintf(C.nir, "    ret\n");
         break;
@@ -2129,7 +2314,7 @@ static void emit_stmt(stmt_t *s) {
  * ================================================================ */
 
 /* Emit .preserves directive, inverting clobbers if needed */
-static void emit_preserves(FILE *f, fn_modifiers_t *mods) {
+static void emit_preserves(FILE *f, fn_modifiers_t *mods, return_t *rets) {
     if (!mods->has_preserves) return;
 
     if (mods->is_clobbers) {
@@ -2147,8 +2332,15 @@ static void emit_preserves(FILE *f, fn_modifiers_t *mods) {
                 clobbered[parent[r->id]] = true;
             }
         }
-        if (mods->has_ret_pin)
-            clobbered[mods->ret_pinned_reg] = true;
+        for (return_t *r = rets; r; r = r->next) {
+            if (!r->has_pin) continue;
+            if (r->pin_class == REGCLASS_WORD)
+                clobbered[r->pinned_reg] = true;
+            else if (r->pin_class == REGCLASS_BYTE) {
+                static const int parent[] = {0,1,2,3,0,1,2,3};
+                clobbered[parent[r->pinned_reg]] = true;
+            }
+        }
 
         fprintf(f, ".preserves ");
         bool first = true;
@@ -2185,6 +2377,8 @@ static void compile_fn(decl_t *d) {
     C.cur_fn_name = d->u.fn.name;
     C.cur_fn_params = d->u.fn.params;
     C.cur_fn_ret = d->u.fn.return_type;
+    C.cur_fn_returns = d->u.fn.returns;
+    C.cur_fn_nreturns = d->u.fn.nreturns;
     C.cur_fn_mods = d->u.fn.mods;
 
     /* Validate and register */
@@ -2197,7 +2391,7 @@ static void compile_fn(decl_t *d) {
             cerr(d->line, "interrupt handlers cannot have at()");
         if (d->u.fn.params)
             cerr(d->line, "interrupt handlers cannot have parameters");
-        if (d->u.fn.return_type)
+        if (d->u.fn.nreturns > 0)
             cerr(d->line, "interrupt handlers cannot have a return type");
         /* Record as far32 constant, not a callable function */
         if (C.nisr < 64)
@@ -2205,8 +2399,8 @@ static void compile_fn(decl_t *d) {
     } else {
         int nparams = 0;
         for (param_t *p = d->u.fn.params; p; p = p->next) nparams++;
-        register_function(d->u.fn.name, nparams, d->u.fn.return_type,
-                           d->u.fn.params);
+        register_function_returns(d->u.fn.name, nparams, d->u.fn.returns,
+                                  d->u.fn.params);
     }
 
     /* Emit .nir function header */
@@ -2221,7 +2415,7 @@ static void compile_fn(decl_t *d) {
         fprintf(C.nir, ", at(0x%04X:0x%04X)", d->u.fn.mods.at_seg, d->u.fn.mods.at_off);
     fprintf(C.nir, "\n");
 
-    emit_preserves(C.nir, &d->u.fn.mods);
+    emit_preserves(C.nir, &d->u.fn.mods, d->u.fn.returns);
 
     /* Emit .nif function header (only for pub declarations) */
     bool nif = d->is_pub;
@@ -2230,7 +2424,7 @@ static void compile_fn(decl_t *d) {
         if (d->u.fn.mods.is_far) fprintf(C.nif, ", far");
         fprintf(C.nif, "\n");
 
-        emit_preserves(C.nif, &d->u.fn.mods);
+        emit_preserves(C.nif, &d->u.fn.mods, d->u.fn.returns);
     }
 
     /* Create function scope and add parameters */
@@ -2288,19 +2482,17 @@ static void compile_fn(decl_t *d) {
         }
     }
 
-    if (d->u.fn.return_type) {
-        fprintf(C.nir, ".returns %s", type_str(d->u.fn.return_type));
-        if (d->u.fn.mods.has_ret_pin)
+    for (return_t *r = d->u.fn.returns; r; r = r->next) {
+        fprintf(C.nir, ".returns %s", type_str(r->type));
+        if (r->has_pin)
             fprintf(C.nir, ", pin=%s",
-                    reg_name_str(d->u.fn.mods.ret_pinned_reg,
-                                 d->u.fn.mods.ret_pin_class));
+                    reg_name_str(r->pinned_reg, r->pin_class));
         fprintf(C.nir, "\n");
         if (nif) {
-            fprintf(C.nif, ".returns %s", type_str(d->u.fn.return_type));
-            if (d->u.fn.mods.has_ret_pin)
+            fprintf(C.nif, ".returns %s", type_str(r->type));
+            if (r->has_pin)
                 fprintf(C.nif, ", pin=%s",
-                        reg_name_str(d->u.fn.mods.ret_pinned_reg,
-                                     d->u.fn.mods.ret_pin_class));
+                        reg_name_str(r->pinned_reg, r->pin_class));
             fprintf(C.nif, "\n");
         }
     }
@@ -2489,8 +2681,9 @@ static void compile_global(decl_t *d) {
 static void compile_extern_fn(decl_t *d) {
     int nparams = 0;
     for (param_t *p = d->u.extern_fn.params; p; p = p->next) nparams++;
-    register_function(d->u.extern_fn.name, nparams, d->u.extern_fn.return_type,
-                       d->u.extern_fn.params);
+    register_function_returns(d->u.extern_fn.name, nparams,
+                              d->u.extern_fn.returns,
+                              d->u.extern_fn.params);
 
     /* Emit to .nir so the binder knows how to call it */
     fprintf(C.nir, "\n.extern %s", d->u.extern_fn.name);
@@ -2519,6 +2712,13 @@ static void compile_extern_fn(decl_t *d) {
             fprintf(C.nir, "\n");
         }
     }
+    for (return_t *r = d->u.extern_fn.returns; r; r = r->next) {
+        fprintf(C.nir, ".returns %s", type_str(r->type));
+        if (r->has_pin)
+            fprintf(C.nir, ", pin=%s",
+                    reg_name_str(r->pinned_reg, r->pin_class));
+        fprintf(C.nir, "\n");
+    }
     fprintf(C.nir, ".endextern\n");
 
     /* Also emit to .nif for cross-module type checking */
@@ -2541,12 +2741,11 @@ static void compile_extern_fn(decl_t *d) {
             if (p->type && p->type->kind == TYPE_FAR) pn++; /* far splits */
         }
     }
-    if (d->u.extern_fn.return_type) {
-        fprintf(C.nif, ".returns %s", type_str(d->u.extern_fn.return_type));
-        if (d->u.extern_fn.has_ret_pin)
+    for (return_t *r = d->u.extern_fn.returns; r; r = r->next) {
+        fprintf(C.nif, ".returns %s", type_str(r->type));
+        if (r->has_pin)
             fprintf(C.nif, ", pin=%s",
-                    reg_name_str(d->u.extern_fn.ret_pinned_reg,
-                                 d->u.extern_fn.ret_pin_class));
+                    reg_name_str(r->pinned_reg, r->pin_class));
         fprintf(C.nif, "\n");
     }
     if (d->u.extern_fn.preserves) {
@@ -2575,17 +2774,13 @@ static void compile_extern_fn(decl_t *d) {
         fn_decl.u.fn.mods = d->u.extern_fn.mods;
         fn_decl.u.fn.params = d->u.extern_fn.params;
         fn_decl.u.fn.return_type = d->u.extern_fn.return_type;
+        fn_decl.u.fn.returns = d->u.extern_fn.returns;
+        fn_decl.u.fn.nreturns = d->u.extern_fn.nreturns;
         fn_decl.u.fn.body = d->u.extern_fn.body;
         /* Transfer preserves/clobbers to fn mods */
         if (d->u.extern_fn.preserves) {
             fn_decl.u.fn.mods.has_preserves = true;
             fn_decl.u.fn.mods.preserves = d->u.extern_fn.preserves;
-        }
-        /* Transfer return pin to fn mods */
-        if (d->u.extern_fn.has_ret_pin) {
-            fn_decl.u.fn.mods.has_ret_pin = true;
-            fn_decl.u.fn.mods.ret_pinned_reg = d->u.extern_fn.ret_pinned_reg;
-            fn_decl.u.fn.mods.ret_pin_class = d->u.extern_fn.ret_pin_class;
         }
         compile_fn(&fn_decl);
     }
@@ -2647,7 +2842,7 @@ static void import_nif(const char *path, int use_line) {
     char line[512];
     char cur_fn[64] = "";
     int cur_nparams = 0;
-    type_t *cur_ret = NULL;
+    return_t *cur_rets = NULL;
     bool cur_param_is_far[16] = {0};
     while (fgets(line, sizeof(line), fp)) {
         int len = strlen(line);
@@ -2664,7 +2859,7 @@ static void import_nif(const char *path, int use_line) {
             nif_read_word(p, name, sizeof(name));
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
-            cur_ret = NULL;
+            cur_rets = NULL;
             memset(cur_param_is_far, 0, sizeof(cur_param_is_far));
             continue;
         }
@@ -2676,7 +2871,7 @@ static void import_nif(const char *path, int use_line) {
             nif_read_word(p, name, sizeof(name));
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
-            cur_ret = NULL;
+            cur_rets = NULL;
             memset(cur_param_is_far, 0, sizeof(cur_param_is_far));
             continue;
         }
@@ -2703,7 +2898,7 @@ static void import_nif(const char *path, int use_line) {
             p += 8;
             char type[64];
             nif_read_word(p, type, sizeof(type));
-            cur_ret = nif_parse_type(type);
+            cur_rets = return_list_append(cur_rets, mk_return(nif_parse_type(type)));
             continue;
         }
 
@@ -2711,7 +2906,7 @@ static void import_nif(const char *path, int use_line) {
         if (strncmp(p, ".endfn", 6) == 0 || strncmp(p, ".endextern", 10) == 0) {
             if (cur_fn[0]) {
                 int fi = C.nfunctions;
-                register_function(cur_fn, cur_nparams, cur_ret, NULL);
+                register_function_returns(cur_fn, cur_nparams, cur_rets, NULL);
                 /* Apply far flags parsed from .param lines */
                 if (fi < C.nfunctions) {
                     int ir_count = 0;

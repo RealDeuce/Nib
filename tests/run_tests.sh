@@ -290,6 +290,21 @@ if [ -f "$TEST_TMPDIR"/t_return_late_u8.asm ]; then
     fi
 fi
 
+# Multi-return materialization must not clobber AX before the DX return
+# slot has copied it, and callers must capture the second return slot.
+if [ -f "$TEST_TMPDIR"/t_multi_return.asm ]; then
+    split_window=$(sed -n '/^split_pair:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_multi_return.asm)
+    call_window=$(sed -n '/t_multi_return_use_pair:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_multi_return.asm)
+    after_dx=$(printf "%s\n" "$split_window" | sed -n '/mov DX, AX/,$p')
+    if printf "%s\n" "$after_dx" | grep -q 'mov AL, CL' &&
+       printf "%s\n" "$call_window" | grep -q 'call split_pair' &&
+       printf "%s\n" "$call_window" | grep -q 'mov CX, DX'; then
+        pass "multi-return: return slots materialized and captured"
+    else
+        fail "multi-return" "missing ordered return materialization or capture"
+    fi
+fi
+
 # Indirect calls must save live registers not preserved by the extern
 # descriptor.
 if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then

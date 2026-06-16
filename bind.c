@@ -84,6 +84,7 @@ static int parse_preg(const char *s) {
 #define MAX_BLOCKS   256
 #define MAX_FNS      128
 #define MAX_LABELS   512
+#define MAX_RETURNS  8
 
 /* IR instruction opcodes */
 typedef enum {
@@ -94,6 +95,7 @@ typedef enum {
     IR_JZ,          /* jz %cond, label */
     IR_JMP,         /* jmp label */
     IR_CALL,        /* call %d, name, args... */
+    IR_MCALL,       /* mcall %d, %d, name, args... */
     IR_ICALL,       /* icall %d, %addr, name, args... */
     IR_TAILCALL,    /* tailcall name, args... */
     IR_GOTO_FN,     /* goto.fn name — raw jump to function, no cleanup */
@@ -128,6 +130,8 @@ typedef struct {
     int     src1, src2;     /* vregs read, or -1 */
     int     extra_args[8];  /* for calls with >2 args */
     int     nargs;          /* total args for calls */
+    int     ret_vregs[MAX_RETURNS]; /* extra return destinations/sources */
+    int     nrets;
     int     imm;            /* immediate value */
     bool    has_imm;
     char    name[64];       /* label target, function name, alu op name */
@@ -228,6 +232,9 @@ typedef struct {
     bool        has_return;
     char        return_type[32];
     int         ret_pin;            /* PREG_NONE or pinned return register */
+    int         nreturns;
+    char        return_types[MAX_RETURNS][32];
+    int         ret_pins[MAX_RETURNS];
 
     bblock_t    blocks[MAX_BLOCKS];
     int         nblocks;
@@ -275,6 +282,9 @@ typedef struct {
     int  addr_off;
     struct { int preg; } param_pins[16];
     int  nparams;
+    int  nreturns;
+    char return_types[MAX_RETURNS][32];
+    int  ret_pins[MAX_RETURNS];
     int  preserves[NUM_PREGS];  /* list of PREG_* preserved by extern */
     int  npreserves;
 } extern_fn_t;
@@ -292,6 +302,8 @@ static bool is_spilled(func_t *fn, int v);
 typedef struct {
     int param_regs[16];     /* PREG_* for each parameter, or PREG_NONE */
     int return_reg;         /* PREG_* for return value, or PREG_NONE */
+    int return_regs[MAX_RETURNS];
+    int nreturns;
     bool resolved;
     bool clobbers[NUM_PREGS]; /* true if function clobbers this register */
 } fn_assignment_t;
@@ -520,7 +532,12 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (strncmp(p, ".returns", 8) == 0) {
             p += 8;
             p = skip_ws(p);
-            p = read_word(p, fn->return_type, sizeof(fn->return_type));
+            int ri = fn->nreturns;
+            if (ri >= MAX_RETURNS)
+                ri = MAX_RETURNS - 1;
+            p = read_word(p, fn->return_types[ri], sizeof(fn->return_types[ri]));
+            if (fn->nreturns == 0)
+                strncpy(fn->return_type, fn->return_types[ri], sizeof(fn->return_type) - 1);
             fn->has_return = true;
             /* Check for "pin=REG" (new) or "in REG" (legacy) */
             char *pin_ptr = strstr(p, "pin=");
@@ -528,12 +545,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             if (pin_ptr) {
                 char reg[16];
                 read_word(pin_ptr + 4, reg, sizeof(reg));
-                fn->ret_pin = parse_preg(reg);
+                fn->ret_pins[ri] = parse_preg(reg);
             } else if (in_ptr) {
                 char reg[16];
                 read_word(in_ptr + 3, reg, sizeof(reg));
-                fn->ret_pin = parse_preg(reg);
+                fn->ret_pins[ri] = parse_preg(reg);
             }
+            fn->ret_pin = fn->ret_pins[0];
+            if (fn->nreturns < MAX_RETURNS)
+                fn->nreturns++;
             continue;
         }
 
@@ -756,6 +776,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         memset(ins, 0, sizeof(*ins));
         ins->dst = ins->src1 = ins->src2 = -1;
         for (int i = 0; i < 8; i++) ins->extra_args[i] = -1;
+        for (int i = 0; i < MAX_RETURNS; i++) ins->ret_vregs[i] = -1;
 
         char opname[64];
         p = read_word(p, opname, sizeof(opname));
@@ -796,7 +817,16 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         }
         else if (strcmp(opname, "retval") == 0) {
             ins->op = IR_RETVAL;
-            ins->src1 = parse_vreg(p, &p);
+            ins->nrets = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int rv = parse_vreg(p, &p);
+                if (ins->nrets == 0) ins->src1 = rv;
+                else if (ins->nrets - 1 < MAX_RETURNS) ins->ret_vregs[ins->nrets - 1] = rv;
+                ins->nrets++;
+            }
         }
         else if (strcmp(opname, "jmp") == 0) {
             ins->op = IR_JMP;
@@ -814,6 +844,32 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             skip_comma(&p);
             p = read_word(p, ins->name, sizeof(ins->name));
             /* Parse args */
+            ins->nargs = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int a = parse_vreg(p, &p);
+                if (ins->nargs == 0) ins->src1 = a;
+                else if (ins->nargs == 1) ins->src2 = a;
+                else if (ins->nargs - 2 < 8) ins->extra_args[ins->nargs - 2] = a;
+                ins->nargs++;
+            }
+        }
+        else if (strcmp(opname, "mcall") == 0) {
+            ins->op = IR_MCALL;
+            ins->nrets = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int rv = parse_vreg(p, &p);
+                if (ins->nrets == 0) ins->dst = rv;
+                else if (ins->nrets - 1 < MAX_RETURNS) ins->ret_vregs[ins->nrets - 1] = rv;
+                ins->nrets++;
+            }
+            skip_comma(&p);
+            p = read_word(p, ins->name, sizeof(ins->name));
             ins->nargs = 0;
             while (*p) {
                 skip_comma(&p);
@@ -1276,6 +1332,9 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         for (int i = 0; i < 8; i++)
             if (ins->extra_args[i] >= fn->nvregs)
                 fn->nvregs = ins->extra_args[i] + 1;
+        for (int i = 0; i < MAX_RETURNS; i++)
+            if (ins->ret_vregs[i] >= fn->nvregs)
+                fn->nvregs = ins->ret_vregs[i] + 1;
 
         /* Attach debug info from last ; @ comment */
         if (cur_dbg_line > 0) {
@@ -1318,6 +1377,8 @@ static void parse_nir(const char *path) {
             strncpy(fn->module, cur_module, 63);
             for (int i = 0; i < 16; i++)
                 fn->param_pins[i].preg = PREG_NONE;
+            for (int i = 0; i < MAX_RETURNS; i++)
+                fn->ret_pins[i] = PREG_NONE;
             for (int i = 0; i < MAX_VREGS; i++) {
                 fn->vregs[i].prefer = PREG_NONE;
                 fn->vregs[i].assigned = PREG_NONE;
@@ -1330,6 +1391,8 @@ static void parse_nir(const char *path) {
             if (nexterns >= MAX_EXTERNS) continue;
             extern_fn_t *ext = &externs[nexterns++];
             memset(ext, 0, sizeof(*ext));
+            for (int i = 0; i < MAX_RETURNS; i++)
+                ext->ret_pins[i] = PREG_NONE;
             p += 8;
             char word[64];
             p = read_word(p, ext->name, sizeof(ext->name));
@@ -1382,6 +1445,28 @@ static void parse_nir(const char *path) {
                         ext->param_pins[pi].preg = parse_preg(reg);
                     }
                     pi++;
+                }
+                if (strncmp(ep, ".returns", 8) == 0) {
+                    int ri = ext->nreturns;
+                    if (ri >= MAX_RETURNS)
+                        ri = MAX_RETURNS - 1;
+                    ep += 8;
+                    ep = skip_ws(ep);
+                    ep = read_word(ep, ext->return_types[ri],
+                                   sizeof(ext->return_types[ri]));
+                    char *pin_ptr = strstr(ep, "pin=");
+                    char *in_ptr = strstr(ep, "in ");
+                    if (pin_ptr) {
+                        char reg[16];
+                        read_word(pin_ptr + 4, reg, sizeof(reg));
+                        ext->ret_pins[ri] = parse_preg(reg);
+                    } else if (in_ptr) {
+                        char reg[16];
+                        read_word(in_ptr + 3, reg, sizeof(reg));
+                        ext->ret_pins[ri] = parse_preg(reg);
+                    }
+                    if (ext->nreturns < MAX_RETURNS)
+                        ext->nreturns++;
                 }
                 if (strncmp(ep, ".preserves", 10) == 0) {
                     /* Parse comma-separated register list */
@@ -1574,6 +1659,13 @@ static void compute_liveness(func_t *fn) {
             ins->op != IR_STOREFIELD &&
             fn->vregs[ins->dst].def_pos < 0)
             fn->vregs[ins->dst].def_pos = i;
+        if (ins->op == IR_MCALL) {
+            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                int rv = ins->ret_vregs[j];
+                if (rv >= 0 && rv < fn->nvregs && fn->vregs[rv].def_pos < 0)
+                    fn->vregs[rv].def_pos = i;
+            }
+        }
     }
 
     /* Parameters: def before first instruction */
@@ -1613,6 +1705,14 @@ static void compute_liveness(func_t *fn) {
                 if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs &&
                     i > fn->vregs[ins->extra_args[j]].last_use)
                     fn->vregs[ins->extra_args[j]].last_use = i;
+            if (ins->op == IR_RETVAL) {
+                for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                    int rv = ins->ret_vregs[j];
+                    if (rv >= 0 && rv < fn->nvregs &&
+                        i > fn->vregs[rv].last_use)
+                        fn->vregs[rv].last_use = i;
+                }
+            }
             if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
                  ins->op == IR_STOREFIELD) &&
                 ins->dst >= 0 && ins->dst < fn->nvregs &&
@@ -1637,6 +1737,22 @@ static void compute_liveness(func_t *fn) {
         for (int j = 0; j < 8; j++)
             if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
                 fn->vregs[ins->extra_args[j]].use_count++;
+        if (ins->op == IR_RETVAL) {
+            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                int rv = ins->ret_vregs[j];
+                if (rv >= 0 && rv < fn->nvregs)
+                    fn->vregs[rv].use_count++;
+            }
+        }
+        if (ins->op == IR_MCALL) {
+            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                int rv = ins->ret_vregs[j];
+                if (rv >= 0 && rv < fn->nvregs &&
+                    fn->vregs[rv].def_pos >= 0 &&
+                    fn->vregs[rv].def_pos < i)
+                    fn->vregs[rv].use_count++;
+            }
+        }
         if (ins->dst >= 0 && ins->dst < fn->nvregs &&
             fn->vregs[ins->dst].def_pos >= 0 &&
             fn->vregs[ins->dst].def_pos < i)
@@ -1772,12 +1888,16 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
 
         /* Uses: vregs read by this instruction.
          * Only counts as a use if not already defined in this block. */
-        int use_vregs[16];
+        int use_vregs[32];
         int nuses = 0;
         if (ins->src1 >= 0) use_vregs[nuses++] = ins->src1;
         if (ins->src2 >= 0) use_vregs[nuses++] = ins->src2;
         for (int j = 0; j < 8; j++)
             if (ins->extra_args[j] >= 0) use_vregs[nuses++] = ins->extra_args[j];
+        if (ins->op == IR_RETVAL) {
+            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
+                if (ins->ret_vregs[j] >= 0) use_vregs[nuses++] = ins->ret_vregs[j];
+        }
         /* dst is a "use" for stores (the address is read) */
         if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
              ins->op == IR_STOREFIELD) && ins->dst >= 0)
@@ -1794,6 +1914,13 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
             ins->op != IR_STORE && ins->op != IR_STOREMEM &&
             ins->op != IR_STOREFIELD)
             vset_set(bb->defs, ins->dst);
+        if (ins->op == IR_MCALL) {
+            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                int rv = ins->ret_vregs[j];
+                if (rv >= 0 && rv < fn->nvregs)
+                    vset_set(bb->defs, rv);
+            }
+        }
     }
 }
 
@@ -1905,6 +2032,11 @@ static void build_igraph(func_t *fn) {
                 for (int j = 0; j < 8; j++)
                     if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
                         vset_set(live, ins->extra_args[j]);
+                if (ins->op == IR_RETVAL) {
+                    for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
+                        if (ins->ret_vregs[j] >= 0 && ins->ret_vregs[j] < fn->nvregs)
+                            vset_set(live, ins->ret_vregs[j]);
+                }
                 if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
                      ins->op == IR_STOREFIELD) &&
                     ins->dst >= 0 && ins->dst < fn->nvregs)
@@ -1932,6 +2064,22 @@ static void build_igraph(func_t *fn) {
                 }
                 /* Def kills the vreg from the live set */
                 vset_clear(live, def);
+            }
+            if (ins->op == IR_MCALL) {
+                for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                    int rdef = ins->ret_vregs[j];
+                    if (rdef < 0 || rdef >= fn->nvregs) continue;
+                    for (int w = 0; w < VREG_WORDS; w++) {
+                        uint64_t bits = live[w];
+                        while (bits) {
+                            int bit = __builtin_ctzll(bits);
+                            int v = w * 64 + bit;
+                            add_interference(fn, rdef, v);
+                            bits &= bits - 1;
+                        }
+                    }
+                    vset_clear(live, rdef);
+                }
             }
 
             /* For MOV: add uses after def (coalescing exception) */
@@ -2300,6 +2448,13 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
             ins->op != IR_STORE && ins->op != IR_STOREMEM &&
             ins->op != IR_STOREFIELD)
             vset_clear(live, ins->dst);
+        if (ins->op == IR_MCALL) {
+            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                int rv = ins->ret_vregs[j];
+                if (rv >= 0 && rv < fn->nvregs)
+                    vset_clear(live, rv);
+            }
+        }
 
         /* Add uses (vreg becomes live going backward) */
         if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
@@ -2309,6 +2464,13 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
         for (int j = 0; j < 8; j++)
             if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
                 vset_set(live, ins->extra_args[j]);
+        if (ins->op == IR_RETVAL) {
+            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+                int rv = ins->ret_vregs[j];
+                if (rv >= 0 && rv < fn->nvregs)
+                    vset_set(live, rv);
+            }
+        }
         if ((ins->op == IR_STORE || ins->op == IR_STOREMEM ||
              ins->op == IR_STOREFIELD) &&
             ins->dst >= 0 && ins->dst < fn->nvregs)
@@ -2376,12 +2538,31 @@ static bool is_shift_op(const char *op) {
            strcmp(op, "rcr") == 0;
 }
 
-static int function_return_reg(func_t *fn) {
+static int default_return_reg(const char *type, int idx) {
+    static const int byte_regs[] = {PREG_AL, PREG_DL, PREG_CL, PREG_BL};
+    static const int word_regs[] = {PREG_AX, PREG_DX, PREG_CX, PREG_BX};
+    bool is_byte = (strcmp(type, "u8") == 0);
+    if (is_byte)
+        return idx >= 0 && idx < 4 ? byte_regs[idx] : PREG_NONE;
+    return idx >= 0 && idx < 4 ? word_regs[idx] : PREG_NONE;
+}
+
+static int function_return_reg(func_t *fn, int idx) {
     if (!fn->has_return)
         return PREG_NONE;
-    if (fn->ret_pin != PREG_NONE)
-        return fn->ret_pin;
-    return strcmp(fn->return_type, "u8") == 0 ? PREG_AL : PREG_AX;
+    if (idx < 0 || idx >= fn->nreturns || idx >= MAX_RETURNS)
+        return PREG_NONE;
+    if (fn->ret_pins[idx] != PREG_NONE)
+        return fn->ret_pins[idx];
+    return default_return_reg(fn->return_types[idx], idx);
+}
+
+static int extern_return_reg(extern_fn_t *ext, int idx) {
+    if (idx < 0 || idx >= ext->nreturns || idx >= MAX_RETURNS)
+        return PREG_NONE;
+    if (ext->ret_pins[idx] != PREG_NONE)
+        return ext->ret_pins[idx];
+    return default_return_reg(ext->return_types[idx], idx);
 }
 
 /* Build the resolved instruction stream.
@@ -2488,7 +2669,7 @@ static void insert_fixup_moves(func_t *fn) {
         }
 
         /* ---- Call argument fixup + BP caller-save ---- */
-        if (ins->op == IR_CALL) {
+        if (ins->op == IR_CALL || ins->op == IR_MCALL) {
             /* Build callee preserves set.
              * Explicit preserves/clobbers declaration takes priority.
              * For internal functions without a declaration, use the
@@ -2521,6 +2702,19 @@ static void insert_fixup_moves(func_t *fn) {
                 }
             }
 
+            int callee_fi = -1;
+            int callee_ext = -1;
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, ins->name) == 0)
+                    { callee_fi = fi2; break; }
+            }
+            if (callee_fi < 0) {
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, ins->name) == 0)
+                        { callee_ext = e; break; }
+                }
+            }
+
             /* BP caller-save */
             /* Caller-save: collect live registers the callee may clobber */
             int call_saved[16];
@@ -2531,6 +2725,13 @@ static void insert_fixup_moves(func_t *fn) {
             }
             for (int v = 0; v < fn->nvregs; v++) {
                 if (v == ins->dst) continue;
+                bool is_ret_dst = false;
+                if (ins->op == IR_MCALL) {
+                    for (int ri = 0; ri < ins->nrets - 1 && ri < MAX_RETURNS; ri++) {
+                        if (v == ins->ret_vregs[ri]) { is_ret_dst = true; break; }
+                    }
+                }
+                if (is_ret_dst) continue;
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
                 if (fn->vregs[v].is_seg) continue;
@@ -2557,11 +2758,6 @@ static void insert_fixup_moves(func_t *fn) {
             }
 
             /* Argument fixup: place args in expected registers */
-            int callee_fi = -1;
-            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
-                if (strcmp(functions[fi2].name, ins->name) == 0)
-                    { callee_fi = fi2; break; }
-            }
             if (callee_fi >= 0) {
                 fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
                 for (int a = 0; a < ins->nargs; a++) {
@@ -2588,6 +2784,24 @@ static void insert_fixup_moves(func_t *fn) {
 
             /* Emit the call instruction itself (emitter handles encoding) */
             rins_ir(fn, i);
+
+            /* Capture return registers before restoring caller-saves. */
+            int nrets = ins->op == IR_MCALL ? ins->nrets : 1;
+            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+                if (ret_v < 0 || ret_v >= fn->nvregs) continue;
+                int expected = PREG_NONE;
+                if (callee_fi >= 0)
+                    expected = fn_assigns[callee_fi].return_regs[ri];
+                else if (callee_ext >= 0)
+                    expected = extern_return_reg(&externs[callee_ext], ri);
+                if (expected == PREG_NONE) continue;
+                int actual = fn->vregs[ret_v].assigned;
+                if (actual != expected) {
+                    rins_asm(fn, "    mov %s, %s",
+                             vreg_asm(fn, ret_v), preg_name[expected]);
+                }
+            }
 
             /* Caller-restore */
             if (call_use_pusha) {
@@ -2659,19 +2873,51 @@ static void insert_fixup_moves(func_t *fn) {
 
         /* ---- Return value materialization ---- */
         if (ins->op == IR_RETVAL) {
-            int ret_reg = function_return_reg(fn);
-            int src = ins->src1;
-            if (ret_reg != PREG_NONE && src >= 0 && src < fn->nvregs) {
+            int nrets = ins->nrets > 0 ? ins->nrets : 1;
+            struct { int dst_reg; int src_vreg; int src_reg; bool done; } moves[MAX_RETURNS];
+            int nmoves = 0;
+            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+                int ret_reg = function_return_reg(fn, ri);
+                int src = (ri == 0) ? ins->src1 : ins->ret_vregs[ri - 1];
+                if (ret_reg == PREG_NONE || src < 0 || src >= fn->nvregs)
+                    continue;
                 int src_reg = fn->vregs[src].assigned;
-                if (src_reg != ret_reg) {
-                    rins_asm(fn, "    mov %s, %s",
-                             preg_name[ret_reg], vreg_asm(fn, src));
+                if (src_reg == ret_reg)
+                    continue;
+                moves[nmoves].dst_reg = ret_reg;
+                moves[nmoves].src_vreg = src;
+                moves[nmoves].src_reg = src_reg;
+                moves[nmoves].done = false;
+                nmoves++;
+            }
+            for (int done = 0; done < nmoves; ) {
+                int pick = -1;
+                for (int mi = 0; mi < nmoves; mi++) {
+                    if (moves[mi].done) continue;
+                    bool clobbers_pending_src = false;
+                    for (int mj = 0; mj < nmoves; mj++) {
+                        if (mi == mj || moves[mj].done) continue;
+                        if (moves[mj].src_reg != PREG_NONE &&
+                            pregs_alias(moves[mi].dst_reg, moves[mj].src_reg)) {
+                            clobbers_pending_src = true;
+                            break;
+                        }
+                    }
+                    if (!clobbers_pending_src) { pick = mi; break; }
                 }
+                if (pick < 0)
+                    pick = 0; /* Cycles are rare; preserve progress. */
+                while (pick < nmoves && moves[pick].done) pick++;
+                if (pick >= nmoves) break;
+                rins_asm(fn, "    mov %s, %s",
+                         preg_name[moves[pick].dst_reg],
+                         vreg_asm(fn, moves[pick].src_vreg));
+                moves[pick].done = true;
+                done++;
             }
             rins_ir(fn, i);
             continue;
         }
-
         /* Default: pass through unchanged */
         rins_ir(fn, i);
     }
@@ -3476,7 +3722,8 @@ static void emit_function(func_t *fn) {
             fprintf(out_asm, "    jmp %s\n", scoped_label(fn, ins->name));
             break;
 
-        case IR_CALL: {
+        case IR_CALL:
+        case IR_MCALL: {
             /* Caller-save, argument fixup, and caller-restore are now
              * handled by the move insertion pass (insert_fixup_moves).
              * The emitter just emits the call instruction itself. */
@@ -3887,6 +4134,8 @@ typedef struct {
     int arg_vregs[16];      /* caller's vregs for each argument */
     int nargs;
     int ret_vreg;           /* caller's vreg receiving return value */
+    int ret_vregs[MAX_RETURNS];
+    int nrets;
     char callee_name[64];
 } call_edge_t;
 
@@ -3908,7 +4157,7 @@ static void build_call_graph(void) {
         func_t *fn = &functions[fi];
         for (int i = 0; i < fn->ninsns; i++) {
             ir_insn_t *ins = &fn->insns[i];
-            if (ins->op != IR_CALL && ins->op != IR_TAILCALL &&
+            if (ins->op != IR_CALL && ins->op != IR_MCALL && ins->op != IR_TAILCALL &&
                 ins->op != IR_ICALL) continue;
 
             if (nedges >= MAX_EDGES) break;
@@ -3918,6 +4167,16 @@ static void build_call_graph(void) {
             e->insn_idx = i;
             strncpy(e->callee_name, ins->name, 63);
             e->ret_vreg = ins->dst;
+            e->nrets = ins->op == IR_MCALL ? ins->nrets :
+                       (ins->dst >= 0 ? 1 : 0);
+            for (int ri = 0; ri < MAX_RETURNS; ri++)
+                e->ret_vregs[ri] = -1;
+            if (e->nrets > 0)
+                e->ret_vregs[0] = ins->dst;
+            if (ins->op == IR_MCALL) {
+                for (int ri = 1; ri < e->nrets && ri < MAX_RETURNS; ri++)
+                    e->ret_vregs[ri] = ins->ret_vregs[ri - 1];
+            }
             e->nargs = 0;
 
             if (ins->op == IR_ICALL) {
@@ -4005,6 +4264,9 @@ static void propagate_preferences(void) {
     for (int i = 0; i < nfunctions; i++) {
         fn_assigns[i].resolved = false;
         fn_assigns[i].return_reg = PREG_NONE;
+        fn_assigns[i].nreturns = functions[i].nreturns;
+        for (int j = 0; j < MAX_RETURNS; j++)
+            fn_assigns[i].return_regs[j] = PREG_NONE;
         for (int j = 0; j < 16; j++)
             fn_assigns[i].param_regs[j] = PREG_NONE;
     }
@@ -4026,6 +4288,13 @@ static void propagate_preferences(void) {
                     if (caller->vregs[caller_vreg].prefer == PREG_NONE)
                         caller->vregs[caller_vreg].prefer = callee_reg;
                 }
+            }
+            for (int ri = 0; ri < call_edges[e].nrets && ri < externs[x].nreturns; ri++) {
+                int rv = call_edges[e].ret_vregs[ri];
+                int rr = extern_return_reg(&externs[x], ri);
+                if (rv >= 0 && rr != PREG_NONE && rr != PREG_SP &&
+                    caller->vregs[rv].prefer == PREG_NONE)
+                    caller->vregs[rv].prefer = rr;
             }
             break;
         }
@@ -4129,12 +4398,9 @@ static void propagate_preferences(void) {
 
         /* Assign return register */
         if (fn->has_return) {
-            if (fn->ret_pin != PREG_NONE) {
-                fa->return_reg = fn->ret_pin;
-            } else {
-                bool is_byte = (strcmp(fn->return_type, "u8") == 0);
-                fa->return_reg = is_byte ? PREG_AL : PREG_AX;
-            }
+            for (int ri = 0; ri < fn->nreturns && ri < MAX_RETURNS; ri++)
+                fa->return_regs[ri] = function_return_reg(fn, ri);
+            fa->return_reg = fa->return_regs[0];
         }
 
         fa->resolved = true;
@@ -4166,12 +4432,13 @@ static void propagate_preferences(void) {
                 }
             }
 
-            /* Return value: set preference on caller's dst vreg */
-            if (call_edges[e].ret_vreg >= 0 && fa->return_reg != PREG_NONE &&
-                fa->return_reg != PREG_SP) {
-                int rv = call_edges[e].ret_vreg;
-                if (caller->vregs[rv].prefer == PREG_NONE)
-                    caller->vregs[rv].prefer = fa->return_reg;
+            /* Return values: set preferences on caller's dst vregs */
+            for (int ri = 0; ri < call_edges[e].nrets && ri < fa->nreturns; ri++) {
+                int rv = call_edges[e].ret_vregs[ri];
+                int rr = fa->return_regs[ri];
+                if (rv >= 0 && rr != PREG_NONE && rr != PREG_SP &&
+                    caller->vregs[rv].prefer == PREG_NONE)
+                    caller->vregs[rv].prefer = rr;
             }
         }
 
@@ -4184,8 +4451,13 @@ static void propagate_preferences(void) {
                 fprintf(stderr, "?");
         }
         fprintf(stderr, "]");
-        if (fa->return_reg != PREG_NONE)
-            fprintf(stderr, " -> %s", preg_name[fa->return_reg]);
+        if (fa->return_reg != PREG_NONE) {
+            fprintf(stderr, " -> ");
+            for (int ri = 0; ri < fa->nreturns && ri < MAX_RETURNS; ri++) {
+                if (ri > 0) fprintf(stderr, ",");
+                fprintf(stderr, "%s", preg_name[fa->return_regs[ri]]);
+            }
+        }
         fprintf(stderr, "\n");
     }
 
@@ -4427,7 +4699,7 @@ int main(int argc, char **argv) {
         }
 
         for (int ii = 0; ii < fn->ninsns; ii++) {
-            if (fn->insns[ii].op != IR_CALL) continue;
+            if (fn->insns[ii].op != IR_CALL && fn->insns[ii].op != IR_MCALL) continue;
             for (int fi2 = 0; fi2 < nfunctions; fi2++) {
                 if (strcmp(functions[fi2].name, fn->insns[ii].name) == 0 &&
                     fn_assigns[fi2].resolved) {

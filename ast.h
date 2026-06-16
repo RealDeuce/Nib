@@ -17,6 +17,7 @@ typedef struct expr_node    expr_t;
 typedef struct stmt_node    stmt_t;
 typedef struct decl_node    decl_t;
 typedef struct param_node   param_t;
+typedef struct return_node  return_t;
 typedef struct field_node   field_t;
 typedef struct reg_list_node reg_list_t;
 typedef struct flag_expr_node flag_expr_t;
@@ -224,7 +225,7 @@ struct stmt_node {
         struct { expr_t *start; int end_val; stmt_t *body; } for_stmt;
 
         /* RETURN */
-        expr_t *ret_expr;  /* NULL for bare return */
+        expr_t *ret_expr;  /* linked expr list, NULL for bare return */
 
         /* GOTO */
         char *goto_label;
@@ -268,6 +269,17 @@ struct param_node {
     bool        has_seg_pin;
 
     param_t *next;
+};
+
+/* ---- Return values ---- */
+
+struct return_node {
+    type_t      *type;
+    int         pinned_reg;
+    reg_class_t pin_class;
+    bool        has_pin;
+
+    return_t *next;
 };
 
 /* ---- Struct fields ---- */
@@ -358,6 +370,8 @@ struct decl_node {
             fn_modifiers_t mods;
             param_t       *params;
             type_t        *return_type;   /* NULL if void */
+            return_t      *returns;
+            int            nreturns;
             stmt_t        *body;
         } fn;
 
@@ -387,6 +401,8 @@ struct decl_node {
             fn_modifiers_t mods;
             param_t       *params;
             type_t        *return_type;
+            return_t      *returns;
+            int            nreturns;
             int            ret_pinned_reg;
             reg_class_t    ret_pin_class;
             bool           has_ret_pin;
@@ -489,6 +505,11 @@ param_t    *mk_param_pinned(const char *name, type_t *type,
                              int pinned_reg, reg_class_t pin_class);
 param_t    *mk_param_far_pinned(const char *name,
                                  int off_reg, int seg_reg);
+return_t   *mk_return(type_t *type);
+return_t   *mk_return_pinned(type_t *type, int pinned_reg,
+                              reg_class_t pin_class);
+return_t   *return_list_append(return_t *list, return_t *item);
+int         return_list_count(return_t *list);
 field_t    *mk_field(const char *name, type_t *type);
 field_t    *mk_field_typed_ptr(const char *name, type_t *storage, type_t *as_type);
 field_t    *mk_field_bits(const char *name, int nbits);
@@ -496,7 +517,7 @@ reg_list_t *mk_reg_list(reg_id_t id, reg_class_t rc);
 reg_list_t *mk_reg_list_flags_all(void);
 
 decl_t     *mk_decl_fn(const char *name, fn_modifiers_t mods,
-                        param_t *params, type_t *ret, stmt_t *body, int line);
+                        param_t *params, return_t *rets, stmt_t *body, int line);
 decl_t     *mk_decl_struct(const char *name, bool aligned,
                             field_t *fields, int line);
 decl_t     *mk_decl_global(type_t *type, const char *name,
@@ -506,9 +527,8 @@ decl_t     *mk_decl_global(type_t *type, const char *name,
                             int line);
 decl_t     *mk_decl_extern_global(type_t *type, const char *name, int line);
 decl_t     *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
-                               param_t *params, type_t *ret,
-                               int ret_pin, reg_class_t ret_pin_class,
-                               bool has_ret_pin, reg_list_t *preserves,
+                               param_t *params, return_t *rets,
+                               reg_list_t *preserves,
                                bool has_addr, int addr_seg, int addr_off,
                                int line);
 decl_t     *mk_decl_use(const char *path, int line);

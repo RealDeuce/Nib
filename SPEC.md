@@ -329,13 +329,15 @@ fn example() {
 ### Declaration
 
 ```
-fn name(param: type, ...) -> return_type {
+fn name(param: type, ...) -> return_type[, return_type...] {
     body
 }
 ```
 
-Return type is omitted if the function returns nothing. Struct type
-parameters and return types require the `struct` keyword prefix.
+Return types are omitted if the function returns nothing. Multiple
+return values are written as a comma-separated list; parentheses around
+the list are optional. Struct type parameters and return types require
+the `struct` keyword prefix.
 
 ```
 fn add(a: u16, b: u16) -> u16 {
@@ -349,6 +351,10 @@ fn clear_screen() {
 fn read_point(p: struct Point) -> u16 {
     return p.x + p.y;
 }
+
+fn split_word(x: u16) -> u8, u8 {
+    return x as (u8), (x >> 8) as (u8);
+}
 ```
 
 ### Parameter and return register pins
@@ -361,6 +367,10 @@ treats the assignments as hard constraints rather than preferences.
 fn api_read(port: u16 in DX) -> u8 in AL {
     u8 AL = port_in(port);
     return AL;
+}
+
+fn api_pair() -> (u8 in AL, u16 in DX) {
+    return low, high;
 }
 ```
 
@@ -472,8 +482,11 @@ fn process(value buf: u8[80]) {
 
 ### Return values
 
-Scalars are returned in a register chosen by the binder. The return
-register propagates through the call graph like parameter registers:
+Scalar return values are returned in registers chosen by the binder. A
+function can return multiple scalar values by listing multiple return
+types and returning the same number of expressions. Parentheses around a
+return expression list are optional, but comma is not a general
+expression operator.
 
 ```
 fn compute() -> u16 {
@@ -490,6 +503,27 @@ fn caller() {
 If multiple callers disagree on which register they want the return
 value in, the binder resolves the conflict with a minimal move at the
 more expensive call site.
+
+Multiple return values are consumed with destructuring assignment:
+
+```
+fn split_word(x: u16) -> u8, u8 {
+    return x as (u8), (x >> 8) as (u8);
+}
+
+fn caller() {
+    u8 lo;
+    u8 hi;
+    lo, hi := split_word(0x1234);
+}
+```
+
+Each return slot can be pinned independently at API boundaries:
+
+```
+extern fn read_pair() -> u8 in AL, u16 in DX
+    preserves(BX, CX, SI, DI, BP, DS, ES, SS);
+```
 
 For u32 return values, the binder assigns a register pair (typically
 DX:AX). Aggregates are returned via a caller-provided destination
