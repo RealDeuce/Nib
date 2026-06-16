@@ -1,19 +1,22 @@
-# V20 Instruction Reference for nibasm
+# V20 Instruction Reference
 
-This is a working instruction reference for the mnemonics accepted by
-`nibasm`. It is organized by assembler mnemonic, not by NEC's native
-manual names. NEC/V20 names are listed where they differ.
+This is a hardware instruction reference for the NEC V20 instruction
+set. It is organized by the Intel-compatible mnemonic used by `nibasm`
+where one exists; V20 instructions without an Intel spelling are listed
+under their NEC manual names. NEC/V20 names are listed where they
+differ.
 
 The source for instruction behavior is Section 12 of the NEC
-uPD70108/uPD70116 User's Manual, cross-checked against `asm.c`. V30-only
-instructions and manual mnemonics not accepted by `nibasm` are omitted.
+uPD70108/uPD70116 User's Manual. V30-only instructions are omitted.
+Assembler support notes are secondary to the hardware forms documented
+by the manual.
 
 ## Naming
 
-The NEC manual uses native V20 register and segment names. `nibasm` uses
-Intel-compatible spelling.
+The NEC manual uses native V20 register and segment names. The
+Intel-compatible spelling used by `nibasm` is shown where it differs.
 
-| Manual | nibasm | Meaning |
+| Manual | Intel / nibasm | Meaning |
 |--------|--------|---------|
 | `AW` | `AX` | accumulator word |
 | `BW` | `BX` | base word |
@@ -26,7 +29,8 @@ Intel-compatible spelling.
 | `DS1` | `ES` | extra data segment |
 | `CY` | `CF` | carry flag |
 
-`nibasm` uses Intel operand order: `dst, src`.
+Forms in this reference use Intel operand order, `dst, src`, except
+where a manual-only instruction form is quoted directly from Section 12.
 
 ## Operand Notation
 
@@ -41,6 +45,8 @@ Intel-compatible spelling.
 | `rel8`, `rel16` | relative branch displacement |
 | `ptr16` | near indirect pointer |
 | `ptr32` | far pointer, segment:offset |
+| `src-block`, `dst-block` | implicit block operand addressed through `SI`/`DI` |
+| `src-string`, `dst-string` | implicit BCD string operand addressed through `SI`/`DI` |
 
 Memory addressing supports the V20/8086 address forms using `BX`, `BP`,
 `SI`, and `DI`, with optional displacement. `BP` defaults to `SS`;
@@ -60,13 +66,13 @@ prefix syntax through the parsed memory operand.
 
 ## Prefixes
 
-| nibasm | Opcode | Meaning |
-|--------|--------|---------|
-| `lock` | `F0` | Assert bus lock for the following instruction. |
-| `rep`, `repe`, `repz` | `F3` | Repeat while `CX != 0`; string compare/scan also require `ZF=1`. |
-| `repne`, `repnz` | `F2` | Repeat while `CX != 0`; string compare/scan also require `ZF=0`. |
-| `repc` | `65` | V20 repeat while carry. |
-| `repnc` | `64` | V20 repeat while not carry. |
+| Mnemonic | NEC name | Opcode | Meaning |
+|----------|----------|--------|---------|
+| `lock` | `BUSLOCK` | `F0` | Assert bus lock for the following instruction. |
+| `rep`, `repe`, `repz` | `REP`, `REPE`, `REPZ` | `F3` | Repeat while `CX != 0`; string compare/scan also require `ZF=1`. |
+| `repne`, `repnz` | `REPNE`, `REPNZ` | `F2` | Repeat while `CX != 0`; string compare/scan also require `ZF=0`. |
+| `repc` | `REPC` | `65` | V20 repeat while carry. |
+| `repnc` | `REPNC` | `64` | V20 repeat while not carry. |
 
 ## Instruction Reference
 
@@ -91,7 +97,7 @@ Flags: `SF=u ZF=u PF=u AF=x CF=x OF=u`.
 
 ### `aad`
 
-NEC name: `CVTBD`.
+NEC name: `CVTDB`.
 
 ASCII adjust before division. Converts unpacked BCD digits in `AH:AL`
 to binary in `AL`.
@@ -101,15 +107,14 @@ Forms:
 | Form | Opcode | Bytes |
 |------|--------|-------|
 | `aad` | `D5 0A` | 2 |
-| `aad imm8` | `D5 ib` | 2 |
 
-Operation: `AL := AH * base + AL`; `AH := 0`. The default base is 10.
+Operation: `AL := AH * 10 + AL`; `AH := 0`.
 
 Flags: `SF=x ZF=x PF=x AF=u CF=u OF=u`.
 
 ### `aam`
 
-NEC name: `CVTBW`.
+NEC name: `CVTBD`.
 
 ASCII adjust after multiplication. Converts binary `AL` into unpacked
 digits in `AH:AL`.
@@ -119,9 +124,8 @@ Forms:
 | Form | Opcode | Bytes |
 |------|--------|-------|
 | `aam` | `D4 0A` | 2 |
-| `aam imm8` | `D4 ib` | 2 |
 
-Operation: `AH := AL / base`; `AL := AL % base`. The default base is 10.
+Operation: `AH := AL / 10`; `AL := AL % 10`.
 
 Flags: `SF=x ZF=x PF=x AF=u CF=u OF=u`.
 
@@ -202,6 +206,7 @@ Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
+| `add4s [ES:]dst-string, [seg:]src-string` | `0F 20` | 2 |
 | `add4s` | `0F 20` | 2 |
 
 Operation: add the packed BCD string at `DS:SI` to the packed BCD
@@ -210,6 +215,9 @@ count, from 1 to 254 decimal digits. Each byte contains two packed BCD
 digits.
 
 Implicit operands: source `DS:SI`, destination `ES:DI`, length `CL`.
+The destination string is always in `ES` (`DS1` in the NEC manual);
+segment override is prohibited. Source defaults to `DS` and may use a
+segment override.
 
 V20 timing: `7 + 19*n` clocks, where `n` is half the digit count.
 Transfers: `3*n`.
@@ -217,9 +225,6 @@ Transfers: `3*n`.
 Flags: for even `CL`, `ZF` and `CF` reflect the result; `PF=u CF=x`.
 For odd `CL`, `ZF` and `CF` may not be reliable and the high nibble of
 the highest result byte is undefined.
-
-Notes: destination is always in `ES` (`DS1` in the NEC manual). Source
-defaults to `DS` and may use a segment override.
 
 ### `and`
 
@@ -247,15 +252,13 @@ Flags: `OF=0 SF=x ZF=x AF=u PF=x CF=0`.
 
 NEC name: `EXT`.
 
-Extract bit field. `nibasm` uses `bext` because `ins` conflicts with
-Intel string input mnemonics.
+Extract bit field. `nibasm` spells the NEC `EXT` instruction as `bext`
+to avoid collision with Intel string input mnemonics.
 
 Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
-| `bext` | `0F 33 C0` | 3 |
-| `bext reg8` | `0F 33 /r` | 3 |
 | `bext reg8, reg8` | `0F 33 /r` | 3 |
 | `bext reg8, imm4` | `0F 3B /r ib` | 4 |
 
@@ -284,15 +287,13 @@ means 1 bit; 15 means 16 bits.
 
 NEC name: `INS`.
 
-Insert bit field. `nibasm` uses `bins` because `ins` conflicts with
-Intel string input mnemonics.
+Insert bit field. `nibasm` spells the NEC `INS` instruction as `bins`
+to avoid collision with Intel string input mnemonics.
 
 Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
-| `bins` | `0F 31 C0` | 3 |
-| `bins reg8` | `0F 31 /r` | 3 |
 | `bins reg8, reg8` | `0F 31 /r` | 3 |
 | `bins reg8, imm4` | `0F 39 /r ib` | 4 |
 
@@ -377,6 +378,23 @@ Operation: push return address and transfer control. Far calls also push
 
 Flags: unchanged.
 
+### `calln`
+
+NEC name: `CALLN`.
+
+Call a native-mode interrupt routine from 8080 emulation mode.
+
+Forms:
+
+| Form | Opcode | Bytes |
+|------|--------|-------|
+| `calln imm8` | `ED ED ib` | 3 |
+
+Operation: save emulation-mode `PSW`, `CS`, and `IP`, set native mode,
+and load `CS:IP` from interrupt vector `imm8`.
+
+Flags: saved on stack.
+
 ### `cbw`
 
 NEC name: `CVTBW`.
@@ -395,14 +413,16 @@ Flags: unchanged.
 
 ### `clc`, `cld`, `cli`, `cmc`
 
+NEC names: `CLR1 CY`, `CLR1 DIR`, `DI`, `NOT1 CY`.
+
 Flag control.
 
 | Form | Opcode | Operation | Flags |
 |------|--------|-----------|-------|
-| `clc` | `F8` | `CF := 0` | `CF=0` |
-| `cld` | `FC` | `DF := 0` | `DF=0` |
-| `cli` | `FA` | `IF := 0` | `IF=0` |
-| `cmc` | `F5` | `CF := !CF` | `CF=x` |
+| `clc` / `clr1 CF` | `F8` | `CF := 0` | `CF=0` |
+| `cld` / `clr1 DF` | `FC` | `DF := 0` | `DF=0` |
+| `cli` / `di` | `FA` | `IF := 0` | `IF=0` |
+| `cmc` / `not1 CF` | `F5` | `CF := !CF` | `CF=x` |
 
 Other flags are unchanged.
 
@@ -438,6 +458,7 @@ Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
+| `cmp4s [ES:]dst-string, [seg:]src-string` | `0F 26` | 2 |
 | `cmp4s` | `0F 26` | 2 |
 
 Operation: compare the packed BCD string at `ES:DI` with the packed BCD
@@ -445,6 +466,8 @@ string at `DS:SI`. The result is not stored. `CL` is the digit count,
 from 1 to 254 decimal digits.
 
 Implicit operands: source `DS:SI`, destination `ES:DI`, length `CL`.
+Source defaults to `DS` and may use a segment override. The manual also
+shows an explicit destination operand in `ES:DI`.
 
 V20 timing: `7 + 19*n` clocks, where `n` is half the digit count.
 Transfers: 2.
@@ -454,12 +477,15 @@ not be reliable.
 
 ### `cmpsb`, `cmpsw`
 
+NEC names: `CMPBK`, `CMPBKB`, `CMPBKW`.
+
 Compare string element.
 
 Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
+| `cmpbk [seg:]src-block, [ES:]dst-block` | `A6`/`A7` | 1 |
 | `cmpsb` | `A6` | 1 |
 | `cmpsw` | `A7` | 1 |
 
@@ -469,6 +495,8 @@ Operation: compare `[DS:SI] - [ES:DI]`, then update `SI` and `DI` by
 Flags: `OF=x SF=x ZF=x AF=x PF=x CF=x`.
 
 ### `cwd`
+
+NEC name: `CVTWL`.
 
 Convert word to doubleword.
 
@@ -483,6 +511,8 @@ Operation: sign-extend `AX` into `DX:AX`.
 Flags: unchanged.
 
 ### `daa`, `das`
+
+NEC names: `ADJBA`, `ADJBS`.
 
 Decimal adjust after addition/subtraction.
 
@@ -510,6 +540,8 @@ Operation: `dst := dst - 1`.
 Flags: `OF=x SF=x ZF=x AF=x PF=x CF=-`.
 
 ### `div`, `idiv`
+
+NEC names: `DIVU`, `DIV`.
 
 Unsigned and signed divide.
 
@@ -541,6 +573,29 @@ links, then subtracts the frame size from `SP`. `leave` performs
 
 Flags: unchanged.
 
+### `fp01`, `fp02`
+
+NEC names: `FP01`, `FP02`.
+
+Floating-point escape instructions for an external floating-point
+processor.
+
+Forms:
+
+| Form | Opcode | Bytes |
+|------|--------|-------|
+| `fp01 fp-op` | `D8-DF /r` with `mod=11` | 2 |
+| `fp01 fp-op, mem` | `D8-DF /r` | 2-4 |
+| `fp02 fp-op` | `66/67 /r` with `mod=11` | 2 |
+| `fp02 fp-op, mem` | `66/67 /r` | 2-4 |
+
+Operation: delegate the encoded floating-point operation to an
+externally connected floating-point arithmetic chip. Memory forms also
+perform the effective-address calculation and memory read cycle needed
+by the external processor.
+
+Flags: unchanged.
+
 ### `hlt`
 
 NEC name: `HALT`.
@@ -556,7 +611,25 @@ event resumes the processor.
 
 Flags: unchanged.
 
+### `poll`
+
+NEC name: `POLL`.
+
+Poll and wait.
+
+Forms:
+
+| Form | Opcode | Bytes |
+|------|--------|-------|
+| `poll` | `9B` | 1 |
+
+Operation: keep the CPU idle until the `POLL` pin becomes active low.
+
+Flags: unchanged.
+
 ### `imul`, `mul`
+
+NEC names: `MUL`, `MULU`.
 
 Signed and unsigned multiply.
 
@@ -611,12 +684,16 @@ Flags: `OF=x SF=x ZF=x AF=x PF=x CF=-`.
 
 ### `insb`, `insw`, `outsb`, `outsw`
 
+NEC names: `INM`, `OUTM`.
+
 String port I/O.
 
 | Form | Opcode | Operation |
 |------|--------|-----------|
+| `inm dst-block, DX` | `6C`/`6D` | `[ES:DI] := port[DX]`; update `DI` |
 | `insb` | `6C` | `[ES:DI] := port[DX]`; update `DI` by 1 |
 | `insw` | `6D` | `[ES:DI] := port[DX]`; update `DI` by 2 |
+| `outm DX, src-block` | `6E`/`6F` | `port[DX] := [DS:SI]`; update `SI` |
 | `outsb` | `6E` | `port[DX] := [DS:SI]`; update `SI` by 1 |
 | `outsw` | `6F` | `port[DX] := [DS:SI]`; update `SI` by 2 |
 
@@ -626,14 +703,16 @@ Flags: unchanged.
 
 ### `int`, `into`, `iret`
 
+NEC names: `BRK`, `BRKV`, `RETI`.
+
 Interrupt control.
 
 | Form | Opcode | Operation |
 |------|--------|-----------|
-| `int 3` | `CC` | one-byte breakpoint interrupt |
-| `int imm8` | `CD ib` | software interrupt |
-| `into` | `CE` | interrupt 4 if `OF=1` |
-| `iret` | `CF` | return from interrupt |
+| `int 3` / `brk 3` | `CC` | one-byte breakpoint interrupt |
+| `int imm8` / `brk imm8` | `CD ib` | software interrupt |
+| `into` / `brkv` | `CE` | interrupt 4 if `OF=1` |
+| `iret` / `reti` | `CF` | return from interrupt |
 
 `int` pushes `FLAGS`, `CS`, and `IP`, clears interrupt/trap state as the
 processor enters the handler, then loads `CS:IP` from the vector table.
@@ -643,33 +722,32 @@ Flags: `iret` restores flags; `int` saves flags and enters the handler.
 
 ### `jcc`
 
-Conditional branch. `nibasm` automatically relaxes out-of-range
-conditional branches by emitting an inverted short branch over a near
-`jmp`.
+Conditional branch.
 
-| nibasm | Condition |
-|--------|-----------|
-| `jo` / `jno` | overflow / not overflow |
-| `jb`, `jc`, `jnae` / `jnb`, `jnc`, `jae` | below/carry / not below |
-| `jz`, `je` / `jnz`, `jne` | zero/equal / not zero |
-| `jbe`, `jna` / `ja`, `jnbe` | below-or-equal / above |
-| `js` / `jns` | sign / not sign |
-| `jp`, `jpe` / `jnp`, `jpo` | parity / not parity |
-| `jl`, `jnge` / `jge`, `jnl` | signed less / greater-or-equal |
-| `jle`, `jng` / `jg`, `jnle` | signed less-or-equal / greater |
-| `jcxz` | `CX == 0` |
+| Intel / nibasm | NEC name | Condition |
+|----------------|----------|-----------|
+| `jo` / `jno` | `BV` / `BNV` | overflow / not overflow |
+| `jb`, `jc`, `jnae` / `jnb`, `jnc`, `jae` | `BC`, `BL` / `BNC`, `BNL` | below/carry / not below |
+| `jz`, `je` / `jnz`, `jne` | `BZ`, `BE` / `BNZ`, `BNE` | zero/equal / not zero |
+| `jbe`, `jna` / `ja`, `jnbe` | `BNH` / `BH` | below-or-equal / above |
+| `js` / `jns` | `BN` / `BP` | sign / not sign |
+| `jp`, `jpe` / `jnp`, `jpo` | `BPE` / `BPO` | parity even / parity odd |
+| `jl`, `jnge` / `jge`, `jnl` | `BLT` / `BGE` | signed less / greater-or-equal |
+| `jle`, `jng` / `jg`, `jnle` | `BLE` / `BGT` | signed less-or-equal / greater |
+| `jcxz` | `BCWZ` | `CX == 0` |
 
 Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
 | `jcc rel8` | `70+cc rb` | 2 |
-| relaxed `jcc` | inverted `jcc` + `jmp rel16` | 5 |
 | `jcxz rel8` | `E3 rb` | 2 |
 
 Flags: unchanged.
 
 ### `jmp`
+
+NEC name: `BR`.
 
 Jump.
 
@@ -685,6 +763,8 @@ Flags: unchanged.
 
 ### `lahf`, `sahf`
 
+NEC names: `MOV AH,PSW`, `MOV PSW,AH`.
+
 Load/store low flags through `AH`.
 
 | Form | Opcode | Operation |
@@ -695,6 +775,8 @@ Load/store low flags through `AH`.
 `sahf` affects `SF ZF AF PF CF`; `OF` is unchanged.
 
 ### `lds`, `les`, `lea`
+
+NEC names: `MOV DS0,reg16,mem32`, `MOV DS1,reg16,mem32`, `LDEA`.
 
 Address loading.
 
@@ -708,10 +790,13 @@ Flags: unchanged.
 
 ### `lodsb`, `lodsw`
 
+NEC names: `LDM`, `LDMB`, `LDMW`.
+
 Load string element.
 
 | Form | Opcode | Operation |
 |------|--------|-----------|
+| `ldm [seg:]src-block` | `AC`/`AD` | `AL`/`AX := [DS:SI]`; update `SI` |
 | `lodsb` | `AC` | `AL := [DS:SI]`; update `SI` by 1 |
 | `lodsw` | `AD` | `AX := [DS:SI]`; update `SI` by 2 |
 
@@ -719,13 +804,15 @@ Direction is controlled by `DF`. Flags are unchanged.
 
 ### `loop`, `loope`, `loopz`, `loopne`, `loopnz`
 
+NEC names: `DBNZ`, `DBNZE`, `DBNZNE`.
+
 Counted branch.
 
 | Form | Opcode | Condition after `CX := CX - 1` |
 |------|--------|--------------------------------|
-| `loop rel8` | `E2 rb` | `CX != 0` |
-| `loope rel8`, `loopz rel8` | `E1 rb` | `CX != 0 && ZF=1` |
-| `loopne rel8`, `loopnz rel8` | `E0 rb` | `CX != 0 && ZF=0` |
+| `loop rel8` / `dbnz rel8` | `E2 rb` | `CX != 0` |
+| `loope rel8`, `loopz rel8` / `dbnze rel8` | `E1 rb` | `CX != 0 && ZF=1` |
+| `loopne rel8`, `loopnz rel8` / `dbnzne rel8` | `E0 rb` | `CX != 0 && ZF=0` |
 
 Flags: unchanged.
 
@@ -756,14 +843,19 @@ Flags: unchanged.
 
 ### `movsb`, `movsw`
 
+NEC names: `MOVBK`, `MOVBKB`, `MOVBKW`.
+
 Move string element.
 
 | Form | Opcode | Operation |
 |------|--------|-----------|
+| `movbk [ES:]dst-block, [seg:]src-block` | `A4`/`A5` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` |
 | `movsb` | `A4` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` by 1 |
 | `movsw` | `A5` | `[ES:DI] := [DS:SI]`; update `SI`, `DI` by 2 |
 
 Direction is controlled by `DF`. Repeat prefixes may be used.
+Destination is always in `ES`; source defaults to `DS` and may use a
+segment override.
 
 Flags: unchanged.
 
@@ -870,6 +962,8 @@ Flags: `OF=0 SF=x ZF=x AF=u PF=x CF=0`.
 
 ### `pop`, `popa`, `popf`
 
+NEC names: `POP`, `POPR`, `POP PSW`.
+
 Pop from stack.
 
 | Form | Opcode | Operation |
@@ -877,12 +971,14 @@ Pop from stack.
 | `pop reg16` | `58+rw` | pop word into register |
 | `pop r/m16` | `8F /0` | pop word into memory/register |
 | `pop sreg` | `07+sr*8` | pop word into segment register |
-| `popa` | `61` | pop `DI SI BP`, discard saved `SP`, pop `BX DX CX AX` |
-| `popf` | `9D` | pop flags |
+| `popa` / `pop R` | `61` | pop `DI SI BP`, discard saved `SP`, pop `BX DX CX AX` |
+| `popf` / `pop PSW` | `9D` | pop flags |
 
 Flags: only `popf` restores flags.
 
 ### `push`, `pusha`, `pushf`
+
+NEC names: `PUSH`, `PUSHR`, `PUSH PSW`.
 
 Push to stack.
 
@@ -893,8 +989,8 @@ Push to stack.
 | `push sreg` | `06+sr*8` | push segment register |
 | `push imm16` | `68 iw` | push word immediate |
 | `push imm8` | `6A ib` | push sign-extended byte immediate |
-| `pusha` | `60` | push `AX CX DX BX` original `SP`, `BP SI DI` |
-| `pushf` | `9C` | push flags |
+| `pusha` / `push R` | `60` | push `AX CX DX BX` original `SP`, `BP SI DI` |
+| `pushf` / `push PSW` | `9C` | push flags |
 
 Flags: unchanged.
 
@@ -935,6 +1031,23 @@ Return from procedure.
 
 Flags: unchanged.
 
+### `retem`
+
+NEC name: `RETEM`.
+
+Return from 8080 emulation mode.
+
+Forms:
+
+| Form | Opcode | Bytes |
+|------|--------|-------|
+| `retem` | `ED FD` | 2 |
+
+Operation: restore `IP`, `CS`, and `PSW` from the stack frame saved by
+`brkem`, advance `SP` by 6, and write-disable the mode flag.
+
+Flags: restored from stack.
+
 ### `rol4`, `ror4`
 
 V20 nibble rotate through `AL`.
@@ -943,15 +1056,16 @@ Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
-| `rol4` | `0F 28` | 2 |
-| `ror4` | `0F 2A` | 2 |
+| `rol4 reg8` | `0F 28 C0+reg` | 3 |
+| `rol4 mem8` | `0F 28 /0` | 3-5 |
+| `ror4 reg8` | `0F 2A C0+reg` | 3 |
+| `ror4 mem8` | `0F 2A /0` | 3-5 |
 
-Operation: rotate nibbles between `AL` and the byte addressed by
-`DS:SI`.
+Operation: rotate nibbles between the low nibble of `AL` and the byte
+operand. The upper nibble of `AL` is undefined after the operation.
 
-`rol4` rotates left through `AL`; `ror4` rotates right through `AL`.
-
-Implicit operands: `AL`, memory byte at `DS:SI`.
+`rol4` rotates the operand left through `AL`; `ror4` rotates the operand
+right through `AL`.
 
 Flags: unchanged.
 
@@ -976,23 +1090,6 @@ for `shl`.
 
 Flags: `SF=x ZF=x PF=x CF=x`. `AF=u`. For a count of 1, `OF=x`; for
 other nonzero counts, `OF=u`.
-
-### `salc`
-
-Set `AL` from carry.
-
-Forms:
-
-| Form | Opcode | Bytes |
-|------|--------|-------|
-| `salc` | `D6` | 1 |
-
-Operation: `AL := 0xFF` if `CF=1`, otherwise `AL := 0x00`.
-
-Flags: unchanged.
-
-Notes: accepted by `nibasm`; this opcode is not listed in the NEC
-Section 12 instruction index.
 
 ### `sbb`
 
@@ -1020,10 +1117,13 @@ Flags: `OF=x SF=x ZF=x AF=x PF=x CF=x`.
 
 ### `scasb`, `scasw`
 
+NEC names: `CMPM`, `CMPMB`, `CMPMW`.
+
 Scan string element.
 
 | Form | Opcode | Operation |
 |------|--------|-----------|
+| `cmpm [ES:]dst-block` | `AE`/`AF` | compare `AL`/`AX - [ES:DI]`; update `DI` |
 | `scasb` | `AE` | compare `AL - [ES:DI]`; update `DI` by 1 |
 | `scasw` | `AF` | compare `AX - [ES:DI]`; update `DI` by 2 |
 
@@ -1033,22 +1133,27 @@ Flags: `OF=x SF=x ZF=x AF=x PF=x CF=x`.
 
 ### `stc`, `std`, `sti`
 
+NEC names: `SET1 CY`, `SET1 DIR`, `EI`.
+
 Flag set instructions.
 
 | Form | Opcode | Operation |
 |------|--------|-----------|
-| `stc` | `F9` | `CF := 1` |
-| `std` | `FD` | `DF := 1` |
-| `sti` | `FB` | `IF := 1` |
+| `stc` / `set1 CF` | `F9` | `CF := 1` |
+| `std` / `set1 DF` | `FD` | `DF := 1` |
+| `sti` / `ei` | `FB` | `IF := 1` |
 
 Other flags are unchanged.
 
 ### `stosb`, `stosw`
 
+NEC names: `STM`, `STMB`, `STMW`.
+
 Store string element.
 
 | Form | Opcode | Operation |
 |------|--------|-----------|
+| `stm [ES:]dst-block` | `AA`/`AB` | `[ES:DI] := AL`/`AX`; update `DI` |
 | `stosb` | `AA` | `[ES:DI] := AL`; update `DI` by 1 |
 | `stosw` | `AB` | `[ES:DI] := AX`; update `DI` by 2 |
 
@@ -1088,6 +1193,7 @@ Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
+| `sub4s [ES:]dst-string, [seg:]src-string` | `0F 22` | 2 |
 | `sub4s` | `0F 22` | 2 |
 
 Operation: subtract the packed BCD string at `DS:SI` from the packed BCD
@@ -1095,6 +1201,9 @@ string at `ES:DI`, storing the result at `ES:DI`. `CL` is the digit
 count, from 1 to 254 decimal digits.
 
 Implicit operands: source `DS:SI`, destination `ES:DI`, length `CL`.
+The destination string is always in `ES` (`DS1` in the NEC manual);
+segment override is prohibited. Source defaults to `DS` and may use a
+segment override.
 
 V20 timing: `7 + 19*n` clocks, where `n` is half the digit count.
 Transfers: `3*n`.
@@ -1149,6 +1258,7 @@ Forms:
 
 | Form | Opcode | Bytes |
 |------|--------|-------|
+| `trans src-table` | `D7` | 1 |
 | `xlat` | `D7` | 1 |
 
 Operation: `AL := [DS:BX + zero_extend(AL)]`.
@@ -1177,13 +1287,14 @@ Operation: `dst := dst ^ src`.
 
 Flags: `OF=0 SF=x ZF=x AF=u PF=x CF=0`.
 
-## Manual Mnemonics Not Used by nibasm
+## NEC Mnemonic Cross-Reference
 
-These Section 12 names are intentionally not the primary spelling in
-this reference because `nibasm` uses Intel-compatible names:
+These Section 12 names map to the Intel-compatible spelling used in the
+instruction entries above where a conventional Intel spelling exists.
+Manual-only V20 names are listed as themselves.
 
-| Manual | Use in nibasm |
-|--------|---------------|
+| NEC manual | Reference spelling |
+|------------|--------------------|
 | `ADDC` | `adc` |
 | `ADJ4A` | `aaa` |
 | `ADJ4S` | `aas` |
@@ -1191,18 +1302,79 @@ this reference because `nibasm` uses Intel-compatible names:
 | `ADJBS` | `das` |
 | `BR` | `jmp` |
 | `BRK` | `int` |
+| `BRKEM` | `brkem` |
+| `BRKV` | `into` |
+| `BC`, `BL` | `jb`, `jc` |
+| `BNC`, `BNL` | `jnb`, `jnc`, `jae` |
+| `BE`, `BZ` | `je`, `jz` |
+| `BNE`, `BNZ` | `jne`, `jnz` |
+| `BH` | `ja`, `jnbe` |
+| `BNH` | `jbe`, `jna` |
+| `BN` | `js` |
+| `BP` | `jns` |
+| `BPE` | `jpe`, `jp` |
+| `BPO` | `jpo`, `jnp` |
+| `BV` | `jo` |
+| `BNV` | `jno` |
+| `BLT` | `jl`, `jnge` |
+| `BGE` | `jge`, `jnl` |
+| `BLE` | `jle`, `jng` |
+| `BGT` | `jg`, `jnle` |
+| `BCWZ` | `jcxz` |
+| `BUSLOCK` | `lock` |
+| `CALLN` | `calln` |
 | `CHKIND` | `bound` |
-| `CVTBD` | `aad` |
-| `CVTBW` | `aam` or `cbw`, depending on opcode |
+| `CLR1 CY` | `clc` |
+| `CLR1 DIR` | `cld` |
+| `CMPBK`, `CMPBKB`, `CMPBKW` | `cmpsb`, `cmpsw` |
+| `CMPM`, `CMPMB`, `CMPMW` | `scasb`, `scasw` |
+| `CVTBD` | `aam` |
+| `CVTDB` | `aad` |
+| `CVTBW` | `cbw` |
 | `CVTWL` | `cwd` |
+| `DI` | `cli` |
+| `DBNZ` | `loop` |
+| `DBNZE` | `loope`, `loopz` |
+| `DBNZNE` | `loopne`, `loopnz` |
+| `DIV` | `idiv` |
+| `DIVU` | `div` |
 | `DISPOSE` | `leave` |
+| `DS0:` | `DS:` |
+| `DS1:` | `ES:` |
+| `EI` | `sti` |
 | `EXT` | `bext` |
+| `FP01` | `fp01` |
+| `FP02` | `fp02` |
 | `HALT` | `hlt` |
+| `INM` | `insb`, `insw` |
 | `INS` | `bins` |
+| `LDEA` | `lea` |
+| `LDM`, `LDMB`, `LDMW` | `lodsb`, `lodsw` |
+| `MOV AH,PSW` | `lahf` |
+| `MOV PSW,AH` | `sahf` |
+| `MOV DS0,reg16,mem32` | `lds` |
+| `MOV DS1,reg16,mem32` | `les` |
+| `MOVBK`, `MOVBKB`, `MOVBKW` | `movsb`, `movsw` |
+| `MUL` | `imul` |
+| `MULU` | `mul` |
+| `NOT1 CY` | `cmc` |
+| `OUTM` | `outsb`, `outsw` |
+| `POLL` | `poll` |
 | `PREPARE` | `enter` |
+| `PS:` | `CS:` |
+| `POP PSW` | `popf` |
+| `POPR` | `popa` |
+| `PUSH PSW` | `pushf` |
+| `PUSHR` | `pusha` |
+| `RETEM` | `retem` |
+| `RET1`, `RETI` | `iret` |
+| `ROLC` | `rcl` |
+| `RORC` | `rcr` |
+| `SET1 CY` | `stc` |
+| `SET1 DIR` | `std` |
+| `SHRA` | `sar` |
+| `SS:` | `SS:` |
+| `STM`, `STMB`, `STMW` | `stosb`, `stosw` |
 | `SUBC` | `sbb` |
+| `TRANS` | `xlat` |
 | `XCH` | `xchg` |
-
-Other V20/V30 manual entries such as native/emulation bridge helpers,
-block move aliases, and floating-point escape instructions are omitted
-unless `asm.c` accepts the mnemonic directly.
