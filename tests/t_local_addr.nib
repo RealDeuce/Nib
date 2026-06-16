@@ -1,0 +1,16 @@
+// Test: address-of for stack locals and local arrays.
+
+fn sink(ptr: far32 in ES:SI, len: u16 in CX) {
+    nop();
+}
+
+fn send_key(key: u8) -> u16 {
+    u8[1] buf;
+    buf[0] := key;
+    u16 near = &buf;
+    sink(@buf, 1);
+
+    const u8 marker = 0x55;
+    u16 marker_addr = &marker;
+    return near + marker_addr;
+}

@@ -116,6 +116,7 @@ typedef enum {
     IR_BREAK,       /* break */
     IR_CONTINUE,    /* continue */
     IR_FAR_LIT,     /* far.lit %d, seg, off — store far literal on stack */
+    IR_LEA,         /* lea %dst, %local — address of a stack local */
     IR_FRAME_ENTER, /* frame_enter — push bp, mov bp, sp, sub sp, N */
     IR_FRAME_LEAVE, /* frame_leave — mov sp, bp, pop bp */
     IR_ASM,         /* asm block (opaque) */
@@ -156,6 +157,9 @@ typedef struct {
     int     use_count;         /* number of instructions referencing this vreg */
     bool    in_loop;           /* true if live range spans a loop back-edge */
     bool    is_cs_ref;         /* true if this vreg points to constant pool (CS segment) */
+    bool    is_local_slot;     /* true if this vreg names a source stack local */
+    int     local_size;        /* bytes reserved for the source local */
+    int     local_offset;      /* positive offset within the local area */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
     /* Liveness */
@@ -262,7 +266,8 @@ typedef struct {
     bool        needs_frame;    /* BP reserved for frame pointer */
     int         nspill_slots;
     int         ncl_fixups;     /* CL routing fixups (push/pop CX) */
-    int         frame_size;     /* total bytes for spills */
+    int         local_size;     /* total bytes for source stack locals */
+    int         frame_size;     /* total bytes for spills and source locals */
 
     /* Callee-saved registers */
     int         fn_preserves[NUM_PREGS]; /* list of PREG_* to save/restore */
@@ -681,6 +686,23 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             continue;
         }
 
+        if (strncmp(p, ".local", 6) == 0) {
+            p += 6;
+            int v = parse_vreg(p, &p);
+            skip_comma(&p);
+            p = skip_ws(p);
+            int sz = (int)strtol(p, (char **)&p, 0);
+            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            if (v >= 0 && v < MAX_VREGS) {
+                sz = (sz + 1) & ~1; /* keep SP word-aligned */
+                fn->local_size += sz;
+                fn->vregs[v].is_local_slot = true;
+                fn->vregs[v].local_size = sz;
+                fn->vregs[v].local_offset = fn->local_size;
+            }
+            continue;
+        }
+
         /* Legacy annotations — kept for backward compatibility */
         if (strncmp(p, ".byte", 5) == 0) {
             p += 5;
@@ -811,6 +833,12 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 ins->has_imm = true;
                 ins->imm = (int)strtol(p, (char **)&p, 0);
             }
+        }
+        else if (strcmp(opname, "lea") == 0) {
+            ins->op = IR_LEA;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);
         }
         else if (strcmp(opname, "ret") == 0) {
             ins->op = IR_RET;
@@ -1696,6 +1724,7 @@ static void compute_liveness(func_t *fn) {
         for (int i = bb->start; i < bb->end; i++) {
             ir_insn_t *ins = &fn->insns[i];
             if (ins->src1 >= 0 && ins->src1 < fn->nvregs &&
+                ins->op != IR_LEA &&
                 i > fn->vregs[ins->src1].last_use)
                 fn->vregs[ins->src1].last_use = i;
             if (ins->src2 >= 0 && ins->src2 < fn->nvregs &&
@@ -1730,7 +1759,8 @@ static void compute_liveness(func_t *fn) {
     /* use_count: count all references (reads + re-definitions) */
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
-        if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+        if (ins->src1 >= 0 && ins->src1 < fn->nvregs &&
+            ins->op != IR_LEA)
             fn->vregs[ins->src1].use_count++;
         if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
             fn->vregs[ins->src2].use_count++;
@@ -1890,7 +1920,7 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
          * Only counts as a use if not already defined in this block. */
         int use_vregs[32];
         int nuses = 0;
-        if (ins->src1 >= 0) use_vregs[nuses++] = ins->src1;
+        if (ins->src1 >= 0 && ins->op != IR_LEA) use_vregs[nuses++] = ins->src1;
         if (ins->src2 >= 0) use_vregs[nuses++] = ins->src2;
         for (int j = 0; j < 8; j++)
             if (ins->extra_args[j] >= 0) use_vregs[nuses++] = ins->extra_args[j];
@@ -2025,7 +2055,8 @@ static void build_igraph(func_t *fn) {
              * (uses added after def). */
             bool is_copy = (ins->op == IR_MOV && !ins->has_imm);
             if (!is_copy) {
-                if (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+                if (ins->src1 >= 0 && ins->src1 < fn->nvregs &&
+                    ins->op != IR_LEA)
                     vset_set(live, ins->src1);
                 if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
                     vset_set(live, ins->src2);
@@ -2262,6 +2293,7 @@ static void allocate_registers(func_t *fn, bool bp_available) {
      * the vreg adapts to the preference's register class. But
      * addressing constraints must still be respected. */
     for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].is_local_slot) continue;
         if (fn->vregs[i].prefer == PREG_NONE) continue;
         int preg = fn->vregs[i].prefer;
         /* Segment preference must match segment vreg */
@@ -2308,6 +2340,7 @@ static void allocate_registers(func_t *fn, bool bp_available) {
 
     /* Mark already-handled vregs */
     for (int i = 0; i < nv; i++) {
+        if (fn->vregs[i].is_local_slot) removed[i] = true;
         if (fn->vregs[i].assigned != PREG_NONE) removed[i] = true;
         if (fn->vregs[i].def_pos < 0 && fn->vregs[i].last_use < 0)
             removed[i] = true;
@@ -2946,6 +2979,12 @@ static const char *vreg_asm(func_t *fn, int v) {
     return b;
 }
 
+static int local_bp_offset(func_t *fn, int v) {
+    if (v < 0 || v >= fn->nvregs || !fn->vregs[v].is_local_slot)
+        return 0;
+    return -(fn->nspill_slots * 2 + fn->vregs[v].local_offset);
+}
+
 /* Like vreg_asm but with size prefix for spilled memory operands.
  * Use when the instruction has no register operand to disambiguate size
  * (e.g., shl [BP-N], imm or cmp [BP-N], imm). */
@@ -3529,6 +3568,18 @@ static void emit_function(func_t *fn) {
                 emit_mov(fn, ins->dst, ins->src1);
             }
             break;
+
+        case IR_LEA: {
+            int off = local_bp_offset(fn, ins->src1);
+            if (is_spilled(fn, ins->dst)) {
+                fprintf(out_asm, "    lea AX, [BP%+d]\n", off);
+                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+            } else {
+                fprintf(out_asm, "    lea %s, [BP%+d]\n",
+                        vreg_asm(fn, ins->dst), off);
+            }
+            break;
+        }
 
         case IR_ALU:
             emit_alu(fn, ins, i);
@@ -4646,7 +4697,13 @@ int main(int argc, char **argv) {
          * If any vreg's degree exceeds its pool size, spills are likely
          * and we should reserve BP for the frame pointer upfront. */
         bool bp_available = true;
+        if (fn->local_size > 0) {
+            bp_available = false;
+            fn->needs_frame = true;
+        }
         for (int v = 0; v < fn->nvregs; v++) {
+            if (fn->vregs[v].is_local_slot)
+                continue;
             if (fn->vregs[v].def_pos < 0 && fn->vregs[v].last_use < 0)
                 continue;
             int pool[16];
@@ -4670,7 +4727,7 @@ int main(int argc, char **argv) {
             fn->nspill_slots = 0;
             allocate_registers(fn, false);
         }
-        fn->frame_size = fn->nspill_slots * 2;
+        fn->frame_size = fn->nspill_slots * 2 + fn->local_size;
 
         /* Count CL fixups: shift/rotate ops where count didn't get CL */
         fn->ncl_fixups = 0;

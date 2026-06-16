@@ -319,6 +319,21 @@ if [ -f "$TEST_TMPDIR"/t_interrupt_call_save.asm ]; then
     fi
 fi
 
+# Address-taken locals must live in the frame, and @local must pass SS:off.
+if [ -f "$TEST_TMPDIR"/t_local_addr.asm ]; then
+    local_window=$(sed -n '/t_local_addr_send_key:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_local_addr.asm)
+    if printf "%s\n" "$local_window" | grep -q 'sub sp, 4' &&
+       printf "%s\n" "$local_window" | grep -q 'lea .* \[BP-2\]' &&
+       printf "%s\n" "$local_window" | grep -q 'mov .* SS' &&
+       printf "%s\n" "$local_window" | grep -q 'mov ES,' &&
+       printf "%s\n" "$local_window" | grep -q 'call t_local_addr_sink' &&
+       printf "%s\n" "$local_window" | grep -q 'lea .* \[BP-4\]'; then
+        pass "local-addr: stack locals addressable with & and @"
+    else
+        fail "local-addr" "stack local address materialization missing"
+    fi
+fi
+
 # Indirect calls must save live registers not preserved by the extern
 # descriptor.
 if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then

@@ -35,6 +35,8 @@ typedef struct symbol {
     bool        has_at;         /* global with at() placement */
     int         at_seg;
     int         at_off;
+    bool        is_stack_local; /* source local stored in this function frame */
+    int         stack_size;
 } symbol_t;
 
 typedef struct scope {
@@ -100,6 +102,10 @@ typedef struct {
     /* Interrupt handler names (far32 constants, not callable) */
     char isr_names[64][64];
     int  nisr;
+
+    /* Local names whose address is taken in the current function. */
+    char addr_taken[256][64];
+    int  naddr_taken;
 } compiler_t;
 
 static compiler_t C;
@@ -154,6 +160,8 @@ static symbol_t *sym_add(const char *name, type_t *type, bool is_global) {
     sym->is_cs_data = false;
     sym->is_pinned = false;
     sym->pinned_reg = REG_NONE;
+    sym->is_stack_local = false;
+    sym->stack_size = 0;
     return sym;
 }
 
@@ -172,6 +180,21 @@ static symbol_t *sym_add_pinned(type_t *type, int reg, reg_class_t rc) {
     sym->pinned_reg = reg;
     sym->pin_class = rc;
     return sym;
+}
+
+static bool addr_taken_contains(const char *name) {
+    for (int i = 0; i < C.naddr_taken; i++)
+        if (strcmp(C.addr_taken[i], name) == 0)
+            return true;
+    return false;
+}
+
+static void addr_taken_add(const char *name) {
+    if (!name || addr_taken_contains(name) || C.naddr_taken >= 256)
+        return;
+    strncpy(C.addr_taken[C.naddr_taken], name, 63);
+    C.addr_taken[C.naddr_taken][63] = '\0';
+    C.naddr_taken++;
 }
 
 /* ---- Struct lookup ---- */
@@ -321,6 +344,9 @@ static const char *reg_name_str(int id, reg_class_t rc) {
 
 /* ---- Type size ---- */
 
+static bool type_is_aggregate(type_t *t);
+static bool type_is_integer(type_t *t);
+
 static int type_size(type_t *t) {
     if (!t) return 0;
     switch (t->kind) {
@@ -336,6 +362,12 @@ static int type_size(type_t *t) {
     case TYPE_VOID:     return 0;
     }
     return 0;
+}
+
+static bool should_stack_allocate_local(const char *name, type_t *type) {
+    if (!name || !type)
+        return false;
+    return addr_taken_contains(name);
 }
 
 static const char *type_str(type_t *t) {
@@ -601,6 +633,97 @@ static void resolve_constants_stmt(stmt_t *s) {
     }
 }
 
+static void scan_addr_taken_expr(expr_t *e);
+
+static void scan_addr_taken_stmt(stmt_t *s) {
+    for (; s; s = s->next) {
+        switch (s->kind) {
+        case STMT_VARDECL:
+            scan_addr_taken_expr(s->u.vardecl.init);
+            break;
+        case STMT_ASSIGN:
+        case STMT_TOGGLE_ASSIGN:
+            scan_addr_taken_expr(s->u.assign.target);
+            scan_addr_taken_expr(s->u.assign.value);
+            break;
+        case STMT_EXPR:
+            scan_addr_taken_expr(s->u.expr);
+            break;
+        case STMT_IF:
+            scan_addr_taken_expr(s->u.if_stmt.cond);
+            scan_addr_taken_stmt(s->u.if_stmt.then_body);
+            scan_addr_taken_stmt(s->u.if_stmt.else_body);
+            break;
+        case STMT_WHILE:
+            scan_addr_taken_expr(s->u.while_stmt.cond);
+            scan_addr_taken_stmt(s->u.while_stmt.body);
+            break;
+        case STMT_FOR:
+            scan_addr_taken_expr(s->u.for_stmt.start);
+            scan_addr_taken_stmt(s->u.for_stmt.body);
+            break;
+        case STMT_RETURN:
+            scan_addr_taken_expr(s->u.ret_expr);
+            break;
+        case STMT_TAILCALL:
+            scan_addr_taken_expr(s->u.tailcall_expr);
+            break;
+        case STMT_CONST:
+            scan_addr_taken_expr(s->u.konst.init);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static void scan_addr_taken_expr(expr_t *e) {
+    for (; e; e = e->next) {
+        switch (e->kind) {
+        case EXPR_BINOP:
+            scan_addr_taken_expr(e->u.binop.left);
+            scan_addr_taken_expr(e->u.binop.right);
+            break;
+        case EXPR_UNOP:
+            if ((e->u.unop.op == NIB_ADDR ||
+                 e->u.unop.op == NIB_FAR_ADDR) &&
+                e->u.unop.operand &&
+                e->u.unop.operand->kind == EXPR_IDENT)
+                addr_taken_add(e->u.unop.operand->u.ident);
+            scan_addr_taken_expr(e->u.unop.operand);
+            break;
+        case EXPR_CALL:
+            scan_addr_taken_expr(e->u.call.func);
+            scan_addr_taken_expr(e->u.call.args);
+            break;
+        case EXPR_INDEX:
+        case EXPR_CHECKED_INDEX:
+            scan_addr_taken_expr(e->u.index.array);
+            scan_addr_taken_expr(e->u.index.index);
+            break;
+        case EXPR_FIELD:
+        case EXPR_RAW_FIELD:
+            scan_addr_taken_expr(e->u.field.object);
+            break;
+        case EXPR_CAST:
+            scan_addr_taken_expr(e->u.cast.operand);
+            break;
+        case EXPR_PAREN:
+            scan_addr_taken_expr(e->u.unop.operand);
+            break;
+        case EXPR_ARRAY_INIT:
+            scan_addr_taken_expr(e->u.array_init.elements);
+            break;
+        case EXPR_INDIRECT_CALL:
+            scan_addr_taken_expr(e->u.indirect_call.addr);
+            scan_addr_taken_expr(e->u.indirect_call.args);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 /* Emit a vreg reference: %N or pinned register name */
 static int alloc_vreg(void) {
     return C.next_vreg++;
@@ -625,6 +748,39 @@ static typed_vreg_t TV(int vreg, type_t *type) {
 static typed_vreg_t TV_FAR(int off_vreg, int seg_vreg) {
     typed_vreg_t tv = { off_vreg, seg_vreg, mk_type(TYPE_FAR) };
     return tv;
+}
+
+static int emit_stack_addr(symbol_t *sym) {
+    int dst = alloc_vreg();
+    fprintf(C.nir, "    lea %%%d, %%%d\n", dst, sym->vreg);
+    return dst;
+}
+
+static typed_vreg_t emit_stack_local_value(symbol_t *sym, int line) {
+    int addr = emit_stack_addr(sym);
+    if (type_is_aggregate(sym->type))
+        return TV(addr, sym->type);
+
+    if (!sym->type || !type_is_integer(sym->type)) {
+        cerr(line, "cannot load stack local '%s' of type %s",
+             sym->name, type_str(sym->type));
+        return TV(addr, sym->type);
+    }
+
+    int dst = alloc_vreg();
+    const char *op = (sym->type->kind == TYPE_U8) ? "loadb" : "load";
+    fprintf(C.nir, "    %s %%%d, %%%d\n", op, dst, addr);
+    return TV(dst, sym->type);
+}
+
+static typed_vreg_t emit_stack_far_addr(symbol_t *sym) {
+    int off = emit_stack_addr(sym);
+    int seg_tmp = alloc_vreg();
+    int seg = alloc_vreg();
+    fprintf(C.nir, "    mov %%%d, SS\n", seg_tmp);
+    fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+    fprintf(C.nir, "    mov %%%d, %%%d\n", seg, seg_tmp);
+    return TV_FAR(off, seg);
 }
 
 static typed_vreg_t emit_expr_typed(expr_t *e) {
@@ -703,6 +859,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
         if (sym->vreg_seg >= 0)
             return TV_FAR(sym->vreg, sym->vreg_seg);
+        if (sym->is_stack_local)
+            return emit_stack_local_value(sym, e->line);
         return TV(sym->vreg, sym->type);
     }
     case EXPR_REG: {
@@ -827,6 +985,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (e->u.unop.op == NIB_FAR_ADDR &&
             e->u.unop.operand->kind == EXPR_IDENT) {
             symbol_t *sym = sym_lookup(e->u.unop.operand->u.ident);
+            if (sym && sym->is_stack_local)
+                return emit_stack_far_addr(sym);
             if (sym && sym->is_global) {
                 int seg_tmp = alloc_vreg();
                 int seg = alloc_vreg();
@@ -837,8 +997,17 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                 fprintf(C.nir, "    mov %%%d, %s\n", off, sym->name);
                 return TV_FAR(off, seg);
             }
-            cerr(e->line, "@ requires a function or global name");
+            cerr(e->line, "@ requires a function, global, or stack local name");
             return TV_FAR(alloc_vreg(), alloc_vreg());
+        }
+
+        if (e->u.unop.op == NIB_ADDR &&
+            e->u.unop.operand->kind == EXPR_IDENT) {
+            symbol_t *sym = sym_lookup(e->u.unop.operand->u.ident);
+            if (sym && sym->is_stack_local) {
+                int dst = emit_stack_addr(sym);
+                return TV(dst, mk_type(TYPE_U16));
+            }
         }
 
         typed_vreg_t operand = emit_expr_typed(e->u.unop.operand);
@@ -1824,11 +1993,24 @@ static void emit_stmt(stmt_t *s) {
         }
         if (s->u.vardecl.is_const)
             sym->is_const = true;
+        if (!sym->is_pinned && !sym->is_global &&
+            should_stack_allocate_local(s->u.vardecl.name, s->u.vardecl.type)) {
+            int sz = type_size(s->u.vardecl.type);
+            if (sz <= 0) {
+                cerr(s->line, "cannot take address of zero-sized local '%s'",
+                     s->u.vardecl.name);
+            } else {
+                sym->is_stack_local = true;
+                sym->stack_size = sz;
+                fprintf(C.nir, ".local %%%d, %d, \"%s\"\n",
+                        sym->vreg, sz, sym->name);
+            }
+        }
         if (s->u.vardecl.type && s->u.vardecl.type->kind == TYPE_ARRAY &&
             s->u.vardecl.type->array_size == 0 && !s->u.vardecl.init) {
             cerr(s->line, "unsized array requires an initializer");
         }
-        if (sym->is_const)
+        if (sym->is_const && !sym->is_stack_local)
             fprintf(C.nir, ".vreg %%%d, %s, const\n", sym->vreg,
                     (s->u.vardecl.type && s->u.vardecl.type->kind == TYPE_U8) ? "u8" : "u16");
         if (sym->is_pinned) {
@@ -1867,9 +2049,21 @@ static void emit_stmt(stmt_t *s) {
                     cerr(s->line, "initializer type mismatch: declared %s, got %s",
                          type_str(s->u.vardecl.type), type_str(val.type));
             }
-            fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
+            if (sym->is_stack_local) {
+                int addr = emit_stack_addr(sym);
+                if (type_is_aggregate(sym->type)) {
+                    cerr(s->line, "stack local aggregate initializers are not supported");
+                } else {
+                    const char *op = (sym->type && sym->type->kind == TYPE_U8)
+                        ? "storeb" : "store";
+                    fprintf(C.nir, "    %s %%%d, %%%d\n", op, addr, val.vreg);
+                }
+            } else {
+                fprintf(C.nir, "    mov %%%d, %%%d\n", sym->vreg, val.vreg);
+            }
             /* Far32 init: also copy segment vreg */
-            if (val.vreg_seg >= 0 && s->u.vardecl.type &&
+            if (!sym->is_stack_local &&
+                val.vreg_seg >= 0 && s->u.vardecl.type &&
                 s->u.vardecl.type->kind == TYPE_FAR) {
                 if (sym->vreg_seg < 0) {
                     sym->vreg_seg = alloc_vreg();
@@ -1923,7 +2117,14 @@ static void emit_stmt(stmt_t *s) {
                 }
             }
             if (sym) {
-                if (sym->is_global && sym->type &&
+                if (sym->is_stack_local) {
+                    int tmp = alloc_vreg();
+                    fprintf(C.nir, "    mov %%%d, %d\n", tmp, val_expr->u.lit_int);
+                    int addr = emit_stack_addr(sym);
+                    const char *op = (sym->type && sym->type->kind == TYPE_U8)
+                        ? "storeb" : "store";
+                    fprintf(C.nir, "    %s %%%d, %%%d\n", op, addr, tmp);
+                } else if (sym->is_global && sym->type &&
                     (sym->type->kind == TYPE_U8 || sym->type->kind == TYPE_U16 ||
                      sym->type->kind == TYPE_U32 || sym->type->kind == TYPE_SEG)) {
                     /* Scalar global: store literal to memory */
@@ -1957,7 +2158,12 @@ static void emit_stmt(stmt_t *s) {
                         cerr(s->line, "assignment type mismatch: '%s' is %s, got %s",
                              t->u.ident, type_str(sym->type), type_str(val.type));
                 }
-                if (sym->is_global && sym->type &&
+                if (sym->is_stack_local) {
+                    int addr = emit_stack_addr(sym);
+                    const char *op = (sym->type && sym->type->kind == TYPE_U8)
+                        ? "storeb" : "store";
+                    fprintf(C.nir, "    %s %%%d, %%%d\n", op, addr, val.vreg);
+                } else if (sym->is_global && sym->type &&
                     (sym->type->kind == TYPE_U8 || sym->type->kind == TYPE_U16 ||
                      sym->type->kind == TYPE_U32 || sym->type->kind == TYPE_SEG)) {
                     /* Scalar global: store value to memory */
@@ -2380,6 +2586,8 @@ static void compile_fn(decl_t *d) {
     C.cur_fn_returns = d->u.fn.returns;
     C.cur_fn_nreturns = d->u.fn.nreturns;
     C.cur_fn_mods = d->u.fn.mods;
+    C.naddr_taken = 0;
+    scan_addr_taken_stmt(d->u.fn.body);
 
     /* Validate and register */
     if (d->u.fn.mods.is_interrupt) {
