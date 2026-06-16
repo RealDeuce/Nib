@@ -321,6 +321,7 @@ static fn_assignment_t fn_assigns[MAX_FNS];
 #define MAX_DATA_ENTRIES 1024
 typedef struct {
     char label[64];
+    bool is_cs_data;
     bool has_at;
     int  at_seg;
     int  at_off;
@@ -1528,8 +1529,11 @@ static void parse_nir(const char *path) {
             /* strip trailing comma from label */
             int llen = strlen(db->label);
             if (llen > 0 && db->label[llen-1] == ',') db->label[llen-1] = '\0';
+            char *opts = p;
+            if (strstr(opts, ", cs") || strstr(opts, ",cs"))
+                db->is_cs_data = true;
             /* scan for at() anywhere on the rest of the line */
-            char *at_ptr = strstr(p, "at(");
+            char *at_ptr = strstr(opts, "at(");
             if (at_ptr) {
                 db->has_at = true;
                 char *colon = strchr(at_ptr + 3, ':');
@@ -4545,6 +4549,8 @@ static void propagate_preferences(void) {
 
 static int at_depth = 0;
 static int current_seg = -1;    /* segment from last at() directive */
+static int seg_stack[MAX_AT_DIRECTIVES];
+static int seg_sp = 0;
 
 static void emit_item(int ei) {
     int kind = emit_order[ei].kind;
@@ -4559,9 +4565,15 @@ static void emit_item(int ei) {
         fprintf(out_asm, "\n; === data: %s ===\n", db->label);
         if (db->has_at) {
             int lin = db->at_seg * 16 + db->at_off;
+            if (seg_sp < MAX_AT_DIRECTIVES)
+                seg_stack[seg_sp++] = current_seg;
             fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
                     lin, db->at_seg, db->at_off);
             fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
+            current_seg = db->at_seg;
+            at_depth++;
+        } else if (db->is_cs_data && current_seg >= 0) {
+            fprintf(out_asm, "    seg 0x%04X\n", current_seg);
         }
         fprintf(out_asm, "%s:\n", db->label);
         for (int j = 0; j < db->nentries; j++) {
@@ -4576,9 +4588,12 @@ static void emit_item(int ei) {
         global_var_t *g = &globals[idx];
         if (g->has_at) {
             int lin = g->at_seg * 16 + g->at_off;
+            if (seg_sp < MAX_AT_DIRECTIVES)
+                seg_stack[seg_sp++] = current_seg;
             fprintf(out_asm, "\n    org 0x%05X ; %04X:%04X\n",
                     lin, g->at_seg, g->at_off);
             fprintf(out_asm, "    seg 0x%04X\n", g->at_seg);
+            current_seg = g->at_seg;
             at_depth++;
         }
         fprintf(out_asm, "%s:", g->name);
@@ -4593,6 +4608,8 @@ static void emit_item(int ei) {
         int s = at_directives[idx].seg;
         int o = at_directives[idx].off;
         int lin = s * 16 + o;
+        if (seg_sp < MAX_AT_DIRECTIVES)
+            seg_stack[seg_sp++] = current_seg;
         fprintf(out_asm, "\n    org 0x%05X ; %04X:%04X\n", lin, s, o);
         fprintf(out_asm, "    seg 0x%04X\n", s);
         current_seg = s;
@@ -4600,6 +4617,8 @@ static void emit_item(int ei) {
     } else if (kind == EMIT_ENDAT) {
         fprintf(out_asm, "    endorg\n");
         if (at_depth > 0) at_depth--;
+        if (seg_sp > 0)
+            current_seg = seg_stack[--seg_sp];
     }
 }
 
@@ -4642,6 +4661,8 @@ static void emit_module(const char *path) {
             while (at_depth > saved_depth) {
                 fprintf(out_asm, "    endorg ; unwind use\n");
                 at_depth--;
+                if (seg_sp > 0)
+                    current_seg = seg_stack[--seg_sp];
             }
         } else {
             emit_item(ei);

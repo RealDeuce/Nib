@@ -334,6 +334,20 @@ if [ -f "$TEST_TMPDIR"/t_local_addr.asm ]; then
     fi
 fi
 
+# @far initialized data must use the segment where the data label is emitted.
+if [ -f "$TEST_TMPDIR"/t_far_data_seg.asm ]; then
+    data_window=$(sed -n '/; === data: far_data ===/,/; === t_far_data_seg_get_far_data ===/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
+    get_window=$(sed -n '/t_far_data_seg_get_far_data:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
+    read_window=$(sed -n '/t_far_data_seg_read_far_data:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_far_data_seg.asm)
+    if printf "%s\n" "$data_window" | grep -q 'seg 0xE000' &&
+       printf "%s\n" "$get_window" | grep -q 'SEG far_data' &&
+       printf "%s\n" "$read_window" | grep -q '\[CS:.*far_data\|\[CS:.*BX'; then
+        pass "far-data-seg: @far data uses emitted segment"
+    else
+        fail "far-data-seg" "far initialized data segment was not preserved"
+    fi
+fi
+
 # Indirect calls must save live registers not preserved by the extern
 # descriptor.
 if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then

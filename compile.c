@@ -2792,6 +2792,8 @@ static void compile_global(decl_t *d) {
 
         /* Emit .data block */
         fprintf(C.nir, "\n.data %s, %s", name, type_str(ty));
+        if (d->u.global.is_cs_data)
+            fprintf(C.nir, ", cs");
         if (d->u.global.has_at)
             fprintf(C.nir, ", at(0x%04X:0x%04X)",
                     d->u.global.at_seg, d->u.global.at_off);
@@ -2864,6 +2866,8 @@ static void compile_global(decl_t *d) {
             return;
         }
         fprintf(C.nir, "\n.data %s, %s", name, type_str(ty));
+        if (d->u.global.is_cs_data)
+            fprintf(C.nir, ", cs");
         if (d->u.global.has_at)
             fprintf(C.nir, ", at(0x%04X:0x%04X)",
                     d->u.global.at_seg, d->u.global.at_off);
