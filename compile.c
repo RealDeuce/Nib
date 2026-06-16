@@ -2576,6 +2576,11 @@ static void compile_extern_fn(decl_t *d) {
         fn_decl.u.fn.params = d->u.extern_fn.params;
         fn_decl.u.fn.return_type = d->u.extern_fn.return_type;
         fn_decl.u.fn.body = d->u.extern_fn.body;
+        /* Transfer preserves/clobbers to fn mods */
+        if (d->u.extern_fn.preserves) {
+            fn_decl.u.fn.mods.has_preserves = true;
+            fn_decl.u.fn.mods.preserves = d->u.extern_fn.preserves;
+        }
         /* Transfer return pin to fn mods */
         if (d->u.extern_fn.has_ret_pin) {
             fn_decl.u.fn.mods.has_ret_pin = true;

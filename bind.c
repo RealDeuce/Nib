@@ -2450,21 +2450,35 @@ static void insert_fixup_moves(func_t *fn) {
 
         /* ---- Call argument fixup + BP caller-save ---- */
         if (ins->op == IR_CALL) {
-            /* Build callee preserves set from declared .preserves contract */
+            /* Build callee preserves set.
+             * Explicit preserves/clobbers declaration takes priority.
+             * For internal functions without a declaration, use the
+             * computed clobber set: preserves = everything not clobbered. */
             bool callee_preserves[NUM_PREGS];
             memset(callee_preserves, 0, sizeof(callee_preserves));
-            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+            bool found_callee = false;
+            for (int fi2 = 0; fi2 < nfunctions && !found_callee; fi2++) {
                 if (strcmp(functions[fi2].name, ins->name) == 0) {
-                    for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
-                        callee_preserves[functions[fi2].fn_preserves[pp]] = true;
-                    break;
+                    if (functions[fi2].nfn_preserves > 0) {
+                        /* Explicit declaration — use it */
+                        for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
+                            callee_preserves[functions[fi2].fn_preserves[pp]] = true;
+                    } else if (fn_assigns[fi2].resolved) {
+                        /* No declaration — derive from computed clobbers */
+                        for (int r = 0; r < NUM_PREGS; r++)
+                            callee_preserves[r] = !fn_assigns[fi2].clobbers[r];
+                    }
+                    /* else: unresolved, no preserves — assume all clobbered */
+                    found_callee = true;
                 }
             }
-            for (int e = 0; e < nexterns; e++) {
-                if (strcmp(externs[e].name, ins->name) == 0) {
-                    for (int pp = 0; pp < externs[e].npreserves; pp++)
-                        callee_preserves[externs[e].preserves[pp]] = true;
-                    break;
+            if (!found_callee) {
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, ins->name) == 0) {
+                        for (int pp = 0; pp < externs[e].npreserves; pp++)
+                            callee_preserves[externs[e].preserves[pp]] = true;
+                        break;
+                    }
                 }
             }
 
@@ -2973,15 +2987,13 @@ static void emit_function(func_t *fn) {
     int nsave = 0;
 
     if (fn->nfn_preserves > 0) {
-        bool used[NUM_PREGS] = {0};
-        for (int v = 0; v < fn->nvregs; v++) {
-            if (fn->vregs[v].assigned != PREG_NONE &&
-                fn->vregs[v].def_pos >= 0)
-                used[fn->vregs[v].assigned] = true;
-        }
+        /* Find this function's clobber set */
+        int fn_idx = -1;
+        for (int fi2 = 0; fi2 < nfunctions; fi2++)
+            if (&functions[fi2] == fn) { fn_idx = fi2; break; }
         for (int i = 0; i < fn->nfn_preserves; i++) {
             int preg = fn->fn_preserves[i];
-            if (used[preg])
+            if (fn_idx >= 0 && fn_assigns[fn_idx].clobbers[preg])
                 save_regs[nsave++] = preg;
         }
     }
@@ -3964,39 +3976,6 @@ static void propagate_preferences(void) {
             }
         }
 
-        /* Compute clobber set from allocation results + callee clobbers */
-        memset(fa->clobbers, 0, sizeof(fa->clobbers));
-        for (int v = 0; v < fn->nvregs; v++) {
-            int preg = fn->vregs[v].assigned;
-            if (preg == PREG_NONE || fn->vregs[v].def_pos < 0) continue;
-            fa->clobbers[preg] = true;
-            if (preg >= PREG_AL && preg <= PREG_BH)
-                fa->clobbers[preg_alias_parent[preg]] = true;
-        }
-        /* Add clobbers from called functions (unless caller-saved) */
-        for (int ii = 0; ii < fn->ninsns; ii++) {
-            if (fn->insns[ii].op != IR_CALL) continue;
-            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
-                if (strcmp(functions[fi2].name, fn->insns[ii].name) == 0 &&
-                    fn_assigns[fi2].resolved) {
-                    for (int r = 0; r < NUM_PREGS; r++)
-                        if (fn_assigns[fi2].clobbers[r])
-                            fa->clobbers[r] = true;
-                    break;
-                }
-            }
-            for (int e = 0; e < nexterns; e++) {
-                if (strcmp(externs[e].name, fn->insns[ii].name) == 0) {
-                    /* Extern: everything NOT in preserves is clobbered */
-                    for (int r = 0; r < NUM_PREGS; r++)
-                        fa->clobbers[r] = true;
-                    for (int pp = 0; pp < externs[e].npreserves; pp++)
-                        fa->clobbers[externs[e].preserves[pp]] = false;
-                    break;
-                }
-            }
-        }
-
         fa->resolved = true;
 
         /* Step 2: Propagate to callers.
@@ -4273,6 +4252,41 @@ int main(int argc, char **argv) {
                     strcmp(op, "rcr") == 0) {
                     if (fn->vregs[ins->src2].assigned != PREG_CL)
                         fn->ncl_fixups++;
+                }
+            }
+        }
+
+        /* Compute clobber set from allocation results + callee clobbers */
+        {
+            fn_assignment_t *fa = &fn_assigns[i];
+            memset(fa->clobbers, 0, sizeof(fa->clobbers));
+            for (int v = 0; v < fn->nvregs; v++) {
+                int preg = fn->vregs[v].assigned;
+                if (preg == PREG_NONE) continue;
+                fa->clobbers[preg] = true;
+                if (preg >= PREG_AL && preg <= PREG_BH)
+                    fa->clobbers[preg_alias_parent[preg]] = true;
+            }
+            /* Add clobbers from called functions */
+            for (int ii = 0; ii < fn->ninsns; ii++) {
+                if (fn->insns[ii].op != IR_CALL) continue;
+                for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                    if (strcmp(functions[fi2].name, fn->insns[ii].name) == 0 &&
+                        fn_assigns[fi2].resolved) {
+                        for (int r = 0; r < NUM_PREGS; r++)
+                            if (fn_assigns[fi2].clobbers[r])
+                                fa->clobbers[r] = true;
+                        break;
+                    }
+                }
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, fn->insns[ii].name) == 0) {
+                        for (int r = 0; r < NUM_PREGS; r++)
+                            fa->clobbers[r] = true;
+                        for (int pp = 0; pp < externs[e].npreserves; pp++)
+                            fa->clobbers[externs[e].preserves[pp]] = false;
+                        break;
+                    }
                 }
             }
         }
