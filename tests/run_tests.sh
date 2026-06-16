@@ -564,6 +564,7 @@ fi
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
     port_live_window=$(sed -n '/t_port_io_test_out_live_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
+    port_in_live_window=$(sed -n '/t_port_io_test_in_live_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
     port_out16_window=$(sed -n '/t_port_io_test_out16:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
     port_preserve_window=$(sed -n '/t_port_io_test_out16_preserves:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
     port_in16_window=$(sed -n '/t_port_io_test_in16:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
@@ -576,6 +577,10 @@ if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
        printf "%s\n" "$port_live_window" | grep -q 'out 0x90, AL' &&
        printf "%s\n" "$port_live_window" | grep -q 'pop AX' &&
        printf "%s\n" "$port_live_window" | grep -q 'out 0x53, AL' &&
+       printf "%s\n" "$port_in_live_window" | grep -q 'push AX' &&
+       printf "%s\n" "$port_in_live_window" | grep -q 'in AL, 0xC1' &&
+       printf "%s\n" "$port_in_live_window" | grep -q 'pop AX' &&
+       printf "%s\n" "$port_in_live_window" | grep -q 'out 0xC0, AL' &&
        printf "%s\n" "$port_out16_window" | grep -q 'out 0x50, AX' &&
        printf "%s\n" "$port_preserve_window" | grep -q 'out 0x50, AX' &&
        ! printf "%s\n" "$port_preserve_window" | grep -q 'push AX' &&

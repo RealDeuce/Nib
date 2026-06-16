@@ -21,6 +21,14 @@ fn test_out_live_accum(ticks: u8 in AL) {
     port_out(PORT_TIMER, ticks);
 }
 
+fn test_in_live_accum(data: u8 in AL) {
+    const u8 status = port_in(0xC1);
+    if ((status & 1) == 0) {
+        halt();
+    }
+    port_out(0xC0, data);
+}
+
 fn test_out16(divisor: u16 in AX) {
     port_out16(PORT_LO, divisor);
 }

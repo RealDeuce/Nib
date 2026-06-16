@@ -3007,6 +3007,24 @@ static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg) {
     return false;
 }
 
+static int scratch_word_not_aliasing(int avoid_preg) {
+    static const int order[] = { PREG_BX, PREG_CX, PREG_DX, PREG_SI, PREG_DI };
+    for (int i = 0; i < (int)(sizeof(order) / sizeof(order[0])); i++) {
+        if (!pregs_alias(order[i], avoid_preg))
+            return order[i];
+    }
+    return PREG_BX;
+}
+
+static int scratch_byte_for_parent(int parent) {
+    switch (parent) {
+    case PREG_BX: return PREG_BL;
+    case PREG_CX: return PREG_CL;
+    case PREG_DX: return PREG_DL;
+    default: return PREG_BL;
+    }
+}
+
 /* Find which block contains instruction index `pos` */
 static int block_of(func_t *fn, int pos) {
     for (int b = 0; b < fn->nblocks; b++)
@@ -4076,13 +4094,42 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     if (strcmp(op, "in") == 0 || strcmp(op, "inb") == 0) {
         bool byte_in = (strcmp(op, "inb") == 0);
         const char *acc = byte_in ? "AL" : "AX";
+        int acc_preg = byte_in ? PREG_AL : PREG_AX;
+        const char *d = vreg_asm(fn, ins->dst);
+        bool dst_acc_alias = false;
+        if (ins->dst >= 0 && ins->dst < fn->nvregs) {
+            int dst_preg = fn->vregs[ins->dst].assigned;
+            dst_acc_alias = (dst_preg != PREG_NONE &&
+                             preg_write_clobbers(PREG_AX, dst_preg));
+        }
+        bool preserve_acc = preg_live_after_insn(fn, i, acc_preg);
+        int scratch_parent = PREG_NONE;
+        int scratch_byte = PREG_NONE;
+        if (preserve_acc && dst_acc_alias) {
+            int dst_preg = fn->vregs[ins->dst].assigned;
+            scratch_parent = scratch_word_not_aliasing(dst_preg);
+            scratch_byte = scratch_byte_for_parent(scratch_parent);
+            fprintf(out_asm, "    push %s\n", preg_name[scratch_parent]);
+        }
+        if (preserve_acc)
+            fprintf(out_asm, "    push AX\n");
         if (ins->has_imm)
             fprintf(out_asm, "    in %s, 0x%02X\n", acc, ins->imm);
         else
             fprintf(out_asm, "    in %s, %s\n", acc, vreg_asm(fn, ins->src1));
-        const char *d = vreg_asm(fn, ins->dst);
-        if (strcmp(d, acc) != 0)
-            fprintf(out_asm, "    mov %s, %s\n", d, acc);
+        if (preserve_acc && dst_acc_alias) {
+            fprintf(out_asm, "    mov %s, %s\n",
+                    preg_name[byte_in ? scratch_byte : scratch_parent], acc);
+            fprintf(out_asm, "    pop AX\n");
+            fprintf(out_asm, "    mov %s, %s\n", d,
+                    preg_name[byte_in ? scratch_byte : scratch_parent]);
+            fprintf(out_asm, "    pop %s\n", preg_name[scratch_parent]);
+        } else {
+            if (strcmp(d, acc) != 0)
+                fprintf(out_asm, "    mov %s, %s\n", d, acc);
+            if (preserve_acc)
+                fprintf(out_asm, "    pop AX\n");
+        }
         return;
     }
     if (strcmp(op, "out") == 0 || strcmp(op, "outb") == 0) {
