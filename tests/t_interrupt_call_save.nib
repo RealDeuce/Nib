@@ -1,0 +1,10 @@
+// Test: interrupt handlers must preserve registers clobbered by callees.
+
+fn helper() {
+    u16 DX = 0x1234;
+    u16 DI = DX >> 8;
+}
+
+fn interrupt irq_handler() {
+    helper();
+}

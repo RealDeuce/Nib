@@ -305,6 +305,20 @@ if [ -f "$TEST_TMPDIR"/t_multi_return.asm ]; then
     fi
 fi
 
+# Interrupt wrappers must save registers clobbered by internal callees.
+if [ -f "$TEST_TMPDIR"/t_interrupt_call_save.asm ]; then
+    irq_window=$(sed -n '/t_interrupt_call_save_irq_handler:/,/^[[:space:]]*iret$/p' "$TEST_TMPDIR"/t_interrupt_call_save.asm)
+    if printf "%s\n" "$irq_window" | grep -q 'push DX' &&
+       printf "%s\n" "$irq_window" | grep -q 'push DI' &&
+       printf "%s\n" "$irq_window" | grep -q 'call t_interrupt_call_save_helper' &&
+       printf "%s\n" "$irq_window" | grep -q 'pop DI' &&
+       printf "%s\n" "$irq_window" | grep -q 'pop DX'; then
+        pass "interrupt-call-save: callee clobbers preserved"
+    else
+        fail "interrupt-call-save" "callee-clobbered DX/DI not preserved"
+    fi
+fi
+
 # Indirect calls must save live registers not preserved by the extern
 # descriptor.
 if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then

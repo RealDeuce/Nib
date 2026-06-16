@@ -3392,12 +3392,12 @@ static void emit_function(func_t *fn) {
      * it's assigned to a vreg that the function body uses. */
     int save_regs[NUM_PREGS];
     int nsave = 0;
+    int fn_idx = -1;
+    for (int fi2 = 0; fi2 < nfunctions; fi2++)
+        if (&functions[fi2] == fn) { fn_idx = fi2; break; }
 
     if (fn->nfn_preserves > 0) {
         /* Find this function's clobber set */
-        int fn_idx = -1;
-        for (int fi2 = 0; fi2 < nfunctions; fi2++)
-            if (&functions[fi2] == fn) { fn_idx = fi2; break; }
         for (int i = 0; i < fn->nfn_preserves; i++) {
             int preg = fn->fn_preserves[i];
             if (fn_idx >= 0 && fn_assigns[fn_idx].clobbers[preg])
@@ -3421,6 +3421,13 @@ static void emit_function(func_t *fn) {
                 word_used[preg_alias_parent[preg]] = true;   /* byte → parent word */
         }
         if (fn->needs_frame) word_used[5] = true; /* BP */
+        if (fn_idx >= 0) {
+            for (int r = 0; r < 8; r++) {
+                if (r == PREG_SP) continue;
+                if (fn_assigns[fn_idx].clobbers[r])
+                    word_used[r] = true;
+            }
+        }
         for (int r = 0; r < 8; r++) {
             if (r == 4) continue; /* skip SP */
             if (word_used[r])
