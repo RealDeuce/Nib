@@ -2450,33 +2450,21 @@ static void insert_fixup_moves(func_t *fn) {
 
         /* ---- Call argument fixup + BP caller-save ---- */
         if (ins->op == IR_CALL) {
-            /* Build callee preserves set.
-             * For internal functions with resolved clobber sets, preserves
-             * = everything not clobbered. For externs, use .preserves list. */
+            /* Build callee preserves set from declared .preserves contract */
             bool callee_preserves[NUM_PREGS];
             memset(callee_preserves, 0, sizeof(callee_preserves));
-            bool found_callee = false;
-            for (int fi2 = 0; fi2 < nfunctions && !found_callee; fi2++) {
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
                 if (strcmp(functions[fi2].name, ins->name) == 0) {
-                    if (fn_assigns[fi2].resolved) {
-                        /* Use computed clobber set — preserves = !clobbers */
-                        for (int r = 0; r < NUM_PREGS; r++)
-                            callee_preserves[r] = !fn_assigns[fi2].clobbers[r];
-                    } else {
-                        /* Not yet resolved — use explicit .preserves */
-                        for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
-                            callee_preserves[functions[fi2].fn_preserves[pp]] = true;
-                    }
-                    found_callee = true;
+                    for (int pp = 0; pp < functions[fi2].nfn_preserves; pp++)
+                        callee_preserves[functions[fi2].fn_preserves[pp]] = true;
+                    break;
                 }
             }
-            if (!found_callee) {
-                for (int e = 0; e < nexterns; e++) {
-                    if (strcmp(externs[e].name, ins->name) == 0) {
-                        for (int pp = 0; pp < externs[e].npreserves; pp++)
-                            callee_preserves[externs[e].preserves[pp]] = true;
-                        break;
-                    }
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    for (int pp = 0; pp < externs[e].npreserves; pp++)
+                        callee_preserves[externs[e].preserves[pp]] = true;
+                    break;
                 }
             }
 
