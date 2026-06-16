@@ -13,7 +13,16 @@ fn test_out_accum(divisor: u16 in AX) {
     port_out(PORT_HI, AH);
 }
 
+fn test_out16(divisor: u16 in AX) {
+    port_out16(PORT_LO, divisor);
+}
+
 fn test_in() -> u8 {
     u8 result = port_in(0x60);
+    return result;
+}
+
+fn test_in16() -> u16 {
+    u16 result = port_in16(PORT_LO);
     return result;
 }

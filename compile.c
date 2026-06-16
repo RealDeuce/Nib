@@ -1072,6 +1072,21 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             return TV(dst, mk_type(TYPE_U8));
         }
 
+        if (strcmp(early_fn_name, "port_in16") == 0) {
+            int dst = alloc_vreg();
+            expr_t *port_expr = e->u.call.args;
+            if (port_expr) {
+                int port_imm;
+                if (eval_const_expr(port_expr, &port_imm)) {
+                    fprintf(C.nir, "    in %%%d, %d\n", dst, port_imm);
+                } else {
+                    typed_vreg_t port = emit_expr_typed(port_expr);
+                    fprintf(C.nir, "    in %%%d, %%%d\n", dst, port.vreg);
+                }
+            }
+            return TV(dst, mk_type(TYPE_U16));
+        }
+
         if (strcmp(early_fn_name, "port_out") == 0) {
             int dst = alloc_vreg();
             expr_t *port_expr = e->u.call.args;
@@ -1091,6 +1106,31 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                             value.vreg);
                 else
                     fprintf(C.nir, "    %s %%%d, %%%d\n", op, port.vreg,
+                            value.vreg);
+            }
+            return TV(dst, mk_type(TYPE_VOID));
+        }
+
+        if (strcmp(early_fn_name, "port_out16") == 0) {
+            int dst = alloc_vreg();
+            expr_t *port_expr = e->u.call.args;
+            expr_t *value_expr = port_expr ? port_expr->next : NULL;
+            if (port_expr && value_expr) {
+                int port_imm;
+                typed_vreg_t port = { -1, -1, NULL };
+                bool have_imm = eval_const_expr(port_expr, &port_imm);
+                if (!have_imm)
+                    port = emit_expr_typed(port_expr);
+
+                typed_vreg_t value = emit_expr_typed(value_expr);
+                if (value.type && type_size(value.type) != 2)
+                    cerr(e->line, "port_out16 value must be u16, got %s",
+                         type_str(value.type));
+                if (have_imm)
+                    fprintf(C.nir, "    out %d, %%%d\n", port_imm,
+                            value.vreg);
+                else
+                    fprintf(C.nir, "    out %%%d, %%%d\n", port.vreg,
                             value.vreg);
             }
             return TV(dst, mk_type(TYPE_VOID));

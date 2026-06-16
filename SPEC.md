@@ -984,18 +984,23 @@ fn clear_vram(seg_addr: u16) {
 ### Port I/O
 
 ```
-port_in(port) -> u8 / u16  // IN AL, port  or  IN AX, port
-port_out(port, val)         // OUT port, AL  or  OUT port, AX
+port_in(port) -> u8         // IN AL, port
+port_out(port, val)         // OUT port, AL
+port_in16(port) -> u16      // IN AX, port
+port_out16(port, val)       // OUT port, AX
 ```
 
-The value type determines byte vs word I/O. The port can be an
+The plain forms are byte I/O. The `16` forms transfer `AX` as a word:
+low byte at `port`, high byte at `port + 1`. The port can be an
 immediate (0x00-0xFF) or a u16 variable (uses DX).
 
 ```
 u8 scancode = port_in(0x60);       // IN AL, 0x60
+u16 divisor = port_in16(0x50);     // IN AX, 0x50
 u16 DX = 0x03F8;
 u8 data = port_in(DX);             // IN AL, DX
 port_out(0x90, 0x01);               // OUT 0x90, AL
+port_out16(0x50, divisor);          // OUT 0x50, AX
 ```
 
 ### Type widening
