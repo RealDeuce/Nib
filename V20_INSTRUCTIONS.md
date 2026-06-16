@@ -317,11 +317,6 @@ Notes: the manual requires the high nibble of the 8-bit offset and
 length registers to be zero for correct operation. A length nibble of 0
 means 1 bit; 15 means 16 bits.
 
-Current assembler caveat: the register-length form is documented here
-using the binder/manual two-operand shape. `asm.c` currently parses only
-the first register operand when encoding the register form, so this form
-needs an assembler follow-up before relying on arbitrary register pairs.
-
 ### `bound`
 
 NEC name: `CHKIND`.
