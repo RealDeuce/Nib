@@ -2671,10 +2671,12 @@ static void emit_mov(func_t *fn, int dst, int src) {
         fprintf(out_asm, "    mov %s, AX\n", d);
         fprintf(out_asm, "    pop AX\n");
     } else if (dst_byte && !src_byte && !is_spilled(fn, src)) {
-        /* byte dst, word src: extract low byte through AX */
+        /* byte dst, word src: extract low byte */
         int src_preg = fn->vregs[src].assigned;
+        int dst_preg = fn->vregs[dst].assigned;
         if (src_preg >= PREG_AX && src_preg <= PREG_BX) {
-            /* AX..BX have accessible low bytes */
+            /* AX..BX have accessible low bytes — skip if dst is already it */
+            if (dst_preg == preg_alias_lo[src_preg]) return;
             fprintf(out_asm, "    mov %s, %s\n", d, preg_name[preg_alias_lo[src_preg]]);
         } else {
             /* SI, DI, BP — no low byte; use xchg AX to access via AL */
