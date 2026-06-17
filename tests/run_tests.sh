@@ -191,6 +191,16 @@ if ./nibasm "$TEST_TMPDIR"/v20_bitfield.asm -o "$TEST_TMPDIR"/v20_bitfield.bin >
 else
     fail "v20-bitfield" "$(./nibasm "$TEST_TMPDIR"/v20_bitfield.asm -o "$TEST_TMPDIR"/v20_bitfield.bin 2>&1 | head -1)"
 fi
+
+cat > "$TEST_TMPDIR"/bad_mov_width.asm <<'ASM'
+    org 0
+    mov AL, DI
+ASM
+if ./nibasm "$TEST_TMPDIR"/bad_mov_width.asm -o "$TEST_TMPDIR"/bad_mov_width.bin >/dev/null 2>&1; then
+    fail "mov-width-reject" "assembler accepted MOV with mismatched register widths"
+else
+    pass "mov-width-reject: mismatched register widths rejected"
+fi
 echo ""
 
 # Phase 6: Full build test
@@ -684,8 +694,9 @@ NIR
 if ./nibbind "$TEST_TMPDIR"/t_call_const_arg_spill.nir -o "$TEST_TMPDIR"/t_call_const_arg_spill.asm >/dev/null 2>&1; then
     const_arg_window=$(sed -n '/call_const_arg_spill.*_\.L0:/,/call_const_arg_spill.*_\.L2:/p' "$TEST_TMPDIR"/t_call_const_arg_spill.asm)
     if printf "%s\n" "$const_arg_window" | grep -q 'mov DI, 1' &&
-       printf "%s\n" "$const_arg_window" | grep -q 'mov AL, DI' &&
+       printf "%s\n" "$const_arg_window" | grep -q 'mov AX, DI' &&
        printf "%s\n" "$const_arg_window" | grep -q 'call .*read_current' &&
+       ! printf "%s\n" "$const_arg_window" | grep -q 'mov AL, DI' &&
        ! printf "%s\n" "$const_arg_window" | grep -q 'mov AL, B[HL]'; then
         pass "call-const-arg-spill: constant vreg passed to call"
     else

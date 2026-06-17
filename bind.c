@@ -3480,6 +3480,63 @@ static void rins_pop_bp_slot(func_t *fn, int bp_off, bool is_byte) {
     }
 }
 
+static bool preg_is_byte(int preg) {
+    return preg >= PREG_AL && preg <= PREG_BH;
+}
+
+static bool preg_is_word(int preg) {
+    return preg >= PREG_AX && preg <= PREG_DI;
+}
+
+static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
+    if (src_vreg < 0 || src_vreg >= fn->nvregs || expected == PREG_NONE)
+        return;
+
+    const char *dst = preg_name[expected];
+    const char *src = vreg_asm(fn, src_vreg);
+    bool dst_byte = preg_is_byte(expected);
+    bool src_byte = fn->vregs[src_vreg].is_byte;
+    int actual = fn->vregs[src_vreg].assigned;
+
+    if (dst_byte && !is_spilled(fn, src_vreg) && preg_is_word(actual)) {
+        if (actual >= PREG_AX && actual <= PREG_BX) {
+            if (expected == preg_alias_lo[actual])
+                return;
+            rins_asm(fn, "    mov %s, %s", dst,
+                     preg_name[preg_alias_lo[actual]]);
+        } else if (preg_is_word(actual)) {
+            if (expected == PREG_AL) {
+                rins_asm(fn, "    mov AX, %s", preg_name[actual]);
+            } else {
+                rins_asm(fn, "    push AX");
+                rins_asm(fn, "    mov AX, %s", preg_name[actual]);
+                rins_asm(fn, "    mov %s, AL", dst);
+                rins_asm(fn, "    pop AX");
+            }
+        } else {
+            rins_asm(fn, "    mov %s, %s", dst, src);
+        }
+        return;
+    }
+
+    if (!dst_byte && (src_byte || preg_is_byte(actual)) &&
+        preg_is_word(expected)) {
+        if (expected >= PREG_AX && expected <= PREG_BX) {
+            rins_asm(fn, "    mov %s, %s",
+                     preg_name[preg_alias_lo[expected]], src);
+        } else {
+            rins_asm(fn, "    push AX");
+            rins_asm(fn, "    xor AX, AX");
+            rins_asm(fn, "    mov AL, %s", src);
+            rins_asm(fn, "    mov %s, AX", dst);
+            rins_asm(fn, "    pop AX");
+        }
+        return;
+    }
+
+    rins_asm(fn, "    mov %s, %s", dst, src);
+}
+
 /* Build the resolved instruction stream.
  * Inserts explicit moves for fixups that the emitter would
  * otherwise handle with push/pop sequences. */
@@ -3794,14 +3851,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     int actual = fn->vregs[arg_vreg].assigned;
                     if (actual == expected || pregs_alias(actual, expected))
                         continue;
-                    /* Emit fixup mov */
-                    if (is_spilled(fn, arg_vreg)) {
-                        rins_asm(fn, "    mov %s, %s",
-                                 preg_name[expected], vreg_asm(fn, arg_vreg));
-                    } else {
-                        rins_asm(fn, "    mov %s, %s",
-                                 preg_name[expected], preg_name[actual]);
-                    }
+                    rins_mov_preg_from_vreg(fn, expected, arg_vreg);
                 }
             } else if (callee_ext >= 0) {
                 for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
@@ -3814,13 +3864,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     int actual = fn->vregs[arg_vreg].assigned;
                     if (actual == expected || pregs_alias(actual, expected))
                         continue;
-                    if (is_spilled(fn, arg_vreg)) {
-                        rins_asm(fn, "    mov %s, %s",
-                                 preg_name[expected], vreg_asm(fn, arg_vreg));
-                    } else {
-                        rins_asm(fn, "    mov %s, %s",
-                                 preg_name[expected], preg_name[actual]);
-                    }
+                    rins_mov_preg_from_vreg(fn, expected, arg_vreg);
                 }
             }
 
@@ -4029,9 +4073,8 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     pick = 0; /* Cycles are rare; preserve progress. */
                 while (pick < nmoves && moves[pick].done) pick++;
                 if (pick >= nmoves) break;
-                rins_asm(fn, "    mov %s, %s",
-                         preg_name[moves[pick].dst_reg],
-                         vreg_asm(fn, moves[pick].src_vreg));
+                rins_mov_preg_from_vreg(fn, moves[pick].dst_reg,
+                                        moves[pick].src_vreg);
                 moves[pick].done = true;
                 done++;
             }
@@ -4136,8 +4179,14 @@ static void emit_mov(func_t *fn, int dst, int src) {
     const char *d = vreg_asm(fn, dst);
     const char *s = vreg_asm(fn, src);
     if (strcmp(d, s) == 0) return; /* skip self-moves */
-    bool dst_byte = (dst >= 0 && dst < MAX_VREGS && fn->vregs[dst].is_byte);
-    bool src_byte = (src >= 0 && src < MAX_VREGS && fn->vregs[src].is_byte);
+    int dst_preg = (dst >= 0 && dst < MAX_VREGS) ?
+                   fn->vregs[dst].assigned : PREG_NONE;
+    int src_preg = (src >= 0 && src < MAX_VREGS) ?
+                   fn->vregs[src].assigned : PREG_NONE;
+    bool dst_byte = (dst >= 0 && dst < MAX_VREGS &&
+                     (fn->vregs[dst].is_byte || preg_is_byte(dst_preg)));
+    bool src_byte = (src >= 0 && src < MAX_VREGS &&
+                     (fn->vregs[src].is_byte || preg_is_byte(src_preg)));
     if (is_spilled(fn, dst) && is_spilled(fn, src)) {
         if (dst_byte || src_byte) {
             /* Byte spill-to-spill: route through AL to avoid
@@ -4157,10 +4206,8 @@ static void emit_mov(func_t *fn, int dst, int src) {
         fprintf(out_asm, "    mov AX, %s\n", s);
         fprintf(out_asm, "    mov %s, AX\n", d);
         fprintf(out_asm, "    pop AX\n");
-    } else if (dst_byte && !src_byte && !is_spilled(fn, src)) {
+    } else if (dst_byte && !is_spilled(fn, src) && preg_is_word(src_preg)) {
         /* byte dst, word src: extract low byte */
-        int src_preg = fn->vregs[src].assigned;
-        int dst_preg = fn->vregs[dst].assigned;
         if (src_preg >= PREG_AX && src_preg <= PREG_BX) {
             /* AX..BX have accessible low bytes — skip if dst is already it */
             if (dst_preg == preg_alias_lo[src_preg]) return;
@@ -4178,9 +4225,9 @@ static void emit_mov(func_t *fn, int dst, int src) {
                 fprintf(out_asm, "    xchg AX, %s\n", s);
             }
         }
-    } else if (!dst_byte && src_byte && !is_spilled(fn, dst)) {
+    } else if (!dst_byte && (src_byte || preg_is_byte(src_preg)) &&
+               !is_spilled(fn, dst)) {
         /* word dst, byte src: zero-extend or just move low byte */
-        int dst_preg = fn->vregs[dst].assigned;
         if (dst_preg >= PREG_AX && dst_preg <= PREG_BX) {
             fprintf(out_asm, "    mov %s, %s\n", preg_name[preg_alias_lo[dst_preg]], s);
         } else {

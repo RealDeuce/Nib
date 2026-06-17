@@ -847,6 +847,12 @@ static void asm_push_pop(int is_pop, operand_t *op) {
 static void asm_mov(operand_t *dst, operand_t *src) {
     /* MOV sreg, r/m16 */
     if (dst->type == OP_SREG && (src->type == OP_REG || src->type == OP_MEM)) {
+        if ((src->type == OP_REG && src->size != 2) ||
+            (src->type == OP_MEM && src->size == 1)) {
+            err("MOV segment source must be r/m16");
+            errors++;
+            return;
+        }
         if (src->type == OP_MEM) emit_seg_override(src);
         emit(0x8E);
         if (src->type == OP_REG)
@@ -857,6 +863,12 @@ static void asm_mov(operand_t *dst, operand_t *src) {
     }
     /* MOV r/m16, sreg */
     if (src->type == OP_SREG && (dst->type == OP_REG || dst->type == OP_MEM)) {
+        if ((dst->type == OP_REG && dst->size != 2) ||
+            (dst->type == OP_MEM && dst->size == 1)) {
+            err("MOV segment destination must be r/m16");
+            errors++;
+            return;
+        }
         if (dst->type == OP_MEM) emit_seg_override(dst);
         emit(0x8C);
         if (dst->type == OP_REG)
@@ -882,6 +894,12 @@ static void asm_mov(operand_t *dst, operand_t *src) {
     }
     /* MOV reg, r/m */
     if (dst->type == OP_REG && (src->type == OP_REG || src->type == OP_MEM)) {
+        if ((src->type == OP_REG && src->size != dst->size) ||
+            (src->type == OP_MEM && src->size && src->size != dst->size)) {
+            err("MOV operands must have matching widths");
+            errors++;
+            return;
+        }
         int w = (dst->size == 2) ? 1 : 0;
         if (src->type == OP_MEM) emit_seg_override(src);
         emit(0x8A | w);
@@ -893,6 +911,12 @@ static void asm_mov(operand_t *dst, operand_t *src) {
     }
     /* MOV r/m, reg */
     if ((dst->type == OP_REG || dst->type == OP_MEM) && src->type == OP_REG) {
+        if ((dst->type == OP_REG && dst->size != src->size) ||
+            (dst->type == OP_MEM && dst->size && dst->size != src->size)) {
+            err("MOV operands must have matching widths");
+            errors++;
+            return;
+        }
         int w = (src->size == 2) ? 1 : 0;
         if (dst->type == OP_MEM) emit_seg_override(dst);
         emit(0x88 | w);
