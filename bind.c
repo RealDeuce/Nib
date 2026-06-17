@@ -136,7 +136,7 @@ static int abi_type_words(const char *type) {
  * IR representation
  * ================================================================ */
 
-#define MAX_VREGS    256
+#define MAX_VREGS    1024
 #define MAX_INSNS    4096
 #define MAX_BLOCKS   256
 #define MAX_FNS      128
@@ -1709,6 +1709,16 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
     }
 }
 
+static void validate_vreg_capacity(const char *path, func_t *fn) {
+    if (fn->nvregs <= MAX_VREGS)
+        return;
+
+    fprintf(stderr,
+            "%s: function '%s' uses %d virtual registers; binder limit is %d\n",
+            path, fn->name, fn->nvregs, MAX_VREGS);
+    exit(1);
+}
+
 static void parse_nir(const char *path) {
     FILE *fp = fopen(path, "r");
     if (!fp) { perror(path); exit(1); }
@@ -1747,6 +1757,7 @@ static void parse_nir(const char *path) {
                 fn->vregs[i].spill_slot = -1;
             }
             parse_function(fp, fn, p);
+            validate_vreg_capacity(path, fn);
             record_emit(EMIT_FN, nfunctions - 1);
         }
         if (strncmp(p, ".extern ", 8) == 0) {

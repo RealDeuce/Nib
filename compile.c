@@ -304,6 +304,50 @@ static bool eval_const_expr(expr_t *e, int *result) {
     }
 }
 
+static int require_const_expr(expr_t *e, int line, const char *what) {
+    int value = 0;
+    if (!eval_const_expr(e, &value))
+        cerr(line, "%s must be a constant expression", what);
+    return value;
+}
+
+static void resolve_type_constants(type_t *t, int line) {
+    if (!t) return;
+    if (t->kind == TYPE_ARRAY && t->array_size_expr) {
+        t->array_size = require_const_expr(t->array_size_expr, line,
+                                           "array size");
+        t->array_size_expr = NULL;
+    }
+    if (t->element_type)
+        resolve_type_constants(t->element_type, line);
+}
+
+static void resolve_param_type_constants(param_t *p, int line) {
+    for (; p; p = p->next)
+        resolve_type_constants(p->type, line);
+}
+
+static void resolve_return_type_constants(return_t *r, int line) {
+    for (; r; r = r->next)
+        resolve_type_constants(r->type, line);
+}
+
+static void resolve_fn_modifier_constants(fn_modifiers_t *mods, int line) {
+    if (mods->has_at && mods->at_seg_expr) {
+        mods->at_seg = require_const_expr(mods->at_seg_expr, line,
+                                          "function at() segment");
+        mods->at_off = require_const_expr(mods->at_off_expr, line,
+                                          "function at() offset");
+        mods->at_seg_expr = NULL;
+        mods->at_off_expr = NULL;
+    }
+    if (mods->ds_policy == DS_POLICY_LITERAL && mods->ds_literal_expr) {
+        mods->ds_literal = require_const_expr(mods->ds_literal_expr, line,
+                                              "ds() literal");
+        mods->ds_literal_expr = NULL;
+    }
+}
+
 /* ---- Function lookup ---- */
 
 static bool is_isr(const char *name) {
@@ -639,6 +683,7 @@ static void resolve_constants_expr(expr_t *e) {
             resolve_constants_expr(a);
         break;
     case EXPR_INDEX:
+    case EXPR_CHECKED_INDEX:
         resolve_constants_expr(e->u.index.array);
         resolve_constants_expr(e->u.index.index);
         break;
@@ -652,6 +697,17 @@ static void resolve_constants_expr(expr_t *e) {
     case EXPR_ARRAY_INIT:
         for (expr_t *el = e->u.array_init.elements; el; el = el->next)
             resolve_constants_expr(el);
+        break;
+    case EXPR_MEM:
+        resolve_constants_expr(e->u.mem.disp_expr);
+        resolve_constants_expr(e->u.mem.abs_seg_expr);
+        break;
+    case EXPR_FAR_LIT:
+        resolve_constants_expr(e->u.far_lit.seg_expr);
+        resolve_constants_expr(e->u.far_lit.off_expr);
+        break;
+    case EXPR_DEREF:
+        resolve_constants_expr(e->u.deref.expr);
         break;
     default:
         break;
@@ -683,10 +739,11 @@ static void resolve_constants_stmt(stmt_t *s) {
             break;
         case STMT_FOR:
             resolve_constants_expr(s->u.for_stmt.start);
+            resolve_constants_expr(s->u.for_stmt.end);
             resolve_constants_stmt(s->u.for_stmt.body);
             break;
         case STMT_RETURN:
-            resolve_constants_expr(s->u.expr);
+            resolve_constants_expr(s->u.ret_expr);
             break;
         case STMT_TAILCALL:
             resolve_constants_expr(s->u.tailcall_expr);
@@ -724,6 +781,7 @@ static void scan_addr_taken_stmt(stmt_t *s) {
             break;
         case STMT_FOR:
             scan_addr_taken_expr(s->u.for_stmt.start);
+            scan_addr_taken_expr(s->u.for_stmt.end);
             scan_addr_taken_stmt(s->u.for_stmt.body);
             break;
         case STMT_RETURN:
@@ -782,6 +840,17 @@ static void scan_addr_taken_expr(expr_t *e) {
             scan_addr_taken_expr(e->u.indirect_call.addr);
             scan_addr_taken_expr(e->u.indirect_call.args);
             break;
+        case EXPR_DEREF:
+            scan_addr_taken_expr(e->u.deref.expr);
+            break;
+        case EXPR_MEM:
+            scan_addr_taken_expr(e->u.mem.disp_expr);
+            scan_addr_taken_expr(e->u.mem.abs_seg_expr);
+            break;
+        case EXPR_FAR_LIT:
+            scan_addr_taken_expr(e->u.far_lit.seg_expr);
+            scan_addr_taken_expr(e->u.far_lit.off_expr);
+            break;
         default:
             break;
         }
@@ -823,6 +892,199 @@ static typed_vreg_t TV_PIN(int vreg, type_t *type, const char *pin) {
         type_name = "seg";
     fprintf(C.nir, ".vreg %%%d, %s, pin=%s\n", vreg, type_name, pin);
     return tv;
+}
+
+typedef struct {
+    int base;
+    int index;
+    int disp;
+    bool has_disp;
+} addr_parts_t;
+
+static bool addr_add_reg(addr_parts_t *p, reg_id_t reg) {
+    if (reg == WREG_BX || reg == WREG_BP) {
+        if (p->base != REG_NONE) return false;
+        p->base = reg;
+        return true;
+    }
+    if (reg == WREG_SI || reg == WREG_DI) {
+        if (p->index != REG_NONE) return false;
+        p->index = reg;
+        return true;
+    }
+    return false;
+}
+
+static bool addr_collect(expr_t *e, addr_parts_t *p) {
+    int cv;
+    if (eval_const_expr(e, &cv)) {
+        p->disp += cv;
+        p->has_disp = true;
+        return true;
+    }
+    if (!e) return false;
+    if (e->kind == EXPR_REG && e->u.reg.rclass == REGCLASS_WORD)
+        return addr_add_reg(p, e->u.reg.id);
+    if (e->kind == EXPR_CAST)
+        return addr_collect(e->u.cast.operand, p);
+    if (e->kind == EXPR_BINOP && e->u.binop.op == NIB_ADD)
+        return addr_collect(e->u.binop.left, p) &&
+               addr_collect(e->u.binop.right, p);
+    if (e->kind == EXPR_BINOP && e->u.binop.op == NIB_SUB) {
+        int rv;
+        if (!eval_const_expr(e->u.binop.right, &rv))
+            return false;
+        if (!addr_collect(e->u.binop.left, p))
+            return false;
+        p->disp -= rv;
+        p->has_disp = true;
+        return true;
+    }
+    return false;
+}
+
+static void format_direct_addr(expr_t *e, reg_id_t seg, char *buf, size_t bufsz) {
+    if (e && e->kind == EXPR_FAR_LIT && seg == REG_NONE) {
+        int s = e->u.far_lit.seg_expr
+            ? require_const_expr(e->u.far_lit.seg_expr, e->line,
+                                 "far literal segment")
+            : e->u.far_lit.seg;
+        int o = e->u.far_lit.off_expr
+            ? require_const_expr(e->u.far_lit.off_expr, e->line,
+                                 "far literal offset")
+            : e->u.far_lit.off;
+        snprintf(buf, bufsz, "[0x%04X:0x%04X]", s & 0xFFFF, o & 0xFFFF);
+        return;
+    }
+
+    addr_parts_t p = { REG_NONE, REG_NONE, 0, false };
+    if (!addr_collect(e, &p)) {
+        buf[0] = '\0';
+        return;
+    }
+
+    char inner[96] = "";
+    bool need_plus = false;
+    if (p.base != REG_NONE) {
+        snprintf(inner + strlen(inner), sizeof(inner) - strlen(inner),
+                 "%s", wreg_name(p.base));
+        need_plus = true;
+    }
+    if (p.index != REG_NONE) {
+        snprintf(inner + strlen(inner), sizeof(inner) - strlen(inner),
+                 "%s%s", need_plus ? "+" : "", wreg_name(p.index));
+        need_plus = true;
+    }
+    if (p.has_disp || !need_plus) {
+        unsigned v = (unsigned)p.disp & 0xFFFF;
+        snprintf(inner + strlen(inner), sizeof(inner) - strlen(inner),
+                 "%s0x%04X", need_plus ? "+" : "", v);
+    }
+
+    if (seg != REG_NONE)
+        snprintf(buf, bufsz, "[%s:%s]", sreg_name(seg), inner);
+    else
+        snprintf(buf, bufsz, "[%s]", inner);
+}
+
+static int emit_segment_value(reg_id_t seg_id) {
+    int tmp = alloc_vreg();
+    int seg = alloc_vreg();
+    fprintf(C.nir, "    mov %%%d, %s\n", tmp, sreg_name(seg_id));
+    fprintf(C.nir, ".vreg %%%d, seg\n", seg);
+    fprintf(C.nir, "    mov %%%d, %%%d\n", seg, tmp);
+    return seg;
+}
+
+static typed_vreg_t emit_deref_load(expr_t *e) {
+    int dst = alloc_vreg();
+    char addr[128];
+    format_direct_addr(e->u.deref.expr, e->u.deref.seg, addr, sizeof(addr));
+    if (addr[0]) {
+        fprintf(C.nir, "    loadmem %%%d, %s\n", dst, addr);
+        return TV(dst, mk_type(TYPE_U8));
+    }
+
+    typed_vreg_t ptr = emit_expr_typed(e->u.deref.expr);
+    if (ptr.type && ptr.type->kind == TYPE_FAR) {
+        if (e->u.deref.seg != REG_NONE) {
+            int seg = emit_segment_value(e->u.deref.seg);
+            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
+                    dst, ptr.vreg, seg);
+        } else if (ptr.vreg_seg >= 0) {
+            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
+                    dst, ptr.vreg, ptr.vreg_seg);
+        } else {
+            int off = alloc_vreg();
+            int seg = alloc_vreg();
+            fprintf(C.nir, "    far.off %%%d, %%%d\n", off, ptr.vreg);
+            fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg, ptr.vreg);
+            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n", dst, off, seg);
+        }
+    } else if (!ptr.type || type_is_integer(ptr.type)) {
+        if (ptr.type && ptr.type->kind != TYPE_U16)
+            cerr(e->line, "pointer dereference requires u16 or far32, got %s",
+                 type_str(ptr.type));
+        if (e->u.deref.seg == REG_NONE || e->u.deref.seg == SREG_DS) {
+            fprintf(C.nir, "    loadmem %%%d, %%%d\n", dst, ptr.vreg);
+        } else if (e->u.deref.seg == SREG_CS) {
+            fprintf(C.nir, ".vreg %%%d, u16, csref\n", ptr.vreg);
+            fprintf(C.nir, "    loadmem %%%d, %%%d\n", dst, ptr.vreg);
+        } else {
+            int seg = emit_segment_value(e->u.deref.seg);
+            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
+                    dst, ptr.vreg, seg);
+        }
+    } else {
+        cerr(e->line, "pointer dereference requires u16 or far32, got %s",
+             type_str(ptr.type));
+    }
+    return TV(dst, mk_type(TYPE_U8));
+}
+
+static void emit_deref_store(expr_t *e, typed_vreg_t val) {
+    char addr[128];
+    format_direct_addr(e->u.deref.expr, e->u.deref.seg, addr, sizeof(addr));
+    if (addr[0]) {
+        fprintf(C.nir, "    storemem %s, %%%d\n", addr, val.vreg);
+        return;
+    }
+
+    typed_vreg_t ptr = emit_expr_typed(e->u.deref.expr);
+    if (ptr.type && ptr.type->kind == TYPE_FAR) {
+        if (e->u.deref.seg != REG_NONE) {
+            int seg = emit_segment_value(e->u.deref.seg);
+            fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
+                    ptr.vreg, seg, val.vreg);
+        } else if (ptr.vreg_seg >= 0) {
+            fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
+                    ptr.vreg, ptr.vreg_seg, val.vreg);
+        } else {
+            int off = alloc_vreg();
+            int seg = alloc_vreg();
+            fprintf(C.nir, "    far.off %%%d, %%%d\n", off, ptr.vreg);
+            fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg, ptr.vreg);
+            fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
+                    off, seg, val.vreg);
+        }
+    } else if (!ptr.type || type_is_integer(ptr.type)) {
+        if (ptr.type && ptr.type->kind != TYPE_U16)
+            cerr(e->line, "pointer dereference requires u16 or far32, got %s",
+                 type_str(ptr.type));
+        if (e->u.deref.seg == REG_NONE || e->u.deref.seg == SREG_DS) {
+            fprintf(C.nir, "    storemem %%%d, %%%d\n", ptr.vreg, val.vreg);
+        } else if (e->u.deref.seg == SREG_CS) {
+            fprintf(C.nir, ".vreg %%%d, u16, csref\n", ptr.vreg);
+            fprintf(C.nir, "    storemem %%%d, %%%d\n", ptr.vreg, val.vreg);
+        } else {
+            int seg = emit_segment_value(e->u.deref.seg);
+            fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
+                    ptr.vreg, seg, val.vreg);
+        }
+    } else {
+        cerr(e->line, "pointer dereference requires u16 or far32, got %s",
+             type_str(ptr.type));
+    }
 }
 
 static int emit_stack_addr(symbol_t *sym) {
@@ -1687,7 +1949,11 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         int dst = alloc_vreg();
         fprintf(C.nir, "    loadmem %%%d, [", dst);
         if (e->u.mem.abs_seg) {
-            fprintf(C.nir, "0x%04X:", e->u.mem.abs_seg_val);
+            int seg = e->u.mem.abs_seg_expr
+                ? require_const_expr(e->u.mem.abs_seg_expr, e->line,
+                                     "absolute memory segment")
+                : e->u.mem.abs_seg_val;
+            fprintf(C.nir, "0x%04X:", seg & 0xFFFF);
         } else if (e->u.mem.seg != REG_NONE) {
             fprintf(C.nir, "%s:", sreg_name(e->u.mem.seg));
         }
@@ -1702,44 +1968,37 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             need_plus = true;
         }
         if (e->u.mem.has_disp) {
+            int disp = e->u.mem.disp_expr
+                ? require_const_expr(e->u.mem.disp_expr, e->line,
+                                     "memory displacement")
+                : e->u.mem.disp;
             if (need_plus) fprintf(C.nir, "+");
-            fprintf(C.nir, "0x%04X", e->u.mem.disp);
+            fprintf(C.nir, "0x%04X", disp & 0xFFFF);
         }
         fprintf(C.nir, "]\n");
         /* Type inferred from declaration context — caller must check */
         return TV(dst, mk_type(TYPE_U8));
     }
     case EXPR_DEREF: {
-        /* [var] or [CS:var] — pointer dereference through a far or u16 variable.
-         * Emits vreg-based loadmem: the binder allocates the address
-         * vregs to appropriate registers (SI for offset, ES for segment).
-         * [CS:var] marks the offset vreg as csref for CS: prefix. */
-        symbol_t *sym = sym_lookup(e->u.deref.name);
-        if (!sym)
-            cerr(e->line, "undefined variable '%s' in dereference", e->u.deref.name);
-        int dst = alloc_vreg();
-        if (sym->type && sym->type->kind == TYPE_FAR && sym->vreg_seg >= 0) {
-            /* Far pointer: loadmem dst, off_vreg, seg_vreg */
-            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
-                    dst, sym->vreg, sym->vreg_seg);
-        } else {
-            /* Near pointer: loadmem dst, off_vreg */
-            if (e->u.deref.seg != REG_NONE &&
-                strcmp(sreg_name(e->u.deref.seg), "CS") == 0)
-                fprintf(C.nir, ".vreg %%%d, u16, csref\n", sym->vreg);
-            fprintf(C.nir, "    loadmem %%%d, %%%d\n", dst, sym->vreg);
-        }
-        return TV(dst, mk_type(TYPE_U8));
+        return emit_deref_load(e);
     }
     case EXPR_FAR_LIT: {
         /* Far literal — load segment via word vreg, then offset */
         int seg_tmp = alloc_vreg();
         int seg = alloc_vreg();
         int off = alloc_vreg();
-        fprintf(C.nir, "    mov %%%d, 0x%04X\n", seg_tmp, e->u.far_lit.seg);
+        int seg_val = e->u.far_lit.seg_expr
+            ? require_const_expr(e->u.far_lit.seg_expr, e->line,
+                                 "far literal segment")
+            : e->u.far_lit.seg;
+        int off_val = e->u.far_lit.off_expr
+            ? require_const_expr(e->u.far_lit.off_expr, e->line,
+                                 "far literal offset")
+            : e->u.far_lit.off;
+        fprintf(C.nir, "    mov %%%d, 0x%04X\n", seg_tmp, seg_val & 0xFFFF);
         fprintf(C.nir, ".vreg %%%d, seg\n", seg);
         fprintf(C.nir, "    mov %%%d, %%%d\n", seg, seg_tmp);
-        fprintf(C.nir, "    mov %%%d, 0x%04X\n", off, e->u.far_lit.off);
+        fprintf(C.nir, "    mov %%%d, 0x%04X\n", off, off_val & 0xFFFF);
         return TV_FAR(off, seg);
     }
     case EXPR_RAW_FIELD: {
@@ -2110,6 +2369,7 @@ static void emit_stmt(stmt_t *s) {
 
     switch (s->kind) {
     case STMT_VARDECL: {
+        resolve_type_constants(s->u.vardecl.type, s->line);
         symbol_t *sym;
         if (s->u.vardecl.name) {
             sym = sym_add(s->u.vardecl.name, s->u.vardecl.type, false);
@@ -2340,9 +2600,13 @@ static void emit_stmt(stmt_t *s) {
                     flag_name(t->u.flag_id), val.vreg);
         } else if (t->kind == EXPR_MEM) {
             fprintf(C.nir, "    storemem [");
-            if (t->u.mem.abs_seg)
-                fprintf(C.nir, "0x%04X:", t->u.mem.abs_seg_val);
-            else if (t->u.mem.seg != REG_NONE)
+            if (t->u.mem.abs_seg) {
+                int seg = t->u.mem.abs_seg_expr
+                    ? require_const_expr(t->u.mem.abs_seg_expr, t->line,
+                                         "absolute memory segment")
+                    : t->u.mem.abs_seg_val;
+                fprintf(C.nir, "0x%04X:", seg & 0xFFFF);
+            } else if (t->u.mem.seg != REG_NONE)
                 fprintf(C.nir, "%s:", sreg_name(t->u.mem.seg));
             bool np = false;
             if (t->u.mem.base != REG_NONE) {
@@ -2355,25 +2619,16 @@ static void emit_stmt(stmt_t *s) {
                 np = true;
             }
             if (t->u.mem.has_disp) {
+                int disp = t->u.mem.disp_expr
+                    ? require_const_expr(t->u.mem.disp_expr, t->line,
+                                         "memory displacement")
+                    : t->u.mem.disp;
                 if (np) fprintf(C.nir, "+");
-                fprintf(C.nir, "0x%04X", t->u.mem.disp);
+                fprintf(C.nir, "0x%04X", disp & 0xFFFF);
             }
             fprintf(C.nir, "], %%%d\n", val.vreg);
         } else if (t->kind == EXPR_DEREF) {
-            /* [var] or [CS:var] = value — store through pointer dereference.
-             * Vreg-based storemem: binder allocates address vregs. */
-            symbol_t *sym = sym_lookup(t->u.deref.name);
-            if (!sym)
-                cerr(t->line, "undefined variable '%s' in dereference", t->u.deref.name);
-            if (sym->type && sym->type->kind == TYPE_FAR && sym->vreg_seg >= 0) {
-                fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
-                        sym->vreg, sym->vreg_seg, val.vreg);
-            } else {
-                if (t->u.deref.seg != REG_NONE &&
-                    strcmp(sreg_name(t->u.deref.seg), "CS") == 0)
-                    fprintf(C.nir, ".vreg %%%d, u16, csref\n", sym->vreg);
-                fprintf(C.nir, "    storemem %%%d, %%%d\n", sym->vreg, val.vreg);
-            }
+            emit_deref_store(t, val);
         } else if (t->kind == EXPR_INDEX) {
             typed_vreg_t arr_tv = emit_expr_typed(t->u.index.array);
             int idx = emit_expr(t->u.index.index);
@@ -2491,6 +2746,10 @@ static void emit_stmt(stmt_t *s) {
     }
     case STMT_FOR: {
         /* for (CX in start..0) — LOOP instruction */
+        int end_val = require_const_expr(s->u.for_stmt.end, s->line,
+                                         "for loop end");
+        if (end_val != 0)
+            cerr(s->line, "for loop end must be 0 for LOOP lowering");
         int lbl_top = C.next_label++;
         int lbl_end = C.next_label++;
         int save_break = C.loop_break_label;
@@ -2856,6 +3115,10 @@ static void compile_fn(decl_t *d) {
     C.cur_fn_mods = d->u.fn.mods;
     C.naddr_taken = 0;
     scan_addr_taken_stmt(d->u.fn.body);
+    resolve_fn_modifier_constants(&d->u.fn.mods, d->line);
+    resolve_param_type_constants(d->u.fn.params, d->line);
+    resolve_return_type_constants(d->u.fn.returns, d->line);
+    C.cur_fn_mods = d->u.fn.mods;
     validate_ds_policy(&d->u.fn.mods, d->line);
     validate_clobbers(&d->u.fn.mods, d->line);
     if ((d->is_pub || d->u.fn.mods.is_api) && d->u.fn.mods.is_far &&
@@ -3021,6 +3284,15 @@ static void compile_fn(decl_t *d) {
 
 static void compile_struct(decl_t *d) {
     if (C.nstructs >= 128) return;
+    for (field_t *f = d->u.struc.fields; f; f = f->next) {
+        resolve_type_constants(f->type, d->line);
+        resolve_type_constants(f->as_type, d->line);
+        if (f->bits_expr) {
+            f->bits = require_const_expr(f->bits_expr, d->line,
+                                         "bit field width");
+            f->bits_expr = NULL;
+        }
+    }
     strncpy(C.structs[C.nstructs].name, d->u.struc.name, 63);
     C.structs[C.nstructs].fields = d->u.struc.fields;
     C.structs[C.nstructs].aligned = d->u.struc.aligned;
@@ -3050,6 +3322,17 @@ static void compile_struct(decl_t *d) {
 static void compile_global(decl_t *d) {
     const char *name = d->u.global.name;
     if (!name) name = "?";
+    resolve_type_constants(d->u.global.type, d->line);
+    if (d->u.global.has_at && d->u.global.at_seg_expr) {
+        d->u.global.at_seg =
+            require_const_expr(d->u.global.at_seg_expr, d->line,
+                               "global at() segment");
+        d->u.global.at_off =
+            require_const_expr(d->u.global.at_off_expr, d->line,
+                               "global at() offset");
+        d->u.global.at_seg_expr = NULL;
+        d->u.global.at_off_expr = NULL;
+    }
 
     if (d->u.global.type && d->u.global.type->kind == TYPE_ARRAY &&
         d->u.global.type->array_size == 0 && d->u.global.init) {
@@ -3127,23 +3410,33 @@ static void compile_global(decl_t *d) {
             else if (e->kind == EXPR_FAR_LIT) {
                 if (elem_type->kind != TYPE_FAR)
                     cerr(e->line, "far literal in non-far array");
+                int seg = e->u.far_lit.seg_expr
+                    ? require_const_expr(e->u.far_lit.seg_expr, e->line,
+                                         "far literal segment")
+                    : e->u.far_lit.seg;
+                int off = e->u.far_lit.off_expr
+                    ? require_const_expr(e->u.far_lit.off_expr, e->line,
+                                         "far literal offset")
+                    : e->u.far_lit.off;
                 fprintf(C.nir, "  far 0x%04X:0x%04X\n",
-                        e->u.far_lit.seg, e->u.far_lit.off);
+                        seg & 0xFFFF, off & 0xFFFF);
             }
             /* integer literal */
-            else if (e->kind == EXPR_LIT_INT) {
-                if (elem_sz == 1)
-                    fprintf(C.nir, "  db 0x%02X\n", e->u.lit_int & 0xFF);
-                else if (elem_sz == 2)
-                    fprintf(C.nir, "  dw 0x%04X\n", e->u.lit_int & 0xFFFF);
-                else if (elem_sz == 4)
-                    fprintf(C.nir, "  dd 0x%08X\n", e->u.lit_int);
-                else
-                    fprintf(C.nir, "  dw 0x%04X\n", e->u.lit_int & 0xFFFF);
-            }
             else {
-                cerr(e->line,
-                     "global initializer must be a constant (literal, &fn, or far)");
+                int val;
+                if (!eval_const_expr(e, &val)) {
+                    cerr(e->line,
+                         "global initializer must be a constant (literal, &fn, or far)");
+                    continue;
+                }
+                if (elem_sz == 1)
+                    fprintf(C.nir, "  db 0x%02X\n", val & 0xFF);
+                else if (elem_sz == 2)
+                    fprintf(C.nir, "  dw 0x%04X\n", val & 0xFFFF);
+                else if (elem_sz == 4)
+                    fprintf(C.nir, "  dd 0x%08X\n", val);
+                else
+                    fprintf(C.nir, "  dw 0x%04X\n", val & 0xFFFF);
             }
         }
 
@@ -3199,6 +3492,19 @@ static void compile_global(decl_t *d) {
 }
 
 static void compile_extern_fn(decl_t *d) {
+    resolve_fn_modifier_constants(&d->u.extern_fn.mods, d->line);
+    resolve_param_type_constants(d->u.extern_fn.params, d->line);
+    resolve_return_type_constants(d->u.extern_fn.returns, d->line);
+    if (d->u.extern_fn.has_address && d->u.extern_fn.addr_seg_expr) {
+        d->u.extern_fn.addr_seg =
+            require_const_expr(d->u.extern_fn.addr_seg_expr, d->line,
+                               "extern address segment");
+        d->u.extern_fn.addr_off =
+            require_const_expr(d->u.extern_fn.addr_off_expr, d->line,
+                               "extern address offset");
+        d->u.extern_fn.addr_seg_expr = NULL;
+        d->u.extern_fn.addr_off_expr = NULL;
+    }
     int nparams = 0;
     for (param_t *p = d->u.extern_fn.params; p; p = p->next) nparams++;
     register_function_returns(d->u.extern_fn.name, nparams,
@@ -3532,11 +3838,23 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
             import_nif(d->u.use_path, d->line);
             break;
         case DECL_CONST:
+            if (d->u.konst.init)
+                d->u.konst.value = require_const_expr(d->u.konst.init,
+                                                       d->line,
+                                                       "const initializer");
             register_constant(d->u.konst.name, d->u.konst.value);
             if (d->is_pub)
                 fprintf(C.nif, ".const %s, %d\n", d->u.konst.name, d->u.konst.value);
             break;
         case DECL_AT:
+            if (d->u.at.seg_expr) {
+                d->u.at.seg = require_const_expr(d->u.at.seg_expr, d->line,
+                                                 "at() segment");
+                d->u.at.off = require_const_expr(d->u.at.off_expr, d->line,
+                                                 "at() offset");
+                d->u.at.seg_expr = NULL;
+                d->u.at.off_expr = NULL;
+            }
             fprintf(C.nir, "\n.at 0x%04X:0x%04X\n", d->u.at.seg, d->u.at.off);
             break;
         case DECL_ENDAT:

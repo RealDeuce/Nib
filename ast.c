@@ -35,6 +35,14 @@ type_t *mk_type_array(type_t *elem, int size) {
     return t;
 }
 
+type_t *mk_type_array_expr(type_t *elem, expr_t *size_expr) {
+    type_t *t = mk_type(TYPE_ARRAY);
+    t->element_type = elem;
+    t->array_size = 0;
+    t->array_size_expr = size_expr;
+    return t;
+}
+
 type_t *mk_type_struct(const char *name) {
     type_t *t = mk_type(TYPE_STRUCT);
     t->struct_name = xstrdup(name);
@@ -136,6 +144,19 @@ expr_t *mk_expr_mem(reg_id_t seg, reg_id_t base, reg_id_t idx,
     return e;
 }
 
+expr_t *mk_expr_mem_expr(reg_id_t seg, reg_id_t base, reg_id_t idx,
+                          expr_t *disp, bool has_disp, int line) {
+    expr_t *e = mk_expr(EXPR_MEM, line);
+    e->u.mem.seg = seg;
+    e->u.mem.base = base;
+    e->u.mem.index = idx;
+    e->u.mem.disp = 0;
+    e->u.mem.disp_expr = disp;
+    e->u.mem.has_disp = has_disp;
+    e->u.mem.abs_seg = false;
+    return e;
+}
+
 expr_t *mk_expr_mem_abs(int seg, int off, int line) {
     expr_t *e = mk_expr(EXPR_MEM, line);
     e->u.mem.seg = REG_NONE;
@@ -148,10 +169,33 @@ expr_t *mk_expr_mem_abs(int seg, int off, int line) {
     return e;
 }
 
+expr_t *mk_expr_mem_abs_expr(expr_t *seg, expr_t *off, int line) {
+    expr_t *e = mk_expr(EXPR_MEM, line);
+    e->u.mem.seg = REG_NONE;
+    e->u.mem.base = REG_NONE;
+    e->u.mem.index = REG_NONE;
+    e->u.mem.disp = 0;
+    e->u.mem.disp_expr = off;
+    e->u.mem.has_disp = true;
+    e->u.mem.abs_seg = true;
+    e->u.mem.abs_seg_val = 0;
+    e->u.mem.abs_seg_expr = seg;
+    return e;
+}
+
 expr_t *mk_expr_far_lit(int seg, int off, int line) {
     expr_t *e = mk_expr(EXPR_FAR_LIT, line);
     e->u.far_lit.seg = seg;
     e->u.far_lit.off = off;
+    return e;
+}
+
+expr_t *mk_expr_far_lit_expr(expr_t *seg, expr_t *off, int line) {
+    expr_t *e = mk_expr(EXPR_FAR_LIT, line);
+    e->u.far_lit.seg = 0;
+    e->u.far_lit.off = 0;
+    e->u.far_lit.seg_expr = seg;
+    e->u.far_lit.off_expr = off;
     return e;
 }
 
@@ -180,7 +224,14 @@ expr_t *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
 
 expr_t *mk_expr_deref(const char *name, int line) {
     expr_t *e = mk_expr(EXPR_DEREF, line);
-    e->u.deref.name = xstrdup(name);
+    e->u.deref.expr = mk_expr_ident(name, line);
+    e->u.deref.seg = REG_NONE;
+    return e;
+}
+
+expr_t *mk_expr_deref_expr(expr_t *ptr, int line) {
+    expr_t *e = mk_expr(EXPR_DEREF, line);
+    e->u.deref.expr = ptr;
     e->u.deref.seg = REG_NONE;
     return e;
 }
@@ -242,10 +293,10 @@ stmt_t *mk_stmt_while(expr_t *cond, stmt_t *body, int line) {
     return s;
 }
 
-stmt_t *mk_stmt_for(expr_t *start, int end_val, stmt_t *body, int line) {
+stmt_t *mk_stmt_for(expr_t *start, expr_t *end, stmt_t *body, int line) {
     stmt_t *s = mk_stmt(STMT_FOR, line);
     s->u.for_stmt.start = start;
-    s->u.for_stmt.end_val = end_val;
+    s->u.for_stmt.end = end;
     s->u.for_stmt.body = body;
     return s;
 }
@@ -541,6 +592,18 @@ decl_t *mk_decl_global(type_t *type, const char *name,
     return d;
 }
 
+decl_t *mk_decl_global_expr(type_t *type, const char *name,
+                            int pinned_reg, reg_class_t pin_class,
+                            expr_t *init,
+                            bool has_at, expr_t *at_seg, expr_t *at_off,
+                            int line) {
+    decl_t *d = mk_decl_global(type, name, pinned_reg, pin_class, init,
+                               has_at, 0, 0, line);
+    d->u.global.at_seg_expr = at_seg;
+    d->u.global.at_off_expr = at_off;
+    return d;
+}
+
 decl_t *mk_decl_extern_global(type_t *type, const char *name, int line) {
     decl_t *d = mk_decl(DECL_EXTERN_GLOBAL, line);
     d->u.global.type = type;
@@ -573,6 +636,18 @@ decl_t *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
     return d;
 }
 
+decl_t *mk_decl_extern_fn_expr(const char *name, fn_modifiers_t mods,
+                                param_t *params, return_t *rets,
+                                reg_list_t *preserves,
+                                bool has_addr, expr_t *addr_seg,
+                                expr_t *addr_off, int line) {
+    decl_t *d = mk_decl_extern_fn(name, mods, params, rets, preserves,
+                                  has_addr, 0, 0, line);
+    d->u.extern_fn.addr_seg_expr = addr_seg;
+    d->u.extern_fn.addr_off_expr = addr_off;
+    return d;
+}
+
 decl_t *mk_decl_use(const char *path, int line) {
     decl_t *d = mk_decl(DECL_USE, line);
     d->u.use_path = xstrdup(path);
@@ -586,12 +661,26 @@ decl_t *mk_decl_const(const char *name, int value, int line) {
     return d;
 }
 
+decl_t *mk_decl_const_expr(const char *name, expr_t *init, int line) {
+    decl_t *d = mk_decl(DECL_CONST, line);
+    d->u.konst.name = xstrdup(name);
+    d->u.konst.init = init;
+    return d;
+}
+
 /* ---- Program ---- */
 
 decl_t *mk_decl_at(int seg, int off, int line) {
     decl_t *d = mk_decl(DECL_AT, line);
     d->u.at.seg = seg;
     d->u.at.off = off;
+    return d;
+}
+
+decl_t *mk_decl_at_expr(expr_t *seg, expr_t *off, int line) {
+    decl_t *d = mk_decl(DECL_AT, line);
+    d->u.at.seg_expr = seg;
+    d->u.at.off_expr = off;
     return d;
 }
 

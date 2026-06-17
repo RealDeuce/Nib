@@ -1,0 +1,33 @@
+// Test: expression support in static slots and bracket dereference sites.
+
+const SEG_BASE = 0x1000;
+const OFF_BASE = 0x0020;
+const WIDTH = 3;
+const ZERO = 0;
+
+struct Bits {
+    mode: bits(WIDTH + 1);
+    _: bits(8 - (WIDTH + 1));
+}
+
+at(SEG_BASE:OFF_BASE + 2);
+u8[WIDTH + 2] placed;
+end at;
+
+fn read_hw() -> u8 {
+    return [BX + WIDTH];
+}
+
+fn read_ptr(ptr: u16, idx: u16) -> u8 {
+    return [ptr + idx];
+}
+
+fn write_ss(ptr: u16, idx: u16, val: u8) {
+    [SS:ptr + idx] := val;
+}
+
+fn loop_count(count: u16) {
+    for (CX in count..ZERO) {
+        nop();
+    }
+}

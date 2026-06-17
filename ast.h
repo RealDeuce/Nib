@@ -62,6 +62,7 @@ typedef enum {
 struct type_node {
     type_kind_t kind;
     int         array_size;     /* for arrays and BCD: element count */
+    expr_t     *array_size_expr; /* unresolved constant expression, or NULL */
     char       *struct_name;    /* for TYPE_STRUCT */
     type_t     *element_type;   /* for TYPE_ARRAY: element type */
 };
@@ -143,7 +144,7 @@ struct expr_node {
         struct { expr_t *object; char *field_name; } field;
 
         /* FAR_LIT — seg:off constant */
-        struct { int seg; int off; } far_lit;
+        struct { int seg; int off; expr_t *seg_expr; expr_t *off_expr; } far_lit;
 
         /* CAST (as) — reinterpret type, no code */
         struct { expr_t *operand; type_t *target_type; } cast;
@@ -154,9 +155,11 @@ struct expr_node {
             reg_id_t base;      /* WREG_BX/BP or REG_NONE */
             reg_id_t index;     /* WREG_SI/DI or REG_NONE */
             int      disp;
+            expr_t  *disp_expr;
             bool     has_disp;
             bool     abs_seg;   /* true for [0xB800:0x0000] form */
             int      abs_seg_val;
+            expr_t  *abs_seg_expr;
         } mem;
 
         /* ARRAY_INIT — [expr, expr, ...] */
@@ -170,9 +173,9 @@ struct expr_node {
             expr_t *args;           /* argument list */
         } indirect_call;
 
-        /* DEREF — [var] pointer dereference */
+        /* DEREF — [expr] pointer dereference */
         struct {
-            char    *name;          /* variable name */
+            expr_t  *expr;          /* pointer expression */
             reg_id_t seg;           /* segment override or REG_NONE */
         } deref;
     } u;
@@ -228,7 +231,7 @@ struct stmt_node {
         struct { expr_t *cond; stmt_t *body; } while_stmt;
 
         /* FOR (CX countdown) */
-        struct { expr_t *start; int end_val; stmt_t *body; } for_stmt;
+        struct { expr_t *start; expr_t *end; stmt_t *body; } for_stmt;
 
         /* RETURN */
         expr_t *ret_expr;  /* linked expr list, NULL for bare return */
@@ -296,6 +299,7 @@ struct field_node {
     char   *name;       /* NULL for padding '_' */
     type_t *type;       /* NULL for bit fields */
     int     bits;       /* >0 for bit fields */
+    expr_t *bits_expr;  /* unresolved constant expression, or NULL */
     bool    is_bits;
     type_t *as_type;    /* typed pointer annotation, or NULL */
 
@@ -373,9 +377,12 @@ typedef struct {
     bool has_at;
     int  at_seg;
     int  at_off;
+    expr_t *at_seg_expr;
+    expr_t *at_off_expr;
     ds_policy_kind_t ds_policy;
     char *ds_symbol;
     int  ds_literal;
+    expr_t *ds_literal_expr;
 } fn_modifiers_t;
 
 struct decl_node {
@@ -412,6 +419,8 @@ struct decl_node {
             bool    has_at;
             int     at_seg;
             int     at_off;
+            expr_t *at_seg_expr;
+            expr_t *at_off_expr;
         } global;
 
         /* EXTERN_FN */
@@ -430,6 +439,8 @@ struct decl_node {
             bool           has_address;
             int            addr_seg;
             int            addr_off;
+            expr_t        *addr_seg_expr;
+            expr_t        *addr_off_expr;
             /* Implementation body (NULL for declaration-only externs) */
             stmt_t        *body;
         } extern_fn;
@@ -441,12 +452,15 @@ struct decl_node {
         struct {
             char *name;
             int   value;
+            expr_t *init;
         } konst;
 
         /* AT (standalone placement) */
         struct {
             int seg;
             int off;
+            expr_t *seg_expr;
+            expr_t *off_expr;
         } at;
     } u;
 
@@ -465,6 +479,7 @@ typedef struct {
 /* Implemented in ast.c */
 type_t     *mk_type(type_kind_t kind);
 type_t     *mk_type_array(type_t *elem, int size);
+type_t     *mk_type_array_expr(type_t *elem, expr_t *size_expr);
 type_t     *mk_type_struct(const char *name);
 
 expr_t     *mk_expr_int(int val, int line);
@@ -480,13 +495,18 @@ expr_t     *mk_expr_field(expr_t *obj, const char *field, int line);
 expr_t     *mk_expr_raw_field(expr_t *obj, const char *field, int line);
 expr_t     *mk_expr_mem(reg_id_t seg, reg_id_t base, reg_id_t idx,
                          int disp, bool has_disp, int line);
+expr_t     *mk_expr_mem_expr(reg_id_t seg, reg_id_t base, reg_id_t idx,
+                              expr_t *disp, bool has_disp, int line);
 expr_t     *mk_expr_mem_abs(int seg, int off, int line);
+expr_t     *mk_expr_mem_abs_expr(expr_t *seg, expr_t *off, int line);
 expr_t     *mk_expr_far_lit(int seg, int off, int line);
+expr_t     *mk_expr_far_lit_expr(expr_t *seg, expr_t *off, int line);
 expr_t     *mk_expr_cast(expr_t *operand, type_t *target, int line);
 expr_t     *mk_expr_array_init(expr_t *elements, int line);
 expr_t     *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
                                    const char *module_name, expr_t *args, int line);
 expr_t     *mk_expr_deref(const char *name, int line);
+expr_t     *mk_expr_deref_expr(expr_t *ptr, int line);
 
 stmt_t     *mk_stmt_vardecl(type_t *type, const char *name,
                              int pinned_reg, reg_class_t pin_class,
@@ -496,7 +516,7 @@ stmt_t     *mk_stmt_toggle(expr_t *target, expr_t *value, int line);
 stmt_t     *mk_stmt_expr(expr_t *e, int line);
 stmt_t     *mk_stmt_if(expr_t *cond, stmt_t *then_b, stmt_t *else_b, int line);
 stmt_t     *mk_stmt_while(expr_t *cond, stmt_t *body, int line);
-stmt_t     *mk_stmt_for(expr_t *start, int end_val, stmt_t *body, int line);
+stmt_t     *mk_stmt_for(expr_t *start, expr_t *end, stmt_t *body, int line);
 stmt_t     *mk_stmt_return(expr_t *e, int line);
 flag_expr_t *mk_fexpr_flag(reg_id_t id);
 flag_expr_t *mk_fexpr_not(flag_expr_t *e);
@@ -547,15 +567,27 @@ decl_t     *mk_decl_global(type_t *type, const char *name,
                             expr_t *init,
                             bool has_at, int at_seg, int at_off,
                             int line);
+decl_t     *mk_decl_global_expr(type_t *type, const char *name,
+                                int pinned_reg, reg_class_t pin_class,
+                                expr_t *init,
+                                bool has_at, expr_t *at_seg, expr_t *at_off,
+                                int line);
 decl_t     *mk_decl_extern_global(type_t *type, const char *name, int line);
 decl_t     *mk_decl_extern_fn(const char *name, fn_modifiers_t mods,
                                param_t *params, return_t *rets,
                                reg_list_t *preserves,
                                bool has_addr, int addr_seg, int addr_off,
                                int line);
+decl_t     *mk_decl_extern_fn_expr(const char *name, fn_modifiers_t mods,
+                                    param_t *params, return_t *rets,
+                                    reg_list_t *preserves,
+                                    bool has_addr, expr_t *addr_seg,
+                                    expr_t *addr_off, int line);
 decl_t     *mk_decl_use(const char *path, int line);
 decl_t     *mk_decl_const(const char *name, int value, int line);
+decl_t     *mk_decl_const_expr(const char *name, expr_t *init, int line);
 decl_t     *mk_decl_at(int seg, int off, int line);
+decl_t     *mk_decl_at_expr(expr_t *seg, expr_t *off, int line);
 decl_t     *mk_decl_endat(int line);
 
 program_t  *mk_program(void);

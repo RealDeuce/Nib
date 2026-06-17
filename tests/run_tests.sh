@@ -872,6 +872,30 @@ else
     fail "cmp-mem-mem" "$(./nibbind "$TEST_TMPDIR"/t_cmp_mem_mem.nir -o "$TEST_TMPDIR"/t_cmp_mem_mem.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_high_vregs.nir <<'NIR'
+; Binder regression: functions with vregs above 255 must still get
+; real registers/spills and address operands, not PREG_NONE/(null).
+.fn high_vregs
+    mov %298, 0
+    mov %299, 0
+    loadb %300, %298[%299]
+.vreg %300, u8
+    retval %300
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_high_vregs.nir -o "$TEST_TMPDIR"/t_high_vregs.asm >/dev/null 2>&1; then
+    if ./nibasm "$TEST_TMPDIR"/t_high_vregs.asm -o "$TEST_TMPDIR"/t_high_vregs.bin >/dev/null 2>&1 &&
+       ! grep -q '(null)\|%_' "$TEST_TMPDIR"/t_high_vregs.asm &&
+       grep -q 'mov AL, \[\(BX\|BP\)+\(SI\|DI\)\]' "$TEST_TMPDIR"/t_high_vregs.asm; then
+        pass "high-vregs: vregs above 255 bind and assemble"
+    else
+        fail "high-vregs" "high vregs produced invalid assembly"
+    fi
+else
+    fail "high-vregs" "$(./nibbind "$TEST_TMPDIR"/t_high_vregs.nir -o "$TEST_TMPDIR"/t_high_vregs.asm 2>&1 | tail -1)"
+fi
+
 # Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)
 if [ -f "$TEST_TMPDIR"/t_byte_vreg.asm ]; then
     if grep -q 'mov [A-D]L, [A-D]L\|xor [A-D]H, [A-D]H\|xor [A-D]X, [A-D]X' "$TEST_TMPDIR"/t_byte_vreg.asm; then
@@ -910,6 +934,26 @@ if [ -f tests/t_array_infer.nir ]; then
         pass "array-infer: brace initializer inferred u8[19]"
     else
         fail "array-infer" "unsized brace initializer did not infer u8[19]"
+    fi
+fi
+
+if [ -f "$TEST_TMPDIR"/t_expr_sites.asm ]; then
+    expr_read_hw=$(sed -n '/t_expr_sites_read_hw:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_expr_sites.asm)
+    expr_read_ptr=$(sed -n '/t_expr_sites_read_ptr:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_expr_sites.asm)
+    expr_write_ss=$(sed -n '/t_expr_sites_write_ss:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_expr_sites.asm)
+    expr_loop=$(sed -n '/t_expr_sites_loop_count:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_expr_sites.asm)
+    if grep -q '^\.global placed, u8\[5\]' tests/t_expr_sites.nir &&
+       grep -q '^\.at 0x1000:0x0022' tests/t_expr_sites.nir &&
+       printf "%s\n" "$expr_read_hw" | grep -q 'mov AL, \[BX+0x0003\]' &&
+       printf "%s\n" "$expr_read_ptr" | grep -q 'add SI, BX' &&
+       printf "%s\n" "$expr_read_ptr" | grep -q 'mov AL, \[SI\]' &&
+       printf "%s\n" "$expr_write_ss" | grep -q 'mov AX, SS' &&
+       printf "%s\n" "$expr_write_ss" | grep -q 'mov ES, AX' &&
+       printf "%s\n" "$expr_write_ss" | grep -q 'mov \[ES:SI\], CL' &&
+       printf "%s\n" "$expr_loop" | grep -q 'loop t_expr_sites_loop_count_.L0'; then
+        pass "expr-sites: static const expressions and pointer expressions"
+    else
+        fail "expr-sites" "static or bracket expression lowering changed"
     fi
 fi
 
@@ -1110,6 +1154,21 @@ if ./nib "$TEST_TMPDIR"/t_err_rettype.nib >/dev/null 2>&1; then
     pass "return literal (promotion OK)"
 else
     pass "return type check"
+fi
+
+echo 'const ONE = 1;
+fn bad(n: u16) { for (CX in n..ONE) { nop(); } }' > "$TEST_TMPDIR"/t_err_for_end.nib
+if ./nib "$TEST_TMPDIR"/t_err_for_end.nib >/dev/null 2>&1; then
+    fail "for end zero" "non-zero countdown end should have failed"
+else
+    pass "for end zero (correctly rejected)"
+fi
+
+echo 'fn bad(x: u8) -> u8 { return [x]; }' > "$TEST_TMPDIR"/t_err_deref_type.nib
+if ./nib "$TEST_TMPDIR"/t_err_deref_type.nib >/dev/null 2>&1; then
+    fail "deref type" "u8 dereference should have failed"
+else
+    pass "deref type (correctly rejected)"
 fi
 
 echo ""

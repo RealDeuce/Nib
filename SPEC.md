@@ -226,9 +226,16 @@ constants auto-promote to the type required by context (u8, u16, etc.).
 ```
 const PORT_LCD = 0x60;
 const SCREEN_WIDTH = 480;
+const BUFFER_END = 0x0700 + SCREEN_WIDTH;
 
 port_out(PORT_LCD, data);           // same as port_out(0x60, data)
 ```
+
+Top-level constants use constant expressions: integer literals, earlier
+constants, parentheses, unary `-`/`~`, and integer arithmetic/bitwise
+operators. Constant expressions are also accepted in static layout
+positions such as array sizes, `bits(N)`, `at(seg:off)`, fixed extern
+addresses, and `for (CX in start..end)` end bounds.
 
 #### Const locals
 
@@ -493,6 +500,8 @@ Accepted policies:
   a global or initialized data object.
 - `ds(0xNNNN)` — save caller `DS`, set `DS` to the literal 16-bit
   segment for the body, and restore caller `DS` before returning.
+  Constant expressions use `ds((expr))` so `ds(symbol)` remains the
+  data-symbol policy.
 
 For interrupt handlers, DS setup is emitted after the interrupt wrapper
 saves registers and DS restore happens before `iret`. For normal and far
@@ -529,6 +538,7 @@ fn reset() { goto boot; }       // placed at FFFF:0000
 
 `at()` can appear as a standalone directive, on a function
 (`fn at(seg:off) name()`), or on a global (`u16 x at(seg:off)`).
+Both `seg` and `off` are constant expressions.
 All three forms push the position stack.
 
 **No auto-pop.** Only explicit `end at;` or the end of a module
@@ -932,11 +942,13 @@ Note: register names in memory expressions are always uppercase.
 
 #### Pointer dereference
 
-Variables of type `u16` or `far32` can be used as pointers inside brackets:
+Expressions of type `u16` or `far32` can be used as pointers inside
+brackets:
 
 ```
 fn read_byte(ptr: u16) -> u8 {
     return [ptr];               // loads from [ptr]
+    return [ptr + 1];           // pointer expression
 }
 
 fn read_far(src: far32) -> u8 {
@@ -945,13 +957,15 @@ fn read_far(src: far32) -> u8 {
 
 [ptr] := val;                   // store through near pointer
 [src] := val;                   // store through far pointer
-u8 ch = [ES:my_offset];        // segment override with variable
+u8 ch = [ES:my_offset + 1];     // segment override with expression
 ```
 
 For `far32` pointers, the compiler sets up ES:SI from the pointer's
 segment and offset components. For `u16` pointers, SI is set up and
 DS is used as the implicit segment. A segment override prefix can be
-specified with `[SEG:var]`.
+specified with `[SEG:expr]`. If the bracket payload is a legal V20
+hardware address expression such as `[BX+SI+4]`, it is emitted as a
+direct memory operand rather than as a pointer dereference.
 
 #### Checked array access
 
@@ -1375,7 +1389,9 @@ for (CX in 100..0) {
 ```
 
 The loop variable must be `CX` (pinned to CX). The range must count
-down to 0. This is the only for loop — general iteration uses `while`.
+down to 0. The start bound may be a runtime expression. The end bound
+may use a constant expression, but it must evaluate to 0. This is the
+only for loop — general iteration uses `while`.
 
 ### break / continue
 

@@ -85,6 +85,11 @@ static void set_ds_policy_literal(int seg) {
     current_mods.ds_literal = seg;
 }
 
+static void set_ds_policy_literal_expr(expr_t *seg) {
+    current_mods.ds_policy = DS_POLICY_LITERAL;
+    current_mods.ds_literal_expr = seg;
+}
+
 /* ---- Compile-time defines for `when` conditional compilation ---- */
 #define MAX_DEFINES 64
 static struct {
@@ -149,7 +154,7 @@ static void program_splice(program_t *prog, decl_t *list) {
     struct { int reg; int rclass; } regval;
     flag_expr_t   *fexpr;
     flag_case_t   *fcase;
-    struct { bool has_at; int seg; int off; } at_clause;
+    struct { bool has_at; int seg; int off; expr_t *seg_expr; expr_t *off_expr; } at_clause;
 }
 
 /* ---- Literals and identifiers ---- */
@@ -192,13 +197,13 @@ static void program_splice(program_t *prog, decl_t *list) {
 /* ---- Nonterminal types ---- */
 %type <type>   type
 %type <retlist> return_clause return_list return_item
-%type <expr>   expr postfix_expr primary_expr mem_access mem_inner arg_list return_expr_list return_expr_multi assign_targets assign_target_list assign_target
+%type <expr>   expr const_expr postfix_expr primary_expr mem_access arg_list return_expr_list return_expr_multi assign_targets assign_target_list assign_target
 %type <stmt>   stmt stmt_list var_decl assignment if_stmt while_stmt for_stmt asm_block when_stmt
 %type <decl>   top_decl function_def struct_def extern_decl global_decl use_decl const_decl when_body when_block at_decl end_at_decl
 %type <param>  param param_list extern_param extern_param_list
 %type <field>  struct_field struct_fields
 %type <rlist>  reg_flag_list reg_flag_list_opt reg_or_flag asm_annotation preserves_clause
-%type <regval> reg_name word_reg byte_reg seg_reg flag mem_base
+%type <regval> reg_name word_reg byte_reg seg_reg flag
 %type <retlist> return_clause_extern
 %type <sval>   any_ident
 %type <fcase>  flag_block flag_cases flag_case
@@ -268,8 +273,8 @@ top_decl
     ;
 
 at_decl
-    : KW_AT '(' LIT_INT ':' LIT_INT ')' ';'
-        { $$ = mk_decl_at($3, $5, yyline); }
+    : KW_AT '(' const_expr ':' const_expr ')' ';'
+        { $$ = mk_decl_at_expr($3, $5, yyline); }
     ;
 
 end_at_decl
@@ -286,23 +291,23 @@ use_decl
 /* ==== Constant declarations ==== */
 
 const_decl
-    : KW_CONST IDENT '=' LIT_INT ';'
-        { $$ = mk_decl_const($2, $4, yyline); }
+    : KW_CONST IDENT '=' const_expr ';'
+        { $$ = mk_decl_const_expr($2, $4, yyline); }
     ;
 
 /* ==== Global variable declarations ==== */
 
 global_decl
     : type IDENT at_clause '=' expr ';'
-        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, $5, $3.has_at, $3.seg, $3.off, yyline); }
+        { $$ = mk_decl_global_expr($1, $2, REG_NONE, REGCLASS_WORD, $5, $3.has_at, $3.seg_expr, $3.off_expr, yyline); }
     | type IDENT at_clause '=' '{' arg_list '}' ';'
-        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, mk_expr_array_init($6, yyline), $3.has_at, $3.seg, $3.off, yyline); }
+        { $$ = mk_decl_global_expr($1, $2, REG_NONE, REGCLASS_WORD, mk_expr_array_init($6, yyline), $3.has_at, $3.seg_expr, $3.off_expr, yyline); }
     | type IDENT at_clause ';'
-        { $$ = mk_decl_global($1, $2, REG_NONE, REGCLASS_WORD, NULL, $3.has_at, $3.seg, $3.off, yyline); }
+        { $$ = mk_decl_global_expr($1, $2, REG_NONE, REGCLASS_WORD, NULL, $3.has_at, $3.seg_expr, $3.off_expr, yyline); }
     | type reg_name at_clause '=' expr ';'
-        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, $5, $3.has_at, $3.seg, $3.off, yyline); }
+        { $$ = mk_decl_global_expr($1, NULL, $2.reg, $2.rclass, $5, $3.has_at, $3.seg_expr, $3.off_expr, yyline); }
     | type reg_name at_clause ';'
-        { $$ = mk_decl_global($1, NULL, $2.reg, $2.rclass, NULL, $3.has_at, $3.seg, $3.off, yyline); }
+        { $$ = mk_decl_global_expr($1, NULL, $2.reg, $2.rclass, NULL, $3.has_at, $3.seg_expr, $3.off_expr, yyline); }
     | KW_FAR type IDENT at_clause '=' expr ';'
         { yyerror("far is not valid on data declarations; use at() for placement and far32 for pointer data"); YYERROR; }
     | KW_FAR type IDENT at_clause '=' '{' arg_list '}' ';'
@@ -317,9 +322,9 @@ global_decl
 
 at_clause
     : /* empty */
-        { $$.has_at = false; $$.seg = 0; $$.off = 0; }
-    | KW_AT '(' LIT_INT ':' LIT_INT ')'
-        { $$.has_at = true; $$.seg = $3; $$.off = $5; }
+        { $$.has_at = false; $$.seg = 0; $$.off = 0; $$.seg_expr = NULL; $$.off_expr = NULL; }
+    | KW_AT '(' const_expr ':' const_expr ')'
+        { $$.has_at = true; $$.seg = 0; $$.off = 0; $$.seg_expr = $3; $$.off_expr = $5; }
     ;
 
 /* ==== Struct definitions ==== */
@@ -343,10 +348,10 @@ struct_field
         { $$ = mk_field_typed_ptr($2, $1, $4); }
     | IDENT ':' type ';'
         { $$ = mk_field($1, $3); }
-    | IDENT ':' KW_BITS '(' LIT_INT ')' ';'
-        { $$ = mk_field_bits($1, $5); }
-    | '_' ':' KW_BITS '(' LIT_INT ')' ';'
-        { $$ = mk_field_bits(NULL, $5); }
+    | IDENT ':' KW_BITS '(' const_expr ')' ';'
+        { $$ = mk_field_bits($1, 0); $$->bits_expr = $5; }
+    | '_' ':' KW_BITS '(' const_expr ')' ';'
+        { $$ = mk_field_bits(NULL, 0); $$->bits_expr = $5; }
     ;
 
 /* ==== Function definitions ==== */
@@ -376,6 +381,12 @@ ds_clause
               free($1); YYERROR;
           }
           free($1); set_ds_policy_literal($3); }
+    | IDENT '(' '(' const_expr ')' ')'
+        { if (strcmp($1, "ds") != 0) {
+              yyerror("expected ds(...) function policy");
+              free($1); YYERROR;
+          }
+          free($1); set_ds_policy_literal_expr($4); }
     ;
 
 fn_preserves
@@ -397,8 +408,8 @@ fn_modifier
     | KW_API                    { current_mods.is_api = true; }
     | KW_INTERRUPT              { current_mods.is_interrupt = true; }
     | KW_BARE                   { current_mods.is_bare = true; }
-    | KW_AT '(' LIT_INT ':' LIT_INT ')'
-        { current_mods.has_at = true; current_mods.at_seg = $3; current_mods.at_off = $5; }
+    | KW_AT '(' const_expr ':' const_expr ')'
+        { current_mods.has_at = true; current_mods.at_seg_expr = $3; current_mods.at_off_expr = $5; }
     ;
 
 return_clause
@@ -439,11 +450,11 @@ extern_decl
     | extern_fn_start extern_modifiers IDENT '(' ')' return_clause_extern ds_clause preserves_clause ';'
         { $$ = mk_decl_extern_fn($3, current_mods, NULL, $6,
               $8, false, 0, 0, yyline); }
-    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' extern_param_list ')' return_clause_extern ds_clause preserves_clause ';'
-        { $$ = mk_decl_extern_fn($8, current_mods, $10, $12,
+    | extern_fn_start extern_modifiers '[' const_expr ':' const_expr ']' IDENT '(' extern_param_list ')' return_clause_extern ds_clause preserves_clause ';'
+        { $$ = mk_decl_extern_fn_expr($8, current_mods, $10, $12,
               $14, true, $4, $6, yyline); }
-    | extern_fn_start extern_modifiers '[' LIT_INT ':' LIT_INT ']' IDENT '(' ')' return_clause_extern ds_clause preserves_clause ';'
-        { $$ = mk_decl_extern_fn($8, current_mods, NULL, $11,
+    | extern_fn_start extern_modifiers '[' const_expr ':' const_expr ']' IDENT '(' ')' return_clause_extern ds_clause preserves_clause ';'
+        { $$ = mk_decl_extern_fn_expr($8, current_mods, NULL, $11,
               $13, true, $4, $6, yyline); }
     | extern_fn_start extern_modifiers IDENT '(' extern_param_list ')' return_clause_extern ds_clause preserves_clause '{' stmt_list '}'
         { $$ = mk_decl_extern_fn($3, current_mods, $5, $7,
@@ -685,7 +696,7 @@ while_stmt
     ;
 
 for_stmt
-    : KW_FOR '(' REG_CX KW_IN expr OP_DOTDOT LIT_INT ')' '{' stmt_list '}'
+    : KW_FOR '(' REG_CX KW_IN expr OP_DOTDOT const_expr ')' '{' stmt_list '}'
         { $$ = mk_stmt_for($5, $7, $10, yyline); }
     ;
 
@@ -778,6 +789,39 @@ expr
         { $$ = $1; }
     ;
 
+const_expr
+    : const_expr '|' const_expr
+        { $$ = mk_expr_binop(NIB_OR, $1, $3, yyline); }
+    | const_expr '^' const_expr
+        { $$ = mk_expr_binop(NIB_XOR, $1, $3, yyline); }
+    | const_expr '&' const_expr
+        { $$ = mk_expr_binop(NIB_AND, $1, $3, yyline); }
+    | const_expr OP_SHL const_expr
+        { $$ = mk_expr_binop(NIB_SHL, $1, $3, yyline); }
+    | const_expr OP_SHR const_expr
+        { $$ = mk_expr_binop(NIB_SHR, $1, $3, yyline); }
+    | const_expr '+' const_expr
+        { $$ = mk_expr_binop(NIB_ADD, $1, $3, yyline); }
+    | const_expr '-' const_expr
+        { $$ = mk_expr_binop(NIB_SUB, $1, $3, yyline); }
+    | const_expr '*' const_expr
+        { $$ = mk_expr_binop(NIB_MUL, $1, $3, yyline); }
+    | const_expr '/' const_expr
+        { $$ = mk_expr_binop(NIB_DIV, $1, $3, yyline); }
+    | const_expr '%' const_expr
+        { $$ = mk_expr_binop(NIB_MOD, $1, $3, yyline); }
+    | '-' const_expr %prec UNARY
+        { $$ = mk_expr_unop(NIB_NEG, $2, yyline); }
+    | '~' const_expr %prec UNARY
+        { $$ = mk_expr_unop(NIB_NOT, $2, yyline); }
+    | LIT_INT
+        { $$ = mk_expr_int($1, yyline); }
+    | IDENT
+        { $$ = mk_expr_ident($1, yyline); }
+    | '(' const_expr ')'
+        { $$ = $2; }
+    ;
+
 postfix_expr
     : postfix_expr KW_AS '(' type ')'
         { $$ = mk_expr_cast($1, $4, yyline); }
@@ -816,47 +860,10 @@ primary_expr
 /* ---- Memory access [seg:expr] or [expr] ---- */
 
 mem_access
-    : '[' mem_inner ']'
-        { $$ = $2; }
-    | '[' seg_reg ':' mem_inner ']'
-        { $$ = $4;
-          if ($$->kind == EXPR_DEREF) $$->u.deref.seg = $2.reg;
-          else $$->u.mem.seg = $2.reg; }
-    | '[' LIT_INT ':' LIT_INT ']'
-        { $$ = mk_expr_mem_abs($2, $4, yyline); }
-    ;
-
-mem_inner
-    : mem_base
-        { $$ = mk_expr_mem(REG_NONE, $1.reg, REG_NONE, 0, false, yyline);
-          /* Determine if this is base or index based on register */
-          if ($1.reg == WREG_SI || $1.reg == WREG_DI)
-            { $$->u.mem.base = REG_NONE; $$->u.mem.index = $1.reg; }
-          else
-            { $$->u.mem.base = $1.reg; $$->u.mem.index = REG_NONE; }
-        }
-    | mem_base '+' mem_base
-        { $$ = mk_expr_mem(REG_NONE, $1.reg, $3.reg, 0, false, yyline); }
-    | mem_base '+' LIT_INT
-        { $$ = mk_expr_mem(REG_NONE, REG_NONE, REG_NONE, $3, true, yyline);
-          if ($1.reg == WREG_SI || $1.reg == WREG_DI)
-            { $$->u.mem.index = $1.reg; }
-          else
-            { $$->u.mem.base = $1.reg; }
-        }
-    | mem_base '+' mem_base '+' LIT_INT
-        { $$ = mk_expr_mem(REG_NONE, $1.reg, $3.reg, $5, true, yyline); }
-    | LIT_INT
-        { $$ = mk_expr_mem(REG_NONE, REG_NONE, REG_NONE, $1, true, yyline); }
-    | IDENT
-        { $$ = mk_expr_deref($1, yyline); }
-    ;
-
-mem_base
-    : REG_BX    { $$.reg = WREG_BX; $$.rclass = REGCLASS_WORD; }
-    | REG_SI    { $$.reg = WREG_SI; $$.rclass = REGCLASS_WORD; }
-    | REG_DI    { $$.reg = WREG_DI; $$.rclass = REGCLASS_WORD; }
-    | REG_BP    { $$.reg = WREG_BP; $$.rclass = REGCLASS_WORD; }
+    : '[' expr ']'
+        { $$ = mk_expr_deref_expr($2, yyline); }
+    | '[' seg_reg ':' expr ']'
+        { $$ = mk_expr_deref_expr($4, yyline); $$->u.deref.seg = $2.reg; }
     ;
 
 /* ---- Function call arguments ---- */
@@ -940,13 +947,13 @@ type
     | TY_SEG                    { $$ = mk_type(TYPE_SEG); }
     | TY_BOOL                   { $$ = mk_type(TYPE_BOOL); }
     | KW_FAR32                  { $$ = mk_type(TYPE_FAR); }
-    | TY_U8 '[' LIT_INT ']'    { $$ = mk_type_array(mk_type(TYPE_U8), $3); }
+    | TY_U8 '[' const_expr ']' { $$ = mk_type_array_expr(mk_type(TYPE_U8), $3); }
     | TY_U8 '[' ']'            { $$ = mk_type_array(mk_type(TYPE_U8), 0); }
-    | TY_U16 '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_U16), $3); }
+    | TY_U16 '[' const_expr ']' { $$ = mk_type_array_expr(mk_type(TYPE_U16), $3); }
     | TY_U16 '[' ']'           { $$ = mk_type_array(mk_type(TYPE_U16), 0); }
-    | TY_BCD '[' LIT_INT ']'   { $$ = mk_type_array(mk_type(TYPE_BCD), $3); }
-    | KW_FAR32 '[' LIT_INT ']' { $$ = mk_type_array(mk_type(TYPE_FAR), $3); }
-    | KW_STRUCT IDENT '[' LIT_INT ']' { $$ = mk_type_array(mk_type_struct($2), $4); }
+    | TY_BCD '[' const_expr ']' { $$ = mk_type_array_expr(mk_type(TYPE_BCD), $3); }
+    | KW_FAR32 '[' const_expr ']' { $$ = mk_type_array_expr(mk_type(TYPE_FAR), $3); }
+    | KW_STRUCT IDENT '[' const_expr ']' { $$ = mk_type_array_expr(mk_type_struct($2), $4); }
     | KW_STRUCT IDENT           { $$ = mk_type_struct($2); }
     ;
 
