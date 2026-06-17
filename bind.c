@@ -3088,6 +3088,31 @@ static void remove_insn_defs_from_live(func_t *fn, ir_insn_t *ins,
     }
 }
 
+static bool vreg_live_after_insn(func_t *fn, int insn_idx, int vreg) {
+    if (!fn || vreg < 0 || vreg >= fn->nvregs)
+        return false;
+
+    bblock_t *bb = NULL;
+    for (int b = 0; b < fn->nblocks; b++) {
+        if ((int)fn->blocks[b].start <= insn_idx &&
+            insn_idx < (int)fn->blocks[b].end) {
+            bb = &fn->blocks[b];
+            break;
+        }
+    }
+    if (!bb)
+        return false;
+
+    uint64_t live[VREG_WORDS];
+    memcpy(live, bb->live_out, sizeof(live));
+    for (int i = (int)bb->end - 1; i > insn_idx; i--) {
+        ir_insn_t *ins = &fn->insns[i];
+        remove_insn_defs_from_live(fn, ins, live);
+        add_insn_uses_to_live(fn, ins, live);
+    }
+    return vset_test(live, vreg);
+}
+
 static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg) {
     bblock_t *bb = NULL;
     for (int b = 0; b < fn->nblocks; b++) {
@@ -3609,8 +3634,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     }
                     if (is_ret_dst) continue;
                     if (fn->vregs[v].assigned != PREG_BP) continue;
-                    if (fn->vregs[v].last_use <= (int)i) continue;
-                    if (fn->vregs[v].def_pos > (int)i) continue;
+                    if (!vreg_live_after_insn(fn, i, v)) continue;
                     caller_bp_live = true;
                     break;
                 }
@@ -3635,8 +3659,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     int preg = fn->vregs[v].assigned;
                     if (preg != PREG_BX && !pregs_alias(preg, PREG_BX))
                         continue;
-                    if (fn->vregs[v].last_use <= (int)i) continue;
-                    if (fn->vregs[v].def_pos > (int)i) continue;
+                    if (!vreg_live_after_insn(fn, i, v)) continue;
                     bx_live = true;
                     break;
                 }
@@ -3654,8 +3677,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 if (is_ret_dst) continue;
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
-                if (fn->vregs[v].last_use <= (int)i) continue;
-                if (fn->vregs[v].def_pos > (int)i) continue;
+                if (!vreg_live_after_insn(fn, i, v)) continue;
                 int push_reg = preg;
                 if (preg >= PREG_AL && preg <= PREG_BH)
                     push_reg = preg_alias_parent[preg];
@@ -3820,8 +3842,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 if (v == ins->dst) continue;
                 int preg = fn->vregs[v].assigned;
                 if (preg == PREG_NONE || preg == PREG_SP) continue;
-                if (fn->vregs[v].last_use <= (int)i) continue;
-                if (fn->vregs[v].def_pos > (int)i) continue;
+                if (!vreg_live_after_insn(fn, i, v)) continue;
                 int push_reg = preg;
                 if (preg >= PREG_AL && preg <= PREG_BH)
                     push_reg = preg_alias_parent[preg];

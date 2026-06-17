@@ -570,6 +570,19 @@ if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then
     fi
 fi
 
+# Reassigning a pinned AL local after a later indirect call must not make
+# the stale earlier value look live across that call and restore AX over
+# the AL return.
+if [ -f "$TEST_TMPDIR"/t_icall_ret_restore.asm ]; then
+    ret_window=$(sed -n '/call far \[BP+4\]/,/jc /p' "$TEST_TMPDIR"/t_icall_ret_restore.asm)
+    if printf "%s\n" "$ret_window" | grep -q 'call far \[BP+4\]' &&
+       ! printf "%s\n" "$ret_window" | grep -q 'pop AX'; then
+        pass "icall-ret-restore: AL return survives caller restore"
+    else
+        fail "icall-ret-restore" "caller restored AX over indirect AL return"
+    fi
+fi
+
 # Flags returned by an indirect API call must be consumed from FLAGS,
 # not from the arbitrary vreg assigned to the getflag pseudo-result.
 if [ -f "$TEST_TMPDIR"/t_flag_after_icall.asm ]; then

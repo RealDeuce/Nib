@@ -1,0 +1,22 @@
+// Test: caller-save insertion must not restore AX over an AL return
+// from a later indirect call when an earlier value is redefined.
+
+pub extern fn read_first() -> u8 in AL
+    clobbers(FLAGS);
+
+pub extern fn read_second() -> u8 in AL
+    clobbers(FLAGS);
+
+fn poll(first_addr: far32 in ES:SI, second_addr: far32) -> u8 {
+    u8 AL = first_addr as read_first from io();
+    if (!CF) {
+        return AL;
+    }
+
+    AL := second_addr as read_second from io();
+    if (!CF) {
+        return AL;
+    }
+
+    return 0;
+}
