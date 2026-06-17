@@ -806,6 +806,87 @@ else
     fail "call-const-arg-spill" "$(./nibbind "$TEST_TMPDIR"/t_call_const_arg_spill.nir -o "$TEST_TMPDIR"/t_call_const_arg_spill.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_call_arg_order.nir <<'NIR'
+; Binder regression: setting up one argument must not clobber the source
+; register for a later argument. Here %0 starts in AL and must be copied
+; to BL before the literal page value in DI is materialized into AL.
+.fn read_paged
+.param %0, u8, "page", register, pin=AL
+.param %1, u8, "index", register, pin=BL
+.returns u8
+    retval %1
+    ret
+.endfn
+
+.fn call_arg_order
+.param %0, u8, "index", register, pin=AL
+.returns u8
+.vreg %1, u16, pin=DI
+.vreg %2, u8
+    mov %1, 2
+    call %2, read_paged, %1, %0
+    retval %2
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_call_arg_order.nir -o "$TEST_TMPDIR"/t_call_arg_order.asm >/dev/null 2>&1; then
+    arg_order_window=$(sed -n '/call_arg_order_call_arg_order:/,/call .*read_paged/p' "$TEST_TMPDIR"/t_call_arg_order.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_call_arg_order.asm -o "$TEST_TMPDIR"/t_call_arg_order.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$arg_order_window" | awk '
+           /mov BL, AL/ { copied_index = NR }
+           /mov AX, DI/ { loaded_page = NR }
+           /call .*read_paged/ { saw_call = 1 }
+           END {
+               exit (copied_index && loaded_page &&
+                     copied_index < loaded_page && saw_call) ? 0 : 1
+           }
+       '; then
+        pass "call-arg-order: literal setup preserves existing AL argument"
+    else
+        fail "call-arg-order" "argument setup clobbered AL before copying index"
+    fi
+else
+    fail "call-arg-order" "$(./nibbind "$TEST_TMPDIR"/t_call_arg_order.nir -o "$TEST_TMPDIR"/t_call_arg_order.asm 2>&1 | tail -1)"
+fi
+
+cat > "$TEST_TMPDIR"/t_call_arg_cycle.nir <<'NIR'
+; Binder regression: call argument setup must handle register cycles,
+; such as passing (BL, AL) to a callee that expects (AL, BL).
+.fn swap_args
+.param %0, u8, "a", register, pin=AL
+.param %1, u8, "b", register, pin=BL
+    ret
+.endfn
+
+.fn call_arg_cycle
+.param %0, u8, "x", register, pin=AL
+.param %1, u8, "y", register, pin=BL
+    call %2, swap_args, %1, %0
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_call_arg_cycle.nir -o "$TEST_TMPDIR"/t_call_arg_cycle.asm >/dev/null 2>&1; then
+    arg_cycle_window=$(sed -n '/call_arg_cycle_call_arg_cycle:/,/call .*swap_args/p' "$TEST_TMPDIR"/t_call_arg_cycle.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_call_arg_cycle.asm -o "$TEST_TMPDIR"/t_call_arg_cycle.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$arg_cycle_window" | grep -q 'xchg AX, \[BP+2\]' &&
+       printf "%s\n" "$arg_cycle_window" | awk '
+           /mov AL, BL/ { loaded_al = NR }
+           /mov BL, AL/ { loaded_bl = NR }
+           /pop AX/ { restored_ax = NR }
+           /call .*swap_args/ { saw_call = 1 }
+           END {
+               exit (loaded_al && loaded_bl && restored_ax && saw_call &&
+                     loaded_al < loaded_bl && loaded_bl < restored_ax) ? 0 : 1
+           }
+       '; then
+        pass "call-arg-cycle: register argument cycle uses stack temp"
+    else
+        fail "call-arg-cycle" "register argument cycle clobbered a source"
+    fi
+else
+    fail "call-arg-cycle" "$(./nibbind "$TEST_TMPDIR"/t_call_arg_cycle.nir -o "$TEST_TMPDIR"/t_call_arg_cycle.asm 2>&1 | tail -1)"
+fi
+
 cat > "$TEST_TMPDIR"/t_storemem_live_accum.nir <<'NIR'
 ; Binder regression: a spilled byte store must not clobber a live AL
 ; value before that value is used as a later call argument.
