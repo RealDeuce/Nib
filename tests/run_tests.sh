@@ -653,6 +653,48 @@ if [ -f "$TEST_TMPDIR"/t_icall_far_param.asm ]; then
     fi
 fi
 
+cat > "$TEST_TMPDIR"/t_call_const_arg_spill.nir <<'NIR'
+; Binder regression: the call argument is the constant vreg %51, not
+; the live byte vreg %8 that remains live for the later comparison.
+.fn read_current
+.param %0, u8, "index", register, pin=AL
+.returns u8
+    retval %0
+    ret
+.endfn
+
+.fn call_const_arg_spill
+.returns u8
+.vreg %8, u8, pin=BL
+.vreg %51, u16, pin=DI
+.vreg %52, u8
+.vreg %53, u8, pin=DI
+    mov %8, 2
+.L0:
+    mov %51, 1
+    call %52, read_current, %51
+    cmp.eq %53, %8, %52
+    jz %53, .L2
+    jmp .L0
+.L2:
+    retval %8
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_call_const_arg_spill.nir -o "$TEST_TMPDIR"/t_call_const_arg_spill.asm >/dev/null 2>&1; then
+    const_arg_window=$(sed -n '/call_const_arg_spill.*_\.L0:/,/call_const_arg_spill.*_\.L2:/p' "$TEST_TMPDIR"/t_call_const_arg_spill.asm)
+    if printf "%s\n" "$const_arg_window" | grep -q 'mov DI, 1' &&
+       printf "%s\n" "$const_arg_window" | grep -q 'mov AL, DI' &&
+       printf "%s\n" "$const_arg_window" | grep -q 'call .*read_current' &&
+       ! printf "%s\n" "$const_arg_window" | grep -q 'mov AL, B[HL]'; then
+        pass "call-const-arg-spill: constant vreg passed to call"
+    else
+        fail "call-const-arg-spill" "call argument came from wrong byte register"
+    fi
+else
+    fail "call-const-arg-spill" "$(./nibbind "$TEST_TMPDIR"/t_call_const_arg_spill.nir -o "$TEST_TMPDIR"/t_call_const_arg_spill.asm 2>&1 | tail -1)"
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
