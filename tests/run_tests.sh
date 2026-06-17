@@ -549,6 +549,20 @@ if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then
     fi
 fi
 
+# Flags returned by an indirect API call must be consumed from FLAGS,
+# not from the arbitrary vreg assigned to the getflag pseudo-result.
+if [ -f "$TEST_TMPDIR"/t_flag_after_icall.asm ]; then
+    flag_icall_window=$(sed -n '/t_flag_after_icall_poll:/,/t_flag_after_icall_poll_.L0:/p' "$TEST_TMPDIR"/t_flag_after_icall.asm)
+    if printf "%s\n" "$flag_icall_window" | grep -q 'call far \[BP-4\]' &&
+       printf "%s\n" "$flag_icall_window" | grep -q 'jc t_flag_after_icall_poll_.L0' &&
+       ! printf "%s\n" "$flag_icall_window" | grep -q 'add SP' &&
+       ! printf "%s\n" "$flag_icall_window" | grep -q 'getflag\|not '; then
+        pass "flag-after-icall: CF consumed from FLAGS"
+    else
+        fail "flag-after-icall" "CF after indirect call was not a carry branch"
+    fi
+fi
+
 # Far32 parameters default to stack ABI. Used as indirect far call
 # targets, they should be called directly from their stack homes.
 if [ -f "$TEST_TMPDIR"/t_icall_far_param.asm ]; then

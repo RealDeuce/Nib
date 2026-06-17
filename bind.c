@@ -37,9 +37,11 @@ enum {
     PREG_AH, PREG_CH, PREG_DH, PREG_BH,
     /* Segment registers */
     PREG_ES = 16, PREG_CS, PREG_SS, PREG_DS,
+    /* Flags register */
+    PREG_FLAGS,
+    NUM_PREGS,
     /* Special */
-    PREG_NONE = -1,
-    NUM_PREGS = 20
+    PREG_NONE = -1
 };
 
 typedef enum {
@@ -59,7 +61,7 @@ typedef enum {
 static const char *preg_name[] = {
     "AX","CX","DX","BX","SP","BP","SI","DI",
     "AL","CL","DL","BL","AH","CH","DH","BH",
-    "ES","CS","SS","DS"
+    "ES","CS","SS","DS","FLAGS"
 };
 
 /* Alias table: word register <-> byte halves */
@@ -331,6 +333,8 @@ typedef struct {
     int         ncl_fixups;     /* CL routing fixups (push/pop CX) */
     int         local_size;     /* total bytes for source stack locals */
     int         frame_size;     /* total bytes for spills and source locals */
+    bool        needs_call_temp;
+    int         call_temp_off;
 
     /* Callee-saved registers */
     int         fn_preserves[NUM_PREGS]; /* list of PREG_* to save/restore */
@@ -373,7 +377,7 @@ static const char *fn_asm_name(func_t *fn);
 static const char *vreg_asm(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
-static bool call_saved_has_seg(int *call_saved, int call_nsaved);
+static bool flags_live_after_insn(func_t *fn, int insn_idx);
 
 static bool insn_defines_dst(const ir_insn_t *ins) {
     if (!ins || ins->dst < 0)
@@ -402,6 +406,33 @@ static void mark_preg_clobber(bool *clobbers, int preg) {
         clobbers[preg_alias_parent[preg]] = true;
 }
 
+static bool insn_clobbers_flags(func_t *fn, ir_insn_t *ins) {
+    (void)fn;
+    if (!ins)
+        return false;
+    switch (ins->op) {
+    case IR_SETFLAG:
+    case IR_CMP:
+        return true;
+    case IR_ALU:
+        if (strcmp(ins->name, "out") == 0 ||
+            strcmp(ins->name, "outb") == 0 ||
+            strcmp(ins->name, "in") == 0 ||
+            strcmp(ins->name, "inb") == 0 ||
+            strcmp(ins->name, "lea") == 0 ||
+            strcmp(ins->name, "far.off") == 0 ||
+            strcmp(ins->name, "far.seg") == 0)
+            return false;
+        return true;
+    case IR_UNARY:
+        return strcmp(ins->name, "neg") == 0 ||
+               strcmp(ins->name, "cbw") == 0 ||
+               strcmp(ins->name, "zext") == 0;
+    default:
+        return false;
+    }
+}
+
 static void mark_vreg_clobber(func_t *fn, bool *clobbers, int vreg) {
     if (!fn || vreg < 0 || vreg >= fn->nvregs)
         return;
@@ -412,6 +443,9 @@ static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
                                   bool *clobbers) {
     if (insn_defines_dst(ins))
         mark_vreg_clobber(fn, clobbers, ins->dst);
+
+    if (insn_clobbers_flags(fn, ins))
+        mark_preg_clobber(clobbers, PREG_FLAGS);
 
     if (ins->op == IR_MCALL) {
         for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
@@ -1722,7 +1756,6 @@ static void parse_nir(const char *path) {
                         if (!reg[0]) break;
                         ep += strlen(reg);
                         if (*ep == ',') ep++;
-                        if (strcmp(reg, "FLAGS") == 0) continue;
                         int preg = parse_preg(reg);
                         if (preg != PREG_NONE && ext->npreserves < NUM_PREGS)
                             ext->preserves[ext->npreserves++] = preg;
@@ -3053,6 +3086,63 @@ static void rins_asm(func_t *fn, const char *fmt, ...) {
     fn->nresolved++;
 }
 
+static bool preg_covered_by_pusha(int preg) {
+    return preg == PREG_AX || preg == PREG_CX || preg == PREG_DX ||
+           preg == PREG_BX || preg == PREG_BP || preg == PREG_SI ||
+           preg == PREG_DI;
+}
+
+static int call_saved_pusha_count(int *call_saved, int call_nsaved) {
+    int n = 0;
+    for (int s = 0; s < call_nsaved; s++)
+        if (preg_covered_by_pusha(call_saved[s]))
+            n++;
+    return n;
+}
+
+static void emit_call_saved_push(func_t *fn, int preg) {
+    if (preg == PREG_FLAGS)
+        rins_asm(fn, "    pushf");
+    else
+        rins_asm(fn, "    push %s", preg_name[preg]);
+}
+
+static void emit_call_saved_pop(func_t *fn, int preg) {
+    if (preg == PREG_FLAGS)
+        rins_asm(fn, "    popf");
+    else
+        rins_asm(fn, "    pop %s", preg_name[preg]);
+}
+
+static bool emit_call_saves(func_t *fn, int *call_saved, int call_nsaved) {
+    bool use_pusha = call_saved_pusha_count(call_saved, call_nsaved) >= 6;
+    if (use_pusha) {
+        for (int s = 0; s < call_nsaved; s++)
+            if (!preg_covered_by_pusha(call_saved[s]))
+                emit_call_saved_push(fn, call_saved[s]);
+        rins_asm(fn, "    pusha");
+        return true;
+    }
+
+    for (int s = 0; s < call_nsaved; s++)
+        emit_call_saved_push(fn, call_saved[s]);
+    return false;
+}
+
+static void emit_call_restores(func_t *fn, int *call_saved, int call_nsaved,
+                               bool used_pusha) {
+    if (used_pusha) {
+        rins_asm(fn, "    popa");
+        for (int s = call_nsaved - 1; s >= 0; s--)
+            if (!preg_covered_by_pusha(call_saved[s]))
+                emit_call_saved_pop(fn, call_saved[s]);
+        return;
+    }
+
+    for (int s = call_nsaved - 1; s >= 0; s--)
+        emit_call_saved_pop(fn, call_saved[s]);
+}
+
 static bool is_shift_op(const char *op) {
     return strcmp(op, "shl") == 0 || strcmp(op, "shr") == 0 ||
            strcmp(op, "sar") == 0 || strcmp(op, "rol") == 0 ||
@@ -3495,15 +3585,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     continue;
                 add_call_saved_reg(call_saved, &call_nsaved, push_reg);
             }
-            /* Emit saves: PUSHA if >= 6, individual pushes otherwise */
-            if (call_nsaved >= 6 &&
-                !call_saved_has_seg(call_saved, call_nsaved)) {
-                rins_asm(fn, "    pusha");
-                call_use_pusha = true;
-            } else {
-                for (int s = 0; s < call_nsaved; s++)
-                    rins_asm(fn, "    push %s", preg_name[call_saved[s]]);
-            }
+            call_use_pusha = emit_call_saves(fn, call_saved, call_nsaved);
 
             if (call_area_words > 0) {
                 int extra_words = call_area_words - stack_arg_words;
@@ -3612,16 +3694,26 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 }
             }
 
-            if (call_area_words > 0)
-                rins_asm(fn, "    add SP, %d", call_area_words * 2);
+            if (call_area_words > 0) {
+                if (flags_live_after_insn(fn, i)) {
+                    rins_asm(fn, "    push AX");
+                    rins_asm(fn, "    pushf");
+                    rins_asm(fn, "    pop AX");
+                    rins_asm(fn, "    mov [BP%+d], AX", fn->call_temp_off);
+                    rins_asm(fn, "    pop AX");
+                    rins_asm(fn, "    add SP, %d", call_area_words * 2);
+                    rins_asm(fn, "    push AX");
+                    rins_asm(fn, "    mov AX, [BP%+d]", fn->call_temp_off);
+                    rins_asm(fn, "    push AX");
+                    rins_asm(fn, "    popf");
+                    rins_asm(fn, "    pop AX");
+                } else {
+                    rins_asm(fn, "    add SP, %d", call_area_words * 2);
+                }
+            }
 
             /* Caller-restore */
-            if (call_use_pusha) {
-                rins_asm(fn, "    popa");
-            } else {
-                for (int s = call_nsaved - 1; s >= 0; s--)
-                    rins_asm(fn, "    pop %s", preg_name[call_saved[s]]);
-            }
+            emit_call_restores(fn, call_saved, call_nsaved, call_use_pusha);
 
             continue;
         }
@@ -3664,23 +3756,11 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     call_saved[call_nsaved++] = push_reg;
             }
 
-            if (call_nsaved >= 6 &&
-                !call_saved_has_seg(call_saved, call_nsaved)) {
-                rins_asm(fn, "    pusha");
-                call_use_pusha = true;
-            } else {
-                for (int s = 0; s < call_nsaved; s++)
-                    rins_asm(fn, "    push %s", preg_name[call_saved[s]]);
-            }
+            call_use_pusha = emit_call_saves(fn, call_saved, call_nsaved);
 
             rins_ir(fn, i);
 
-            if (call_use_pusha) {
-                rins_asm(fn, "    popa");
-            } else {
-                for (int s = call_nsaved - 1; s >= 0; s--)
-                    rins_asm(fn, "    pop %s", preg_name[call_saved[s]]);
-            }
+            emit_call_restores(fn, call_saved, call_nsaved, call_use_pusha);
 
             continue;
         }
@@ -3977,14 +4057,6 @@ static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg) {
         call_saved[(*call_nsaved)++] = preg;
 }
 
-static bool call_saved_has_seg(int *call_saved, int call_nsaved) {
-    for (int s = 0; s < call_nsaved; s++) {
-        if (call_saved[s] >= PREG_ES && call_saved[s] <= PREG_DS)
-            return true;
-    }
-    return false;
-}
-
 static void emit_ds_setup(func_t *fn, bool explicit_save) {
     if (!ds_policy_sets_ds(fn))
         return;
@@ -3999,14 +4071,108 @@ static void emit_ds_setup(func_t *fn, bool explicit_save) {
     fprintf(out_asm, "    pop AX\n");
 }
 
+static const char *flag_jcc_if_clear(const char *flag) {
+    if (strcmp(flag, "CF") == 0) return "jnc";
+    if (strcmp(flag, "PF") == 0) return "jnp";
+    if (strcmp(flag, "ZF") == 0) return "jnz";
+    if (strcmp(flag, "SF") == 0) return "jns";
+    if (strcmp(flag, "OF") == 0) return "jno";
+    return NULL;
+}
+
+static const char *flag_jcc_if_set(const char *flag) {
+    if (strcmp(flag, "CF") == 0) return "jc";
+    if (strcmp(flag, "PF") == 0) return "jp";
+    if (strcmp(flag, "ZF") == 0) return "jz";
+    if (strcmp(flag, "SF") == 0) return "js";
+    if (strcmp(flag, "OF") == 0) return "jo";
+    return NULL;
+}
+
+static ir_insn_t *find_vreg_def(func_t *fn, int before_idx, int vreg) {
+    for (int j = before_idx - 1; j >= 0; j--) {
+        ir_insn_t *def = &fn->insns[j];
+        if (insn_defines_dst(def) && def->dst == vreg)
+            return def;
+        if (def->op == IR_LABEL || def->op == IR_JMP)
+            break;
+    }
+    return NULL;
+}
+
+static bool flags_live_after_insn(func_t *fn, int insn_idx) {
+    for (int j = insn_idx + 1; j < fn->ninsns; j++) {
+        ir_insn_t *ins = &fn->insns[j];
+        if (ins->op == IR_GETFLAG)
+            return true;
+        if (ins->op == IR_LABEL || ins->op == IR_JMP ||
+            ins->op == IR_RET || ins->op == IR_TAILCALL)
+            return false;
+        if (insn_clobbers_flags(fn, ins))
+            return false;
+    }
+    return false;
+}
+
+static bool getflag_consumed_by_jz(func_t *fn, int insn_idx) {
+    ir_insn_t *ins = &fn->insns[insn_idx];
+    if (ins->op != IR_GETFLAG)
+        return false;
+    if (insn_idx + 1 < fn->ninsns) {
+        ir_insn_t *next = &fn->insns[insn_idx + 1];
+        if (next->op == IR_JZ && next->src1 == ins->dst)
+            return true;
+        if (next->op == IR_UNARY && strcmp(next->name, "lnot") == 0 &&
+            next->src1 == ins->dst && insn_idx + 2 < fn->ninsns) {
+            ir_insn_t *jz = &fn->insns[insn_idx + 2];
+            if (jz->op == IR_JZ && jz->src1 == next->dst)
+                return true;
+        }
+        if (next->op == IR_SETFLAG && next->src1 == ins->dst &&
+            strcmp(next->name, ins->name) == 0)
+            return true;
+        if (next->op == IR_UNARY &&
+            (strcmp(next->name, "lnot") == 0 ||
+             strcmp(next->name, "not") == 0) &&
+            next->src1 == ins->dst && insn_idx + 2 < fn->ninsns) {
+            ir_insn_t *sf = &fn->insns[insn_idx + 2];
+            if (sf->op == IR_SETFLAG && sf->src1 == next->dst &&
+                strcmp(sf->name, ins->name) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+static bool lnot_getflag_consumed_by_jz(func_t *fn, int insn_idx) {
+    ir_insn_t *ins = &fn->insns[insn_idx];
+    if (ins->op != IR_UNARY ||
+        (strcmp(ins->name, "lnot") != 0 && strcmp(ins->name, "not") != 0))
+        return false;
+    ir_insn_t *def = find_vreg_def(fn, insn_idx, ins->src1);
+    if (!def || def->op != IR_GETFLAG)
+        return false;
+    if (insn_idx + 1 >= fn->ninsns)
+        return false;
+    ir_insn_t *jz = &fn->insns[insn_idx + 1];
+    return (strcmp(ins->name, "lnot") == 0 &&
+            jz->op == IR_JZ && jz->src1 == ins->dst) ||
+           (jz->op == IR_SETFLAG && jz->src1 == ins->dst &&
+            strcmp(jz->name, def->name) == 0);
+}
+
 static void emit_epilogue(func_t *fn, int *save_regs, int nsave,
                           int *isr_save, int isr_nsave,
                           bool ds_explicit_save) {
     if (ds_explicit_save)
         fprintf(out_asm, "    pop DS\n");
     /* Callee-save pops (reverse order) */
-    for (int j = nsave - 1; j >= 0; j--)
-        fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
+    for (int j = nsave - 1; j >= 0; j--) {
+        if (save_regs[j] == PREG_FLAGS)
+            fprintf(out_asm, "    popf\n");
+        else
+            fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
+    }
     if (fn->needs_frame) {
         fprintf(out_asm, "    mov sp, bp\n");
         fprintf(out_asm, "    pop bp\n");
@@ -4560,8 +4726,12 @@ static void emit_function(func_t *fn) {
         }
 
         /* Callee-save pushes */
-        for (int i = 0; i < nsave; i++)
-            fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
+        for (int i = 0; i < nsave; i++) {
+            if (save_regs[i] == PREG_FLAGS)
+                fprintf(out_asm, "    pushf\n");
+            else
+                fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
+        }
 
         emit_ds_setup(fn, ds_explicit_save);
 
@@ -4663,6 +4833,8 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_UNARY: {
+            if (lnot_getflag_consumed_by_jz(fn, i))
+                break;
             const char *d = vreg_asm(fn, ins->dst);
             const char *s = vreg_asm(fn, ins->src1);
             const char *mnem = ins->name;
@@ -4766,6 +4938,26 @@ static void emit_function(func_t *fn) {
         case IR_JZ: {
             /* Find the preceding CMP that defined this condition vreg */
             const char *jcc = "jz"; /* fallback */
+            ir_insn_t *def = find_vreg_def(fn, i, ins->src1);
+            if (def && def->op == IR_GETFLAG) {
+                const char *fjcc = flag_jcc_if_clear(def->name);
+                if (fjcc) {
+                    fprintf(out_asm, "    %s %s\n", fjcc,
+                            scoped_label(fn, ins->name));
+                    break;
+                }
+            } else if (def && def->op == IR_UNARY &&
+                       strcmp(def->name, "lnot") == 0) {
+                ir_insn_t *src_def = find_vreg_def(fn, i, def->src1);
+                if (src_def && src_def->op == IR_GETFLAG) {
+                    const char *fjcc = flag_jcc_if_set(src_def->name);
+                    if (fjcc) {
+                        fprintf(out_asm, "    %s %s\n", fjcc,
+                                scoped_label(fn, ins->name));
+                        break;
+                    }
+                }
+            }
             for (int j = i - 1; j >= 0; j--) {
                 ir_insn_t *cmp = &fn->insns[j];
                 if (cmp->op == IR_ALU || cmp->op == IR_CMP) {
@@ -4797,7 +4989,14 @@ static void emit_function(func_t *fn) {
                 }
                 if (cmp->op == IR_LABEL || cmp->op == IR_JMP) break;
             }
-            fprintf(out_asm, "    %s %s\n", jcc, scoped_label(fn, ins->name));
+            if (strcmp(jcc, "jz") == 0) {
+                fprintf(out_asm, "    cmp %s, 0\n",
+                        vreg_asm_sized(fn, ins->src1));
+                fprintf(out_asm, "    je %s\n", scoped_label(fn, ins->name));
+            } else {
+                fprintf(out_asm, "    %s %s\n", jcc,
+                        scoped_label(fn, ins->name));
+            }
             break;
         }
 
@@ -4903,6 +5102,22 @@ static void emit_function(func_t *fn) {
                     fprintf(out_asm, "    call far %s\n", vreg_asm(fn, ins->src1));
                     break;
                 }
+                if (fn->needs_call_temp && flags_live_after_insn(fn, i)) {
+                    int off = fn->call_temp_off;
+                    fprintf(out_asm, "    push AX\n");
+                    if (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                        fn->vregs[ins->src1].assigned == PREG_AX) {
+                        fprintf(out_asm, "    mov [BP%+d], AX\n", off);
+                    } else {
+                        fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src1));
+                        fprintf(out_asm, "    mov [BP%+d], AX\n", off);
+                    }
+                    fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
+                    fprintf(out_asm, "    mov [BP%+d], AX\n", off + 2);
+                    fprintf(out_asm, "    pop AX\n");
+                    fprintf(out_asm, "    call far [BP%+d]\n", off);
+                    break;
+                }
                 /* Register pair: build far pointer on stack, use BX to address it.
                  * push seg; push off; push BX; mov BX,SP; add BX,2; call far [SS:BX]
                  * After call: pop BX (restore); add SP,4 (clean far ptr) */
@@ -4936,8 +5151,12 @@ static void emit_function(func_t *fn) {
         case IR_TAILCALL: {
             if (ds_explicit_save)
                 fprintf(out_asm, "    pop DS\n");
-            for (int j = nsave - 1; j >= 0; j--)
-                fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
+            for (int j = nsave - 1; j >= 0; j--) {
+                if (save_regs[j] == PREG_FLAGS)
+                    fprintf(out_asm, "    popf\n");
+                else
+                    fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
+            }
             if (fn->needs_frame) {
                 fprintf(out_asm, "    mov sp, bp\n");
                 fprintf(out_asm, "    pop bp\n");
@@ -5111,6 +5330,23 @@ static void emit_function(func_t *fn) {
 
         case IR_SETFLAG: {
             int val = 1; /* default assume set */
+            if (ins->src1 >= 0) {
+                ir_insn_t *def = find_vreg_def(fn, i, ins->src1);
+                if (def && def->op == IR_GETFLAG &&
+                    strcmp(def->name, ins->name) == 0)
+                    break;
+                if (def && def->op == IR_UNARY &&
+                    (strcmp(def->name, "lnot") == 0 ||
+                     strcmp(def->name, "not") == 0)) {
+                    ir_insn_t *src_def = find_vreg_def(fn, i, def->src1);
+                    if (src_def && src_def->op == IR_GETFLAG &&
+                        strcmp(src_def->name, ins->name) == 0 &&
+                        strcmp(ins->name, "CF") == 0) {
+                        fprintf(out_asm, "    cmc\n");
+                        break;
+                    }
+                }
+            }
             if (ins->has_imm) {
                 val = ins->imm;
             } else if (ins->src1 >= 0) {
@@ -5135,8 +5371,12 @@ static void emit_function(func_t *fn) {
         }
 
         case IR_GETFLAG:
-            fprintf(out_asm, "    ; getflag %s -> %s\n",
-                    ins->name, vreg_asm(fn, ins->dst));
+            if (!getflag_consumed_by_jz(fn, i)) {
+                fprintf(stderr,
+                        "%s: getflag %s must be consumed directly by control flow\n",
+                        fn->name, ins->name);
+                exit(1);
+            }
             break;
 
         case IR_TOGGLEFLAG:
@@ -5942,6 +6182,43 @@ int main(int argc, char **argv) {
             bp_available = false;
             fn->needs_frame = true;
         }
+        fn->needs_call_temp = false;
+        fn->call_temp_off = 0;
+        for (int ii = 0; ii < fn->ninsns; ii++) {
+            ir_insn_t *ins = &fn->insns[ii];
+            if (!flags_live_after_insn(fn, ii))
+                continue;
+            if (ins->op == IR_ICALL &&
+                ins->src2 >= 0 && ins->src2 < MAX_VREGS &&
+                fn->vregs[ins->src2].is_seg) {
+                fn->needs_call_temp = true;
+                bp_available = false;
+                fn->needs_frame = true;
+                break;
+            }
+            if (ins->op == IR_CALL || ins->op == IR_MCALL) {
+                int callee_fi = -1;
+                int callee_ext = -1;
+                for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                    if (strcmp(functions[fi2].name, ins->name) == 0)
+                        { callee_fi = fi2; break; }
+                }
+                if (callee_fi < 0) {
+                    for (int e = 0; e < nexterns; e++) {
+                        if (strcmp(externs[e].name, ins->name) == 0)
+                            { callee_ext = e; break; }
+                    }
+                }
+                int stack_arg_words = direct_stack_arg_words(callee_fi, callee_ext);
+                int stack_ret_words = direct_stack_ret_words(callee_fi, callee_ext);
+                if (stack_arg_words > 0 || stack_ret_words > 0) {
+                    fn->needs_call_temp = true;
+                    bp_available = false;
+                    fn->needs_frame = true;
+                    break;
+                }
+            }
+        }
         for (int v = 0; v < fn->nvregs; v++) {
             if (fn->vregs[v].is_stack_home)
                 continue;
@@ -5971,6 +6248,10 @@ int main(int argc, char **argv) {
             allocate_registers(fn, false);
         }
         fn->frame_size = fn->nspill_slots * 2 + fn->local_size;
+        if (fn->needs_call_temp) {
+            fn->call_temp_off = -(fn->frame_size + 4);
+            fn->frame_size += 4;
+        }
 
         /* Count CL fixups: shift/rotate ops where count didn't get CL */
         fn->ncl_fixups = 0;
@@ -6001,8 +6282,13 @@ int main(int argc, char **argv) {
             collect_insn_clobbers(fn, &fn->insns[ii], fa->clobbers);
 
         for (int ii = 0; ii < fn->ninsns; ii++) {
-            if (fn->insns[ii].op != IR_CALL && fn->insns[ii].op != IR_MCALL) continue;
+            if (fn->insns[ii].op != IR_CALL &&
+                fn->insns[ii].op != IR_MCALL &&
+                fn->insns[ii].op != IR_ICALL)
+                continue;
             for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (fn->insns[ii].op == IR_ICALL)
+                    break;
                 if (strcmp(functions[fi2].name, fn->insns[ii].name) == 0 &&
                     fn_assigns[fi2].resolved) {
                     for (int r = 0; r < NUM_PREGS; r++)

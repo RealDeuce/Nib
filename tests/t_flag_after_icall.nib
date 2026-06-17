@@ -1,0 +1,10 @@
+pub extern fn read() -> u8 in AL
+    clobbers(FLAGS);
+
+fn poll(read_addr: far32 in ES:SI) -> u8 {
+    const u8 ch = read_addr as read from io();
+    if (!CF) {
+        return ch;
+    }
+    return 0;
+}
