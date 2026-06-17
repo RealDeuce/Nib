@@ -320,6 +320,33 @@ static int find_function(const char *name) {
     return -1;
 }
 
+static int find_indirect_descriptor(const char *name, const char *module,
+                                    const char **descriptor_name) {
+    int fi = find_function(name);
+    if (fi >= 0) {
+        if (descriptor_name)
+            *descriptor_name = name;
+        return fi;
+    }
+
+    if (module && module[0]) {
+        size_t mlen = strlen(module);
+        if (strncmp(name, module, mlen) == 0 && name[mlen] == '_') {
+            const char *local_name = name + mlen + 1;
+            fi = find_function(local_name);
+            if (fi >= 0) {
+                if (descriptor_name)
+                    *descriptor_name = local_name;
+                return fi;
+            }
+        }
+    }
+
+    if (descriptor_name)
+        *descriptor_name = name;
+    return -1;
+}
+
 static void register_function_returns(const char *name, int nparams,
                                       return_t *rets, param_t *params) {
     if (C.nfunctions >= 512) return;
@@ -1488,7 +1515,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         type_t *ret_type = mk_type(TYPE_VOID);
 
         /* Look up the extern for far-splitting info and return type */
-        int fi = find_function(ext_name);
+        const char *descriptor_name = ext_name;
+        int fi = find_indirect_descriptor(ext_name,
+                                          e->u.indirect_call.module_name,
+                                          &descriptor_name);
         if (fi >= 0)
             ret_type = C.functions[fi].return_type;
 
@@ -1525,10 +1555,11 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
          * If no seg vreg, %off is a pointer to a memory-resident far32. */
         if (addr_val.vreg_seg >= 0) {
             fprintf(C.nir, "    icall %%%d, %%%d, %%%d, %s",
-                    dst, addr_val.vreg, addr_val.vreg_seg, ext_name);
+                    dst, addr_val.vreg, addr_val.vreg_seg,
+                    descriptor_name);
         } else {
             fprintf(C.nir, "    icall %%%d, %%%d, %s",
-                    dst, addr_val.vreg, ext_name);
+                    dst, addr_val.vreg, descriptor_name);
         }
         for (int i = 0; i < nir_args; i++)
             fprintf(C.nir, ", %%%d", ir_args[i]);

@@ -490,7 +490,8 @@ if [ -f "$TEST_TMPDIR"/t_ds_policy.asm ]; then
        [ "$(printf "%s\n" "$stack_ds_window" | sed -n '2p')" = "    push bp" ] &&
        [ "$(printf "%s\n" "$stack_ds_window" | sed -n '4p')" = "    push DS" ] &&
        printf "%s\n" "$stack_ds_window" | grep -q 'mov SI, \[BP+4\]' &&
-       printf "%s\n" "$stack_ds_window" | grep -q 'mov ES, \[BP+6\]' &&
+       printf "%s\n" "$stack_ds_window" | grep -q 'mov AX, \[BP+6\]' &&
+       printf "%s\n" "$stack_ds_window" | grep -q 'mov ES, AX' &&
        ! printf "%s\n" "$caller_window" | grep -q 'mov DS, AX' &&
        ! printf "%s\n" "$none_window" | grep -q 'mov DS, AX'; then
         pass "ds-policy: setup and restore emitted at boundaries"
@@ -660,6 +661,19 @@ if [ -f "$TEST_TMPDIR"/t_icall_far_param.asm ]; then
         pass "icall-far-param: stack far32 targets called directly"
     else
         fail "icall-far-param" "far32 stack target was repacked"
+    fi
+fi
+
+if [ -f "$TEST_TMPDIR"/t_icall_multi.asm ]; then
+    local_arg_window=$(sed -n '/t_icall_call_read_time:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_multi.asm)
+    if grep -q 'icall .*, read_time, .*, .*' tests/t_icall.nir &&
+       printf "%s\n" "$local_arg_window" | grep -q 'lea SI, \[BP-' &&
+       printf "%s\n" "$local_arg_window" | grep -q 'mov AX, SS' &&
+       printf "%s\n" "$local_arg_window" | grep -q 'mov ES, AX' &&
+       printf "%s\n" "$local_arg_window" | grep -q 'call far \[SS:BX\]'; then
+        pass "icall-local-far-arg: @local passed in ES:SI"
+    else
+        fail "icall-local-far-arg" "indirect far32 arg not passed in ES:SI"
     fi
 fi
 

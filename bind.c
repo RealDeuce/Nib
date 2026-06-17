@@ -3498,6 +3498,16 @@ static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
     bool src_byte = fn->vregs[src_vreg].is_byte;
     int actual = fn->vregs[src_vreg].assigned;
 
+    if (expected >= PREG_ES && expected <= PREG_DS) {
+        if (actual == expected)
+            return;
+        rins_asm(fn, "    push AX");
+        rins_asm(fn, "    mov AX, %s", src);
+        rins_asm(fn, "    mov %s, AX", dst);
+        rins_asm(fn, "    pop AX");
+        return;
+    }
+
     if (dst_byte && !is_spilled(fn, src_vreg) && preg_is_word(actual)) {
         if (actual >= PREG_AX && actual <= PREG_BX) {
             if (expected == preg_alias_lo[actual])
@@ -3965,12 +3975,14 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
         if (ins->op == IR_ICALL) {
             bool callee_preserves[NUM_PREGS];
             memset(callee_preserves, 0, sizeof(callee_preserves));
+            int callee_ext = -1;
             for (int e = 0; e < nexterns; e++) {
                 if (strcmp(externs[e].name, ins->name) == 0) {
                     for (int pp = 0; pp < externs[e].npreserves; pp++)
                         callee_preserves[externs[e].preserves[pp]] = true;
                     if (externs[e].ds_policy != DS_POLICY_UNSPEC)
                         callee_preserves[PREG_DS] = true;
+                    callee_ext = e;
                     break;
                 }
             }
@@ -3978,6 +3990,26 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             int call_saved[16];
             int call_nsaved = 0;
             bool call_use_pusha = false;
+            bool outgoing_clobbers[NUM_PREGS];
+            memset(outgoing_clobbers, 0, sizeof(outgoing_clobbers));
+            if (callee_ext >= 0) {
+                for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
+                    if (abi_place_is_stack(externs[callee_ext].param_places[a]))
+                        continue;
+                    int expected = externs[callee_ext].param_pins[a].preg;
+                    if (expected == PREG_NONE || expected == PREG_SP)
+                        continue;
+                    int arg_vreg = ins->extra_args[a];
+                    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
+                        continue;
+                    int actual = fn->vregs[arg_vreg].assigned;
+                    if (actual == expected || pregs_alias(actual, expected))
+                        continue;
+                    int clob = (expected >= PREG_AL && expected <= PREG_BH)
+                        ? preg_alias_parent[expected] : expected;
+                    outgoing_clobbers[clob] = true;
+                }
+            }
             if (fn->needs_frame && !callee_preserves[PREG_BP]) {
                 call_saved[call_nsaved++] = PREG_BP;
             }
@@ -3989,7 +4021,8 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 int push_reg = preg;
                 if (preg >= PREG_AL && preg <= PREG_BH)
                     push_reg = preg_alias_parent[preg];
-                if (callee_preserves[push_reg]) continue;
+                if (callee_preserves[push_reg] && !outgoing_clobbers[push_reg])
+                    continue;
                 bool dup = false;
                 for (int s = 0; s < call_nsaved; s++)
                     if (call_saved[s] == push_reg) { dup = true; break; }
@@ -3999,6 +4032,23 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             }
 
             call_use_pusha = emit_call_saves(fn, call_saved, call_nsaved);
+
+            if (callee_ext >= 0) {
+                for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
+                    if (abi_place_is_stack(externs[callee_ext].param_places[a]))
+                        continue;
+                    int expected = externs[callee_ext].param_pins[a].preg;
+                    if (expected == PREG_NONE)
+                        continue;
+                    int arg_vreg = ins->extra_args[a];
+                    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
+                        continue;
+                    int actual = fn->vregs[arg_vreg].assigned;
+                    if (actual == expected || pregs_alias(actual, expected))
+                        continue;
+                    rins_mov_preg_from_vreg(fn, expected, arg_vreg);
+                }
+            }
 
             rins_ir(fn, i);
 

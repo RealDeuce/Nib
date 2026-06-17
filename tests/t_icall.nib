@@ -13,3 +13,10 @@ fn main() {
     // Indirect call through the far pointer using greet's convention
     addr as greet from t_icall_lib(GREET_MSG, GREET_LEN);
 }
+
+fn call_read_time() {
+    far32 addr = 0xE000:0x0200;
+    u8[8] now;
+
+    addr as t_icall_lib_read_time from t_icall_lib(@now);
+}

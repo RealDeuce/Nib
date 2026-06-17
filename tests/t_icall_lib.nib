@@ -7,3 +7,7 @@ fn do_greet(msg: u16 in SI, len: u16 in CX) {
 // Calling convention descriptor for indirect callers
 pub extern fn greet(msg: u16 in SI, len: u16 in CX)
     clobbers(AX, CX, SI, DI, FLAGS);
+
+pub extern fn far read_time(dst: far32 in ES:SI)
+    ds(0x0000)
+    clobbers(FLAGS);
