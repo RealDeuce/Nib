@@ -319,12 +319,20 @@ fi
 # DX must not erase a prior local DX clobber from the internal helper.
 if [ -f "$TEST_TMPDIR"/t_extern_clobber_merge.asm ]; then
     call_window=$(sed -n '/t_extern_clobber_merge_caller:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_extern_clobber_merge.asm)
+    preserves_window=$(sed -n '/t_extern_clobber_merge_caller_preserves:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_extern_clobber_merge.asm)
+    unannotated_window=$(sed -n '/t_extern_clobber_merge_caller_unannotated:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_extern_clobber_merge.asm)
     if printf "%s\n" "$call_window" | grep -q 'push DX' &&
        printf "%s\n" "$call_window" | grep -q 'call t_extern_clobber_merge_helper' &&
-       printf "%s\n" "$call_window" | grep -q 'pop DX'; then
-        pass "extern-clobber-merge: local DX clobber survives extern preserves"
+       printf "%s\n" "$call_window" | grep -q 'pop DX' &&
+       printf "%s\n" "$preserves_window" | grep -q 'push AX' &&
+       printf "%s\n" "$preserves_window" | grep -q 'call t_extern_clobber_merge_helper_preserves' &&
+       printf "%s\n" "$preserves_window" | grep -q 'pop AX' &&
+       printf "%s\n" "$unannotated_window" | grep -q 'push BX' &&
+       printf "%s\n" "$unannotated_window" | grep -q 'call t_extern_clobber_merge_helper_unannotated' &&
+       printf "%s\n" "$unannotated_window" | grep -q 'pop BX'; then
+        pass "extern-clobber-merge: asm annotations survive extern preserves"
     else
-        fail "extern-clobber-merge" "helper clobber was hidden by extern preserves"
+        fail "extern-clobber-merge" "asm clobbers were hidden or ignored"
     fi
 fi
 

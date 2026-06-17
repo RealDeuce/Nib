@@ -1446,7 +1446,10 @@ Variables pinned to registers are accessible by their register name.
 
 The programmer must declare which registers the block affects using
 either `clobbers` or `preserves` (not both). The compiler does not
-attempt to analyze the instructions automatically.
+attempt to analyze the instructions automatically. The binder uses this
+contract when computing the containing function's clobber set, so callers
+save live registers across calls to functions that contain register-
+clobbering inline assembly.
 
 ```
 asm clobbers(AX, DI, CX, FLAGS) {
@@ -1465,9 +1468,9 @@ asm preserves(BX, DX, SI, BP, DS, ES, SS) {
 Use whichever produces the shorter list. Specifying both on the same
 block is a compile error.
 
-An `asm` block with neither clause is treated as clobbering everything
-— the compiler saves and restores all live registers around it. This
-is safe but pessimistic.
+An `asm` block with neither clause is treated as clobbering all registers
+ordinary code can rely on at a function boundary: AX, CX, DX, BX, BP, SI,
+DI, DS, ES, and FLAGS. SP, CS, and SS are not modeled as valid clobbers.
 
 Multi-line:
 

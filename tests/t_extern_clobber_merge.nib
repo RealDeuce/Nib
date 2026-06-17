@@ -3,11 +3,35 @@
 extern fn far [0xF000:0x0100] rom_hook() clobbers(FLAGS);
 
 fn helper() {
-    u16 DX = 0x1234;
+    asm clobbers(DX, FLAGS) {
+        mov dx, 0x1234
+    }
     rom_hook();
 }
 
 fn caller(live: u16 in DX) -> u16 {
     helper();
+    return live;
+}
+
+fn helper_preserves() {
+    asm preserves(BX, CX, DX, SI, DI, BP, DS, ES, SS) {
+        mov ax, 0x5678
+    }
+}
+
+fn caller_preserves(live: u16 in AX) -> u16 {
+    helper_preserves();
+    return live;
+}
+
+fn helper_unannotated() {
+    asm {
+        mov bx, 0x9ABC
+    }
+}
+
+fn caller_unannotated(live: u16 in BX) -> u16 {
+    helper_unannotated();
     return live;
 }

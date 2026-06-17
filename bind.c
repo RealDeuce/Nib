@@ -104,6 +104,9 @@ static int parse_preg(const char *s) {
     return PREG_NONE;
 }
 
+static char *skip_ws(char *p);
+static char *read_word(char *p, char *buf, int bufsz);
+
 static abi_place_t parse_abi_place(const char *p) {
     if (!p)
         return ABI_PLACE_DEFAULT;
@@ -193,6 +196,7 @@ typedef struct {
     char    name[64];       /* label target, function name, alu op name */
     char    asm_body[512];  /* for IR_ASM */
     char    asm_ann[128];   /* clobbers/preserves text */
+    bool    asm_is_block;   /* source-level asm block, not lowered insn */
     int     label_id;       /* resolved label index for jumps */
     int     line;           /* source line */
     char    src_file[64];   /* source filename for debug */
@@ -406,6 +410,77 @@ static void mark_preg_clobber(bool *clobbers, int preg) {
         clobbers[preg_alias_parent[preg]] = true;
 }
 
+static bool asm_model_preg(int preg) {
+    return (preg >= PREG_AX && preg <= PREG_BX) ||
+           preg == PREG_BP || preg == PREG_SI || preg == PREG_DI ||
+           preg == PREG_ES || preg == PREG_DS || preg == PREG_FLAGS;
+}
+
+static void mark_all_asm_model_clobbers(bool *clobbers) {
+    for (int r = 0; r < NUM_PREGS; r++)
+        if (asm_model_preg(r))
+            mark_preg_clobber(clobbers, r);
+}
+
+static void collect_asm_clobbers(ir_insn_t *ins, bool *clobbers) {
+    if (!ins || ins->op != IR_ASM)
+        return;
+
+    char *p = skip_ws(ins->asm_ann);
+    if (!*p) {
+        if (ins->asm_is_block)
+            mark_all_asm_model_clobbers(clobbers);
+        return;
+    }
+
+    bool is_clobbers = false;
+    bool is_preserves = false;
+    if (strncmp(p, "clobbers", 8) == 0) {
+        is_clobbers = true;
+        p += 8;
+    } else if (strncmp(p, "preserves", 9) == 0) {
+        is_preserves = true;
+        p += 9;
+    } else {
+        return;
+    }
+
+    bool listed[NUM_PREGS];
+    memset(listed, 0, sizeof(listed));
+    p = skip_ws(p);
+    if (*p == '(')
+        p++;
+    while (*p && *p != ')') {
+        char reg[16];
+        p = skip_ws(p);
+        if (!*p || *p == ')')
+            break;
+        p = read_word(p, reg, sizeof(reg));
+        int preg = parse_preg(reg);
+        if (preg != PREG_NONE)
+            listed[preg] = true;
+        p = skip_ws(p);
+        if (*p == ',')
+            p++;
+    }
+
+    if (is_clobbers) {
+        for (int r = 0; r < NUM_PREGS; r++)
+            if (listed[r])
+                mark_preg_clobber(clobbers, r);
+        return;
+    }
+
+    if (is_preserves) {
+        for (int r = 0; r < NUM_PREGS; r++) {
+            if (!asm_model_preg(r))
+                continue;
+            if (!listed[r])
+                mark_preg_clobber(clobbers, r);
+        }
+    }
+}
+
 static bool insn_clobbers_flags(func_t *fn, ir_insn_t *ins) {
     (void)fn;
     if (!ins)
@@ -446,6 +521,8 @@ static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
 
     if (insn_clobbers_flags(fn, ins))
         mark_preg_clobber(clobbers, PREG_FLAGS);
+
+    collect_asm_clobbers(ins, clobbers);
 
     if (ins->op == IR_MCALL) {
         for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
@@ -1511,6 +1588,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         }
         else if (strcmp(opname, "asm") == 0) {
             ins->op = IR_ASM;
+            ins->asm_is_block = true;
             p = skip_ws(p);
             /* Find the { */
             char *brace = strchr(p, '{');
