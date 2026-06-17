@@ -634,6 +634,92 @@ if [ -f "$TEST_TMPDIR"/t_icall_ret_restore.asm ]; then
     fi
 fi
 
+cat > "$TEST_TMPDIR"/t_icall_ret_temp.nir <<'NIR'
+; Binder regression: an indirect u8 return in AL must be captured before
+; restoring a caller-saved AX when the destination vreg is not AL.
+.extern read
+.returns u8, register, pin=AL
+.preserves CX, DX, BP, SI, DI, ES, CS, SS, DS
+.endextern
+
+.fn icall_ret_temp
+.returns u8
+.vreg %0, u16, pin=AX
+.vreg %2, seg
+.vreg %3, u8, pin=BH
+    mov %0, 4660
+    mov %1, 256
+    mov %2, 57344
+    icall %3, %1, %2, read
+    add %4, %0, %0
+    retval %3
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_icall_ret_temp.nir -o "$TEST_TMPDIR"/t_icall_ret_temp.asm >/dev/null 2>&1; then
+    ret_temp_window=$(sed -n '/icall_ret_temp_icall_ret_temp:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_ret_temp.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_icall_ret_temp.asm -o "$TEST_TMPDIR"/t_icall_ret_temp.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$ret_temp_window" | grep -q 'call far \[SS:BX\]' &&
+       printf "%s\n" "$ret_temp_window" | awk '
+           /call far \[SS:BX\]/ { after_call = 1 }
+           after_call && /mov BH, AL/ { captured = 1 }
+           after_call && /mov \[BP[-+][0-9]+\], AL/ { captured = 1 }
+           after_call && /pop AX/ { saw_restore = 1; ok = captured; exit }
+           END { exit (saw_restore && ok) ? 0 : 1 }
+       '; then
+        pass "icall-ret-temp: AL return captured before AX restore"
+    else
+        fail "icall-ret-temp" "AL return was not captured across AX restore"
+    fi
+else
+    fail "icall-ret-temp" "$(./nibbind "$TEST_TMPDIR"/t_icall_ret_temp.nir -o "$TEST_TMPDIR"/t_icall_ret_temp.asm 2>&1 | tail -1)"
+fi
+
+cat > "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir <<'NIR'
+; Binder regression: when an indirect u8 return already lives in AL, an
+; unrelated live AH value can still force an AX restore that would clobber it.
+.extern read
+.returns u8, register, pin=AL
+.preserves CX, DX, BP, SI, DI, ES, CS, SS, DS
+.endextern
+
+.fn icall_ret_alias_temp
+.returns u8
+.vreg %0, u8, pin=AH
+.vreg %2, seg
+.vreg %3, u8, pin=AL
+    mov %0, 85
+    mov %1, 256
+    mov %2, 57344
+    icall %3, %1, %2, read
+    add %4, %0, %0
+    retval %3
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm >/dev/null 2>&1; then
+    ret_alias_window=$(sed -n '/icall_ret_alias_temp_icall_ret_alias_temp:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$ret_alias_window" | grep -q 'call far \[SS:BX\]' &&
+       printf "%s\n" "$ret_alias_window" | awk '
+           /call far \[SS:BX\]/ { after_call = 1 }
+           after_call && /mov \[BP-[0-9]+\], AL/ { captured = 1 }
+           after_call && /mov \[BP\+0\], AL/ { bad_zero_temp = 1 }
+           after_call && /pop AX/ {
+               saw_restore = 1
+               ok = captured && !bad_zero_temp
+               exit
+           }
+           END { exit (saw_restore && ok) ? 0 : 1 }
+       '; then
+        pass "icall-ret-alias-temp: AL return saved in real temp before AX restore"
+    else
+        fail "icall-ret-alias-temp" "AL return temp was missing or used BP+0"
+    fi
+else
+    fail "icall-ret-alias-temp" "$(./nibbind "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm 2>&1 | tail -1)"
+fi
+
 # Flags returned by an indirect API call must be consumed from FLAGS,
 # not from the arbitrary vreg assigned to the getflag pseudo-result.
 if [ -f "$TEST_TMPDIR"/t_flag_after_icall.asm ]; then

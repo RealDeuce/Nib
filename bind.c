@@ -3363,18 +3363,21 @@ static int direct_stack_ret_words(int callee_fi, int callee_ext) {
     return 0;
 }
 
-static bool direct_call_returns_need_temp(func_t *fn) {
+static bool call_returns_need_temp(func_t *fn) {
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
-        if (ins->op != IR_CALL && ins->op != IR_MCALL)
+        if (ins->op != IR_CALL && ins->op != IR_MCALL &&
+            ins->op != IR_ICALL)
             continue;
 
         int callee_fi = -1;
         int callee_ext = -1;
-        for (int fi = 0; fi < nfunctions; fi++) {
-            if (strcmp(functions[fi].name, ins->name) == 0) {
-                callee_fi = fi;
-                break;
+        if (ins->op != IR_ICALL) {
+            for (int fi = 0; fi < nfunctions; fi++) {
+                if (strcmp(functions[fi].name, ins->name) == 0) {
+                    callee_fi = fi;
+                    break;
+                }
             }
         }
         if (callee_fi < 0) {
@@ -3386,7 +3389,8 @@ static bool direct_call_returns_need_temp(func_t *fn) {
             }
         }
 
-        int nrets = ins->op == IR_MCALL ? ins->nrets : 1;
+        int nrets = ins->op == IR_MCALL ? ins->nrets :
+                    (ins->dst >= 0 ? 1 : 0);
         for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
             int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
             if (ret_v < 0 || ret_v >= fn->nvregs)
@@ -3407,6 +3411,25 @@ static bool direct_call_returns_need_temp(func_t *fn) {
             int actual = vreg_preg(fn, ret_v);
             if (actual != PREG_NONE && !pregs_alias(actual, expected))
                 return true;
+            if (actual != PREG_NONE && pregs_alias(actual, expected)) {
+                int restore_reg = ret_capture_restore_reg(fn, ret_v);
+                if (fn->needs_frame && pregs_alias(PREG_BP, restore_reg))
+                    return true;
+                for (int v = 0; v < fn->nvregs; v++) {
+                    if (v == ret_v)
+                        continue;
+                    int preg = vreg_preg(fn, v);
+                    if (preg == PREG_NONE || preg == PREG_SP)
+                        continue;
+                    if (!vreg_live_after_insn(fn, i, v))
+                        continue;
+                    int push_reg = preg;
+                    if (preg >= PREG_AL && preg <= PREG_BH)
+                        push_reg = preg_alias_parent[preg];
+                    if (pregs_alias(push_reg, restore_reg))
+                        return true;
+                }
+            }
         }
     }
     return false;
@@ -4063,7 +4086,52 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
 
             rins_ir(fn, i);
 
+            int nrets = (callee_ext >= 0) ? externs[callee_ext].nreturns :
+                        (ins->dst >= 0 ? 1 : 0);
+            bool temp_ret[MAX_RETURNS] = {0};
+            int temp_expected[MAX_RETURNS];
+            bool temp_is_byte[MAX_RETURNS] = {0};
+            for (int ri = 0; ri < MAX_RETURNS; ri++)
+                temp_expected[ri] = PREG_NONE;
+
+            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+                if (ret_v < 0 || ret_v >= fn->nvregs)
+                    continue;
+                int expected = PREG_NONE;
+                if (callee_ext >= 0)
+                    expected = extern_return_reg(&externs[callee_ext], ri);
+                if (expected == PREG_NONE)
+                    continue;
+
+                int actual = fn->vregs[ret_v].assigned;
+                int restore_reg = ret_capture_restore_reg(fn, ret_v);
+                if (actual != PREG_NONE &&
+                    call_saved_restores_reg(call_saved, call_nsaved,
+                                            restore_reg)) {
+                    temp_ret[ri] = true;
+                    temp_expected[ri] = expected;
+                    temp_is_byte[ri] = fn->vregs[ret_v].is_byte;
+                    rins_store_call_temp_return(fn, expected,
+                                                temp_is_byte[ri]);
+                    continue;
+                }
+                if (actual != expected) {
+                    rins_asm(fn, "    mov %s, %s",
+                             vreg_asm(fn, ret_v), preg_name[expected]);
+                }
+            }
+
             emit_call_restores(fn, call_saved, call_nsaved, call_use_pusha);
+
+            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+                if (!temp_ret[ri])
+                    continue;
+                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+                if (temp_expected[ri] == PREG_NONE)
+                    continue;
+                rins_load_call_temp_return(fn, ret_v, temp_is_byte[ri]);
+            }
 
             continue;
         }
@@ -6719,7 +6787,7 @@ int main(int argc, char **argv) {
 
         allocate_registers(fn, bp_available);
 
-        if (direct_call_returns_need_temp(fn)) {
+        if (call_returns_need_temp(fn)) {
             fn->needs_call_temp = true;
             if (!fn->needs_frame) {
                 fn->needs_frame = true;
