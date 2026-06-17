@@ -652,6 +652,7 @@ static type_t *check_compare(type_t *l, type_t *r, int line) {
 typedef struct { int vreg; int vreg_seg; type_t *type; } typed_vreg_t;
 
 static typed_vreg_t emit_expr_typed(expr_t *e);
+static typed_vreg_t emit_initializer_expr_typed(expr_t *e, type_t *target);
 
 /* Recursively resolve all constant references to literals in an expression tree */
 static void resolve_constants_expr(expr_t *e) {
@@ -2114,6 +2115,18 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     return TV(-1, NULL);
 }
 
+static typed_vreg_t emit_initializer_expr_typed(expr_t *e, type_t *target) {
+    int value;
+
+    if (target && type_is_integer(target) && eval_const_expr(e, &value)) {
+        int r = alloc_vreg();
+        fprintf(C.nir, "    mov %%%d, %d\n", r, value);
+        return TV(r, target);
+    }
+
+    return emit_expr_typed(e);
+}
+
 /* ================================================================
  * NIR emission — statement compilation
  * ================================================================ */
@@ -2407,7 +2420,8 @@ static void emit_stmt(stmt_t *s) {
                     reg_name_str(sym->pinned_reg, sym->pin_class));
         }
         if (s->u.vardecl.init) {
-            typed_vreg_t val = emit_expr_typed(s->u.vardecl.init);
+            typed_vreg_t val = emit_initializer_expr_typed(s->u.vardecl.init,
+                                                           s->u.vardecl.type);
             /* Unsized array: infer size from initializer */
             if (s->u.vardecl.type && s->u.vardecl.type->kind == TYPE_ARRAY &&
                 s->u.vardecl.type->array_size == 0 && val.type &&

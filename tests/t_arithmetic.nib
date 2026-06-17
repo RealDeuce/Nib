@@ -55,3 +55,11 @@ fn literal_promotion() {
     u16 z = x - 100;
     seg ES = 0xB800;
 }
+
+const TIMER_EN = 0x08;
+const PAGE_ALARM = 0x01;
+
+fn const_mask_u8() -> u8 {
+    const u8 alarm_page_mode = TIMER_EN | PAGE_ALARM;
+    return alarm_page_mode;
+}

@@ -937,6 +937,17 @@ if [ -f tests/t_array_infer.nir ]; then
     fi
 fi
 
+if [ -f tests/t_arithmetic.nir ]; then
+    const_mask_window=$(sed -n '/\.fn const_mask_u8/,/\.endfn/p' tests/t_arithmetic.nir)
+    if printf "%s\n" "$const_mask_window" | grep -q 'mov %[0-9][0-9]*, 9' &&
+       printf "%s\n" "$const_mask_window" | grep -q '\.vreg %[0-9][0-9]*, u8, const' &&
+       printf "%s\n" "$const_mask_window" | grep -q '\.vreg %[0-9][0-9]*, u8'; then
+        pass "const-mask-u8: constant expression initializer keeps u8 context"
+    else
+        fail "const-mask-u8" "constant expression initializer was not u8"
+    fi
+fi
+
 if [ -f "$TEST_TMPDIR"/t_expr_sites.asm ]; then
     expr_read_hw=$(sed -n '/t_expr_sites_read_hw:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_expr_sites.asm)
     expr_read_ptr=$(sed -n '/t_expr_sites_read_ptr:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_expr_sites.asm)
