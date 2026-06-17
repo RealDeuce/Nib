@@ -315,6 +315,19 @@ if [ -f "$TEST_TMPDIR"/t_internal_call_save.asm ]; then
     fi
 fi
 
+# Extern call clobber folding must be monotonic: an extern that preserves
+# DX must not erase a prior local DX clobber from the internal helper.
+if [ -f "$TEST_TMPDIR"/t_extern_clobber_merge.asm ]; then
+    call_window=$(sed -n '/t_extern_clobber_merge_caller:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_extern_clobber_merge.asm)
+    if printf "%s\n" "$call_window" | grep -q 'push DX' &&
+       printf "%s\n" "$call_window" | grep -q 'call t_extern_clobber_merge_helper' &&
+       printf "%s\n" "$call_window" | grep -q 'pop DX'; then
+        pass "extern-clobber-merge: local DX clobber survives extern preserves"
+    else
+        fail "extern-clobber-merge" "helper clobber was hidden by extern preserves"
+    fi
+fi
+
 # Direct byte-returning calls must not save and restore the call result.
 if [ -f "$TEST_TMPDIR"/t_call_ret_save.asm ]; then
     call_window=$(sed -n '/call t_call_ret_save_pop_byte/,/popf/p' "$TEST_TMPDIR"/t_call_ret_save.asm)

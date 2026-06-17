@@ -6299,12 +6299,16 @@ int main(int argc, char **argv) {
             }
             for (int e = 0; e < nexterns; e++) {
                 if (strcmp(externs[e].name, fn->insns[ii].name) == 0) {
+                    bool ext_clobbers[NUM_PREGS];
                     for (int r = 0; r < NUM_PREGS; r++)
-                        fa->clobbers[r] = true;
+                        ext_clobbers[r] = true;
                     for (int pp = 0; pp < externs[e].npreserves; pp++)
-                        fa->clobbers[externs[e].preserves[pp]] = false;
+                        ext_clobbers[externs[e].preserves[pp]] = false;
                     if (externs[e].ds_policy != DS_POLICY_UNSPEC)
-                        fa->clobbers[PREG_DS] = false;
+                        ext_clobbers[PREG_DS] = false;
+                    for (int r = 0; r < NUM_PREGS; r++)
+                        if (ext_clobbers[r])
+                            fa->clobbers[r] = true;
                     break;
                 }
             }

@@ -1,0 +1,13 @@
+// Test: extern call clobbers must not erase a function's own clobbers.
+
+extern fn far [0xF000:0x0100] rom_hook() clobbers(FLAGS);
+
+fn helper() {
+    u16 DX = 0x1234;
+    rom_hook();
+}
+
+fn caller(live: u16 in DX) -> u16 {
+    helper();
+    return live;
+}
