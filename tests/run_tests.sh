@@ -706,6 +706,78 @@ else
     fail "call-const-arg-spill" "$(./nibbind "$TEST_TMPDIR"/t_call_const_arg_spill.nir -o "$TEST_TMPDIR"/t_call_const_arg_spill.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_storemem_live_accum.nir <<'NIR'
+; Binder regression: a spilled byte store must not clobber a live AL
+; value before that value is used as a later call argument.
+.fn select_page
+.param %0, u8, "page", register, pin=AL
+    mov %1, %0
+    ret
+.endfn
+
+.fn storemem_live_accum
+.param %1, seg, "dst_seg", register, pin=ES
+.param %2, u16, "dst_off", register, pin=SI
+.vreg %0, u8, pin=AL, const
+.vreg %3, u8
+.vreg %4, u8
+.vreg %5, u8
+.vreg %6, u8
+.vreg %7, u8
+.vreg %8, u8
+.vreg %9, u8
+.vreg %10, u8
+.vreg %11, u8
+.vreg %12, u8
+.vreg %13, u8
+.vreg %14, u8
+.vreg %15, u8
+    mov %0, 0
+    mov %3, 3
+    mov %4, 4
+    mov %5, 5
+    mov %6, 6
+    mov %7, 7
+    mov %8, 8
+    mov %9, 9
+    mov %10, 10
+    mov %11, 11
+    mov %12, 12
+    mov %13, 13
+    mov %14, 14
+    mov %15, 15
+    storemem %2, %1, %3
+    call %16, select_page, %0
+    mov %17, %4
+    mov %18, %5
+    mov %19, %6
+    mov %20, %7
+    mov %21, %8
+    mov %22, %9
+    mov %23, %10
+    mov %24, %11
+    mov %25, %12
+    mov %26, %13
+    mov %27, %14
+    mov %28, %15
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_storemem_live_accum.nir -o "$TEST_TMPDIR"/t_storemem_live_accum.asm >/dev/null 2>&1; then
+    store_window=$(sed -n '/storemem_live_accum_storemem_live_accum:/,/call .*select_page/p' "$TEST_TMPDIR"/t_storemem_live_accum.asm)
+    if printf "%s\n" "$store_window" | grep -Fq 'push AX' &&
+       printf "%s\n" "$store_window" | grep -Fq 'mov AL, [BP' &&
+       printf "%s\n" "$store_window" | grep -Fq 'mov [ES:SI], AL' &&
+       printf "%s\n" "$store_window" | grep -Fq 'pop AX' &&
+       printf "%s\n" "$store_window" | grep -q 'call .*select_page'; then
+        pass "storemem-live-accum: spilled byte store preserves live AL"
+    else
+        fail "storemem-live-accum" "spilled byte store clobbered live AL"
+    fi
+else
+    fail "storemem-live-accum" "$(./nibbind "$TEST_TMPDIR"/t_storemem_live_accum.nir -o "$TEST_TMPDIR"/t_storemem_live_accum.asm 2>&1 | tail -1)"
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
