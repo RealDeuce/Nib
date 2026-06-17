@@ -4002,15 +4002,15 @@ static void emit_ds_setup(func_t *fn, bool explicit_save) {
 static void emit_epilogue(func_t *fn, int *save_regs, int nsave,
                           int *isr_save, int isr_nsave,
                           bool ds_explicit_save) {
-    if (fn->needs_frame) {
-        fprintf(out_asm, "    mov sp, bp\n");
-        fprintf(out_asm, "    pop bp\n");
-    }
     if (ds_explicit_save)
         fprintf(out_asm, "    pop DS\n");
     /* Callee-save pops (reverse order) */
     for (int j = nsave - 1; j >= 0; j--)
         fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
+    if (fn->needs_frame) {
+        fprintf(out_asm, "    mov sp, bp\n");
+        fprintf(out_asm, "    pop bp\n");
+    }
     if (fn->is_interrupt) {
         if (isr_nsave >= 6) {
             fprintf(out_asm, "    popa\n");
@@ -4552,18 +4552,18 @@ static void emit_function(func_t *fn) {
             }
         }
 
-        /* Callee-save pushes */
-        for (int i = 0; i < nsave; i++)
-            fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
-
-        emit_ds_setup(fn, ds_explicit_save);
-
         if (fn->needs_frame) {
             fprintf(out_asm, "    push bp\n");
             fprintf(out_asm, "    mov bp, sp\n");
             if (fn->frame_size > 0)
                 fprintf(out_asm, "    sub sp, %d\n", fn->frame_size);
         }
+
+        /* Callee-save pushes */
+        for (int i = 0; i < nsave; i++)
+            fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
+
+        emit_ds_setup(fn, ds_explicit_save);
 
         emit_param_entry_moves(fn, fn_idx);
     }
@@ -4934,7 +4934,10 @@ static void emit_function(func_t *fn) {
         }
 
         case IR_TAILCALL: {
-            /* Tear down frame */
+            if (ds_explicit_save)
+                fprintf(out_asm, "    pop DS\n");
+            for (int j = nsave - 1; j >= 0; j--)
+                fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
             if (fn->needs_frame) {
                 fprintf(out_asm, "    mov sp, bp\n");
                 fprintf(out_asm, "    pop bp\n");

@@ -18,6 +18,13 @@ fn caller_ds() ds(caller) {
 fn no_ds() ds(none) {
 }
 
+fn take_far(ptr: far32 in ES:SI) ds(caller) {
+}
+
+fn stack_param_with_ds(ptr: far32) ds(0x0000) {
+    take_far(ptr);
+}
+
 fn forward_data_ds() ds(late_anchor) {
     return;
 }

@@ -405,6 +405,7 @@ if [ -f "$TEST_TMPDIR"/t_ds_policy.asm ]; then
     sym_window=$(sed -n '/^api_sym:/,/^[[:space:]]*retf$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
     caller_window=$(sed -n '/t_ds_policy_caller_ds:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
     none_window=$(sed -n '/t_ds_policy_no_ds:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
+    stack_ds_window=$(sed -n '/t_ds_policy_stack_param_with_ds:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
     forward_window=$(sed -n '/t_ds_policy_forward_data_ds:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
     irq_window=$(sed -n '/t_ds_policy_irq_handler:/,/^[[:space:]]*iret$/p' "$TEST_TMPDIR"/t_ds_policy.asm)
     if printf "%s\n" "$lit_window" | grep -q 'push DS' &&
@@ -415,6 +416,10 @@ if [ -f "$TEST_TMPDIR"/t_ds_policy.asm ]; then
        printf "%s\n" "$forward_window" | grep -q 'mov AX, SEG late_anchor' &&
        printf "%s\n" "$irq_window" | grep -q 'push DS' &&
        printf "%s\n" "$irq_window" | grep -q 'iret' &&
+       [ "$(printf "%s\n" "$stack_ds_window" | sed -n '2p')" = "    push bp" ] &&
+       [ "$(printf "%s\n" "$stack_ds_window" | sed -n '4p')" = "    push DS" ] &&
+       printf "%s\n" "$stack_ds_window" | grep -q 'mov SI, \[BP+4\]' &&
+       printf "%s\n" "$stack_ds_window" | grep -q 'mov ES, \[BP+6\]' &&
        ! printf "%s\n" "$caller_window" | grep -q 'mov DS, AX' &&
        ! printf "%s\n" "$none_window" | grep -q 'mov DS, AX'; then
         pass "ds-policy: setup and restore emitted at boundaries"
