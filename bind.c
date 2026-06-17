@@ -383,6 +383,14 @@ static bool is_spilled(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
 static bool flags_live_after_insn(func_t *fn, int insn_idx);
 static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg);
+static int vreg_preg(func_t *fn, int v);
+static int ret_capture_restore_reg(func_t *fn, int ret_vreg);
+static bool call_saved_restores_reg(int *call_saved, int call_nsaved,
+                                    int preg);
+static void rins_store_call_temp_return(func_t *fn, int expected,
+                                        bool is_byte);
+static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
+                                       bool is_byte);
 
 static bool insn_defines_dst(const ir_insn_t *ins) {
     if (!ins || ins->dst < 0)
@@ -3344,6 +3352,55 @@ static int direct_stack_ret_words(int callee_fi, int callee_ext) {
     return 0;
 }
 
+static bool direct_call_returns_need_temp(func_t *fn) {
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->op != IR_CALL && ins->op != IR_MCALL)
+            continue;
+
+        int callee_fi = -1;
+        int callee_ext = -1;
+        for (int fi = 0; fi < nfunctions; fi++) {
+            if (strcmp(functions[fi].name, ins->name) == 0) {
+                callee_fi = fi;
+                break;
+            }
+        }
+        if (callee_fi < 0) {
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    callee_ext = e;
+                    break;
+                }
+            }
+        }
+
+        int nrets = ins->op == IR_MCALL ? ins->nrets : 1;
+        for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+            int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+            if (ret_v < 0 || ret_v >= fn->nvregs)
+                continue;
+            bool ret_stack = false;
+            int expected = PREG_NONE;
+            if (callee_fi >= 0) {
+                ret_stack =
+                    abi_place_is_stack(fn_assigns[callee_fi].return_places[ri]);
+                expected = fn_assigns[callee_fi].return_regs[ri];
+            } else if (callee_ext >= 0) {
+                ret_stack =
+                    abi_place_is_stack(externs[callee_ext].ret_places[ri]);
+                expected = extern_return_reg(&externs[callee_ext], ri);
+            }
+            if (ret_stack || expected == PREG_NONE)
+                continue;
+            int actual = vreg_preg(fn, ret_v);
+            if (actual != PREG_NONE && !pregs_alias(actual, expected))
+                return true;
+        }
+    }
+    return false;
+}
+
 static void call_area_operand(char *buf, size_t bufsz, int disp) {
     if (disp == 0)
         snprintf(buf, bufsz, "[SS:BX]");
@@ -3770,8 +3827,17 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             /* Emit the call instruction itself (emitter handles encoding) */
             rins_ir(fn, i);
 
-            /* Capture return registers before restoring caller-saves. */
             int nrets = ins->op == IR_MCALL ? ins->nrets : 1;
+            bool temp_ret[MAX_RETURNS] = {0};
+            int temp_expected[MAX_RETURNS];
+            bool temp_is_byte[MAX_RETURNS] = {0};
+            for (int ri = 0; ri < MAX_RETURNS; ri++)
+                temp_expected[ri] = PREG_NONE;
+
+            /* Capture return registers before restoring caller-saves unless
+             * the chosen destination aliases one of the registers being
+             * restored. In that case, save the ABI return value to the call
+             * temp slot and reload it after the restore. */
             for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
                 int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
                 if (ret_v < 0 || ret_v >= fn->nvregs) continue;
@@ -3801,6 +3867,17 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 }
                 if (expected == PREG_NONE) continue;
                 int actual = fn->vregs[ret_v].assigned;
+                int restore_reg = ret_capture_restore_reg(fn, ret_v);
+                if (actual != PREG_NONE &&
+                    call_saved_restores_reg(call_saved, call_nsaved,
+                                            restore_reg)) {
+                    temp_ret[ri] = true;
+                    temp_expected[ri] = expected;
+                    temp_is_byte[ri] = fn->vregs[ret_v].is_byte;
+                    rins_store_call_temp_return(fn, expected,
+                                                temp_is_byte[ri]);
+                    continue;
+                }
                 if (actual != expected) {
                     rins_asm(fn, "    mov %s, %s",
                              vreg_asm(fn, ret_v), preg_name[expected]);
@@ -3827,6 +3904,15 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
 
             /* Caller-restore */
             emit_call_restores(fn, call_saved, call_nsaved, call_use_pusha);
+
+            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+                if (!temp_ret[ri])
+                    continue;
+                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+                if (temp_expected[ri] == PREG_NONE)
+                    continue;
+                rins_load_call_temp_return(fn, ret_v, temp_is_byte[ri]);
+            }
 
             continue;
         }
@@ -4117,6 +4203,64 @@ static int vreg_preg(func_t *fn, int v) {
 
 static bool vreg_aliases_preg(func_t *fn, int v, int preg) {
     return pregs_alias(vreg_preg(fn, v), preg);
+}
+
+static int ret_capture_restore_reg(func_t *fn, int ret_vreg) {
+    int preg = vreg_preg(fn, ret_vreg);
+    if (preg >= PREG_AL && preg <= PREG_BH)
+        return preg_alias_parent[preg];
+    return preg;
+}
+
+static bool call_saved_restores_reg(int *call_saved, int call_nsaved,
+                                    int preg) {
+    if (preg == PREG_NONE)
+        return false;
+    for (int s = 0; s < call_nsaved; s++) {
+        if (pregs_alias(call_saved[s], preg))
+            return true;
+    }
+    return false;
+}
+
+static void call_temp_operand(func_t *fn, char *buf, size_t bufsz) {
+    snprintf(buf, bufsz, "[BP%+d]", fn->call_temp_off);
+}
+
+static void rins_store_call_temp_return(func_t *fn, int expected,
+                                        bool is_byte) {
+    char dst[32];
+    call_temp_operand(fn, dst, sizeof(dst));
+    if (is_byte)
+        rins_asm(fn, "    mov %s, %s", dst, preg_name[expected]);
+    else
+        rins_asm(fn, "    mov %s, %s", dst, preg_name[expected]);
+}
+
+static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
+                                       bool is_byte) {
+    char src[32];
+    call_temp_operand(fn, src, sizeof(src));
+    if (ret_vreg < 0 || ret_vreg >= fn->nvregs)
+        return;
+    if (is_spilled(fn, ret_vreg)) {
+        const char *acc = is_byte ? "AL" : "AX";
+        rins_asm(fn, "    push AX");
+        rins_asm(fn, "    mov %s, %s", acc, src);
+        rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), acc);
+        rins_asm(fn, "    pop AX");
+    } else {
+        int actual = vreg_preg(fn, ret_vreg);
+        if (actual == PREG_AX || actual == PREG_AL || actual == PREG_AH) {
+            rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), src);
+        } else {
+            const char *acc = is_byte ? "AL" : "AX";
+            rins_asm(fn, "    push AX");
+            rins_asm(fn, "    mov %s, %s", acc, src);
+            rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), acc);
+            rins_asm(fn, "    pop AX");
+        }
+    }
 }
 
 static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
@@ -6425,6 +6569,22 @@ int main(int argc, char **argv) {
         }
 
         allocate_registers(fn, bp_available);
+
+        if (direct_call_returns_need_temp(fn)) {
+            fn->needs_call_temp = true;
+            if (!fn->needs_frame) {
+                fn->needs_frame = true;
+                if (bp_available) {
+                    for (int v = 0; v < fn->nvregs; v++) {
+                        fn->vregs[v].assigned = PREG_NONE;
+                        fn->vregs[v].spill_slot = -1;
+                    }
+                    fn->nspill_slots = 0;
+                    bp_available = false;
+                    allocate_registers(fn, false);
+                }
+            }
+        }
 
         /* If spills occurred despite no pressure estimate, reserve BP */
         if (fn->nspill_slots > 0 && bp_available) {

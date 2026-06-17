@@ -358,6 +358,46 @@ if [ -f "$TEST_TMPDIR"/t_return_late_u8.asm ]; then
     fi
 fi
 
+cat > "$TEST_TMPDIR"/t_call_ret_alias_restore.nir <<'NIR'
+; Binder regression: a byte return captured in AH must survive POP AX.
+.fn retbyte
+.returns u8
+    mov %0, 0x41
+    retval %0
+    ret
+.endfn
+
+.fn call_ret_alias_restore
+.returns u8
+.vreg %0, u8, pin=AL
+.vreg %1, u8, pin=AH
+.vreg %2, u8
+    mov %0, 0x22
+    call %1, retbyte
+    mov %2, %1
+    add %2, %2, %0
+    retval %2
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_call_ret_alias_restore.nir -o "$TEST_TMPDIR"/t_call_ret_alias_restore.asm >/dev/null 2>&1; then
+    ret_alias_window=$(sed -n '/_call_ret_alias_restore:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_call_ret_alias_restore.asm)
+    if printf "%s\n" "$ret_alias_window" | grep -q 'call .*retbyte' &&
+       printf "%s\n" "$ret_alias_window" | grep -q 'mov \[BP[-+][0-9]*\], AL' &&
+       ! printf "%s\n" "$ret_alias_window" | awk '
+           /call .*retbyte/ { after_call = 1 }
+           after_call && /pop AX/ { saw_pop_ax = 1 }
+           after_call && !saw_pop_ax && /mov AH, AL/ { bad = 1 }
+           END { exit bad ? 0 : 1 }
+       '; then
+        pass "call-ret-alias-restore: AL return survives AX restore"
+    else
+        fail "call-ret-alias-restore" "AL return captured in AH before POP AX"
+    fi
+else
+    fail "call-ret-alias-restore" "$(./nibbind "$TEST_TMPDIR"/t_call_ret_alias_restore.nir -o "$TEST_TMPDIR"/t_call_ret_alias_restore.asm 2>&1 | tail -1)"
+fi
+
 # Multi-return materialization must not clobber AX before the DX return
 # slot has copied it, and callers must capture the second return slot.
 if [ -f "$TEST_TMPDIR"/t_multi_return.asm ]; then
