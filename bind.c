@@ -4910,8 +4910,15 @@ static void emit_function(func_t *fn) {
         case IR_LEA: {
             int off = local_bp_offset(fn, ins->src1);
             if (is_spilled(fn, ins->dst)) {
-                fprintf(out_asm, "    lea AX, [BP%+d]\n", off);
-                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                if (preg_live_after_insn(fn, i, PREG_AX)) {
+                    fprintf(out_asm, "    push BX\n");
+                    fprintf(out_asm, "    lea BX, [BP%+d]\n", off);
+                    fprintf(out_asm, "    mov %s, BX\n", vreg_asm(fn, ins->dst));
+                    fprintf(out_asm, "    pop BX\n");
+                } else {
+                    fprintf(out_asm, "    lea AX, [BP%+d]\n", off);
+                    fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                }
             } else {
                 fprintf(out_asm, "    lea %s, [BP%+d]\n",
                         vreg_asm(fn, ins->dst), off);

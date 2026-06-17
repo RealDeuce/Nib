@@ -788,6 +788,47 @@ if [ -f "$TEST_TMPDIR"/t_load_scratch_alias.asm ]; then
     fi
 fi
 
+# Spilled LEA must not use AX as scratch when AL is live for a following
+# byte store.
+cat > "$TEST_TMPDIR"/t_lea_scratch.nir <<'NIR'
+; Binder regression: spilled LEA must not clobber AL.
+.fn lea_scratch
+.param %0, u8, "ch", register, pin=AL
+.returns u8
+.local %1, 1, "a"
+.local %2, 1, "b"
+.local %3, 1, "c"
+.local %4, 1, "d"
+    lea %5, %1
+    lea %6, %2
+    lea %7, %3
+    lea %8, %4
+    mov %9, 0
+    storeb %5[%9], %0
+    storeb %6[%9], %0
+    storeb %7[%9], %0
+    storeb %8[%9], %0
+    retval %0
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_lea_scratch.nir -o "$TEST_TMPDIR"/t_lea_scratch.asm >/dev/null 2>&1; then
+    if awk '
+        /lea AX, / { bad = 1 }
+        /push BX/ { saw_push_bx = 1 }
+        saw_push_bx && /lea BX, / { saw_lea_bx = 1 }
+        saw_lea_bx && /mov \[BP[-+][0-9]+\], BX/ { saw_spill = 1 }
+        saw_spill && /mov \[BX\+SI\], AL/ { saw_store = 1 }
+        END { exit (!bad && saw_store) ? 0 : 1 }
+    ' "$TEST_TMPDIR"/t_lea_scratch.asm; then
+        pass "lea-scratch: spilled local address preserves live AL"
+    else
+        fail "lea-scratch" "spilled LEA clobbers AL before byte store"
+    fi
+else
+    fail "lea-scratch" "$(./nibbind "$TEST_TMPDIR"/t_lea_scratch.nir -o "$TEST_TMPDIR"/t_lea_scratch.asm 2>&1 | tail -1)"
+fi
+
 # Loop body CX: CX must not be modified between loop top and LOOP instruction
 if [ -f "$TEST_TMPDIR"/t_loop_body.asm ]; then
     # Between the .L0 label and "loop", CX should only appear as a source (read), never as destination
