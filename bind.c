@@ -3527,6 +3527,38 @@ static bool preg_is_word(int preg) {
     return preg >= PREG_AX && preg <= PREG_DI;
 }
 
+static int icall_far_pointer_scratch(ir_insn_t *ins) {
+    int callee_ext = -1;
+    for (int e = 0; e < nexterns; e++) {
+        if (strcmp(externs[e].name, ins->name) == 0) {
+            callee_ext = e;
+            break;
+        }
+    }
+
+    static const int order[] = { PREG_BX, PREG_SI, PREG_DI, PREG_BP };
+    for (int oi = 0; oi < (int)(sizeof(order) / sizeof(order[0])); oi++) {
+        int scratch = order[oi];
+        bool conflicts = false;
+        if (callee_ext >= 0) {
+            for (int a = 0; a < ins->nargs &&
+                            a < externs[callee_ext].nparams; a++) {
+                if (abi_place_is_stack(externs[callee_ext].param_places[a]))
+                    continue;
+                int expected = externs[callee_ext].param_pins[a].preg;
+                if (pregs_alias(scratch, expected)) {
+                    conflicts = true;
+                    break;
+                }
+            }
+        }
+        if (!conflicts)
+            return scratch;
+    }
+
+    return PREG_NONE;
+}
+
 static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
     if (src_vreg < 0 || src_vreg >= fn->nvregs || expected == PREG_NONE)
         return;
@@ -5755,16 +5787,23 @@ static void emit_function(func_t *fn) {
                     fprintf(out_asm, "    call far [BP%+d]\n", off);
                     break;
                 }
-                /* Register pair: build far pointer on stack, use BX to address it.
-                 * push seg; push off; push BX; mov BX,SP; add BX,2; call far [SS:BX]
-                 * After call: pop BX (restore); add SP,4 (clean far ptr) */
+                /* Register pair: build far pointer on stack, then use an
+                 * addressable register that is not one of the callee's
+                 * register arguments to call through it. */
+                int scratch = icall_far_pointer_scratch(ins);
+                if (scratch == PREG_NONE) {
+                    fprintf(stderr,
+                            "%s: no scratch register for indirect far call '%s'\n",
+                            fn->name, ins->name);
+                    scratch = PREG_BX;
+                }
                 fprintf(out_asm, "    push %s\n", vreg_asm(fn, ins->src2));
                 fprintf(out_asm, "    push %s\n", vreg_asm(fn, ins->src1));
-                fprintf(out_asm, "    push BX\n");
-                fprintf(out_asm, "    mov BX, SP\n");
-                fprintf(out_asm, "    add BX, 2\n");
-                fprintf(out_asm, "    call far [SS:BX]\n");
-                fprintf(out_asm, "    pop BX\n");
+                fprintf(out_asm, "    push %s\n", preg_name[scratch]);
+                fprintf(out_asm, "    mov %s, SP\n", preg_name[scratch]);
+                fprintf(out_asm, "    add %s, 2\n", preg_name[scratch]);
+                fprintf(out_asm, "    call far [SS:%s]\n", preg_name[scratch]);
+                fprintf(out_asm, "    pop %s\n", preg_name[scratch]);
                 fprintf(out_asm, "    add SP, 4\n");
             } else {
                 const char *addr = vreg_asm(fn, ins->src1);

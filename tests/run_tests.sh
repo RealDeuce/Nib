@@ -720,6 +720,43 @@ else
     fail "icall-ret-alias-temp" "$(./nibbind "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_icall_bl_arg_scratch.nir <<'NIR'
+; Binder regression: the indirect far-call stub must not use BX to
+; address the temporary far pointer when BL is an outgoing argument.
+.extern write_ram
+.eparam u8, "index", register, pin=AL
+.eparam u8, "value", register, pin=BL
+.preserves AX, CX, DX, BP, SI, DI, ES, CS, SS, DS
+.endextern
+
+.fn icall_bl_arg_scratch
+.vreg %0, u16, pin=DX
+.vreg %1, seg
+.vreg %2, u8, pin=AL
+.vreg %3, u8, pin=CL
+    mov %0, 4660
+    mov %4, 57344
+    mov %1, %4
+    mov %2, 0
+    mov %3, 90
+    icall %5, %0, %1, write_ram, %2, %3
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_icall_bl_arg_scratch.nir -o "$TEST_TMPDIR"/t_icall_bl_arg_scratch.asm >/dev/null 2>&1; then
+    bl_scratch_window=$(sed -n '/icall_bl_arg_scratch_icall_bl_arg_scratch:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_bl_arg_scratch.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_icall_bl_arg_scratch.asm -o "$TEST_TMPDIR"/t_icall_bl_arg_scratch.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$bl_scratch_window" | grep -q 'mov BL, CL' &&
+       printf "%s\n" "$bl_scratch_window" | grep -q 'call far \[SS:SI\]' &&
+       ! printf "%s\n" "$bl_scratch_window" | grep -q 'mov BX, SP'; then
+        pass "icall-bl-arg-scratch: BL argument survives far pointer stub"
+    else
+        fail "icall-bl-arg-scratch" "far pointer stub clobbered BL"
+    fi
+else
+    fail "icall-bl-arg-scratch" "$(./nibbind "$TEST_TMPDIR"/t_icall_bl_arg_scratch.nir -o "$TEST_TMPDIR"/t_icall_bl_arg_scratch.asm 2>&1 | tail -1)"
+fi
+
 # Flags returned by an indirect API call must be consumed from FLAGS,
 # not from the arbitrary vreg assigned to the getflag pseudo-result.
 if [ -f "$TEST_TMPDIR"/t_flag_after_icall.asm ]; then
