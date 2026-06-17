@@ -46,3 +46,15 @@ fn test_in16() -> u16 {
     u16 result = port_in16(PORT_LO);
     return result;
 }
+
+fn test_dynamic(port: u16, val: u8) -> u8 {
+    const u8 result = port_in(port + 1);
+    port_out(port + 2, val & 0x0F);
+    return result;
+}
+
+fn test_dynamic16(port: u16, val: u16) -> u16 {
+    const u16 result = port_in16(port);
+    port_out16(port + 2, val);
+    return result;
+}

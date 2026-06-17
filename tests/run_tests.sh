@@ -621,6 +621,8 @@ if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_out16_window=$(sed -n '/t_port_io_test_out16:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
     port_preserve_window=$(sed -n '/t_port_io_test_out16_preserves:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
     port_in16_window=$(sed -n '/t_port_io_test_in16:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
+    port_dynamic_window=$(sed -n '/t_port_io_test_dynamic:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
+    port_dynamic16_window=$(sed -n '/t_port_io_test_dynamic16:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
     if grep -q 'out 0x50, AL' "$TEST_TMPDIR"/t_port_io.asm &&
        grep -q 'in AL, 0x60' "$TEST_TMPDIR"/t_port_io.asm &&
        printf "%s\n" "$port_accum_window" | grep -q 'out 0x50, AL' &&
@@ -639,11 +641,56 @@ if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
        ! printf "%s\n" "$port_preserve_window" | grep -q 'push AX' &&
        ! printf "%s\n" "$port_preserve_window" | grep -q 'pop AX' &&
        printf "%s\n" "$port_in16_window" | grep -q 'in AX, 0x50' &&
+       printf "%s\n" "$port_dynamic_window" | grep -q 'in AL, DX' &&
+       printf "%s\n" "$port_dynamic_window" | grep -q 'out DX, AL' &&
+       printf "%s\n" "$port_dynamic16_window" | grep -q 'in AX, DX' &&
+       printf "%s\n" "$port_dynamic16_window" | grep -q 'out DX, AX' &&
+       ! awk '
+           /^[[:space:]]*in[[:space:]]+(AL|AX),/ {
+               if ($3 != "DX" && $3 !~ /^0x[0-9A-Fa-f]+$/) bad = 1
+           }
+           /^[[:space:]]*out[[:space:]]+/ {
+               if ($2 != "DX," && $2 !~ /^0x[0-9A-Fa-f]+,$/) bad = 1
+           }
+           END { exit bad ? 0 : 1 }
+       ' "$TEST_TMPDIR"/t_port_io.asm &&
        ! printf "%s\n" "$port_accum_window" | grep -q 'mov [A-D]X, 8[01]'; then
         pass "port-io: IN/OUT use AL accumulator"
     else
         fail "port-io" "IN/OUT not using AL"
     fi
+fi
+
+cat > "$TEST_TMPDIR"/t_cmp_mem_mem.nir <<'NIR'
+; Binder regression: CMP has no memory-to-memory form.
+.fn cmp_mem_mem
+.param %0, u16, "a", stack
+.param %1, u16, "b", stack
+.returns u16
+    cmp.eq %2, %0, %1
+    jz %2, .L0
+    mov %3, 1
+    retval %3
+    ret
+.L0:
+    mov %4, 0
+    retval %4
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_cmp_mem_mem.nir -o "$TEST_TMPDIR"/t_cmp_mem_mem.asm >/dev/null 2>&1; then
+    if awk '
+        /^[[:space:]]*cmp[[:space:]]+\[BP[-+][0-9]+\], \[BP[-+][0-9]+\]/ { bad = 1 }
+        /^[[:space:]]*mov[[:space:]]+AX, \[BP[-+][0-9]+\]/ { saw_load = 1 }
+        /^[[:space:]]*cmp[[:space:]]+\[BP[-+][0-9]+\], AX/ { saw_cmp = 1 }
+        END { exit (!bad && saw_load && saw_cmp) ? 0 : 1 }
+    ' "$TEST_TMPDIR"/t_cmp_mem_mem.asm; then
+        pass "cmp-mem-mem: stack operands compare through AX"
+    else
+        fail "cmp-mem-mem" "memory-to-memory CMP was emitted"
+    fi
+else
+    fail "cmp-mem-mem" "$(./nibbind "$TEST_TMPDIR"/t_cmp_mem_mem.nir -o "$TEST_TMPDIR"/t_cmp_mem_mem.asm 2>&1 | tail -1)"
 fi
 
 # Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)

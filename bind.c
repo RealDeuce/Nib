@@ -382,6 +382,7 @@ static const char *vreg_asm(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
 static bool flags_live_after_insn(func_t *fn, int insn_idx);
+static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg);
 
 static bool insn_defines_dst(const ir_insn_t *ins) {
     if (!ins || ins->dst < 0)
@@ -535,6 +536,12 @@ static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
         mark_preg_clobber(clobbers,
                           strcmp(ins->name, "inb") == 0 ? PREG_AL
                                                           : PREG_AX);
+        if (!ins->has_imm) {
+            int port = (ins->src1 >= 0 && ins->src1 < fn->nvregs)
+                ? fn->vregs[ins->src1].assigned : PREG_NONE;
+            if (port != PREG_DX)
+                mark_preg_clobber(clobbers, PREG_DX);
+        }
     }
 
     if (ins->op == IR_ALU &&
@@ -545,6 +552,12 @@ static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
             ? fn->vregs[ins->src1].assigned : PREG_NONE;
         if (val != acc)
             mark_preg_clobber(clobbers, acc);
+        if (!ins->has_imm) {
+            int port = (ins->dst >= 0 && ins->dst < fn->nvregs)
+                ? fn->vregs[ins->dst].assigned : PREG_NONE;
+            if (port != PREG_DX)
+                mark_preg_clobber(clobbers, PREG_DX);
+        }
     }
 }
 
@@ -4096,6 +4109,43 @@ static void emit_mov(func_t *fn, int dst, int src) {
     }
 }
 
+static int vreg_preg(func_t *fn, int v) {
+    if (!fn || v < 0 || v >= fn->nvregs)
+        return PREG_NONE;
+    return fn->vregs[v].assigned;
+}
+
+static bool vreg_aliases_preg(func_t *fn, int v, int preg) {
+    return pregs_alias(vreg_preg(fn, v), preg);
+}
+
+static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
+    if (cmp->has_imm) {
+        fprintf(out_asm, "    cmp %s, %d\n",
+                vreg_asm_sized(fn, cmp->src1), cmp->imm);
+        return;
+    }
+
+    if (is_spilled(fn, cmp->src1) && is_spilled(fn, cmp->src2)) {
+        bool cmp_byte = (cmp->src1 >= 0 && cmp->src1 < fn->nvregs &&
+                         fn->vregs[cmp->src1].is_byte) ||
+                        (cmp->src2 >= 0 && cmp->src2 < fn->nvregs &&
+                         fn->vregs[cmp->src2].is_byte);
+        const char *acc = cmp_byte ? "AL" : "AX";
+        bool preserve_ax = preg_live_after_insn(fn, cmp_idx, PREG_AX);
+        if (preserve_ax)
+            fprintf(out_asm, "    push AX\n");
+        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, cmp->src2));
+        fprintf(out_asm, "    cmp %s, %s\n", vreg_asm(fn, cmp->src1), acc);
+        if (preserve_ax)
+            fprintf(out_asm, "    pop AX\n");
+        return;
+    }
+
+    fprintf(out_asm, "    cmp %s, %s\n",
+            vreg_asm(fn, cmp->src1), vreg_asm(fn, cmp->src2));
+}
+
 /* ---- Emission helpers for hardware workarounds ---- */
 
 static bool emit_es_data_prefix(func_t *fn, int addr_vreg) {
@@ -4361,13 +4411,19 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         const char *acc = byte_in ? "AL" : "AX";
         int acc_preg = byte_in ? PREG_AL : PREG_AX;
         const char *d = vreg_asm(fn, ins->dst);
+        bool dynamic_port = !ins->has_imm;
+        bool port_is_dx = dynamic_port && vreg_preg(fn, ins->src1) == PREG_DX;
         bool dst_acc_alias = false;
+        bool dst_dx_alias = false;
         if (ins->dst >= 0 && ins->dst < fn->nvregs) {
             int dst_preg = fn->vregs[ins->dst].assigned;
             dst_acc_alias = (dst_preg != PREG_NONE &&
                              preg_write_clobbers(PREG_AX, dst_preg));
+            dst_dx_alias = pregs_alias(dst_preg, PREG_DX);
         }
         bool preserve_acc = preg_live_after_insn(fn, i, acc_preg);
+        bool preserve_dx = dynamic_port && !port_is_dx && !dst_dx_alias &&
+            preg_live_after_insn(fn, i, PREG_DX);
         int scratch_parent = PREG_NONE;
         int scratch_byte = PREG_NONE;
         if (preserve_acc && dst_acc_alias) {
@@ -4376,24 +4432,32 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             scratch_byte = scratch_byte_for_parent(scratch_parent);
             fprintf(out_asm, "    push %s\n", preg_name[scratch_parent]);
         }
+        if (preserve_dx)
+            fprintf(out_asm, "    push DX\n");
         if (preserve_acc)
             fprintf(out_asm, "    push AX\n");
+        if (dynamic_port && !port_is_dx)
+            fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->src1));
         if (ins->has_imm)
             fprintf(out_asm, "    in %s, 0x%02X\n", acc, ins->imm);
         else
-            fprintf(out_asm, "    in %s, %s\n", acc, vreg_asm(fn, ins->src1));
+            fprintf(out_asm, "    in %s, DX\n", acc);
         if (preserve_acc && dst_acc_alias) {
             fprintf(out_asm, "    mov %s, %s\n",
                     preg_name[byte_in ? scratch_byte : scratch_parent], acc);
             fprintf(out_asm, "    pop AX\n");
             fprintf(out_asm, "    mov %s, %s\n", d,
                     preg_name[byte_in ? scratch_byte : scratch_parent]);
+            if (preserve_dx)
+                fprintf(out_asm, "    pop DX\n");
             fprintf(out_asm, "    pop %s\n", preg_name[scratch_parent]);
         } else {
             if (strcmp(d, acc) != 0)
                 fprintf(out_asm, "    mov %s, %s\n", d, acc);
             if (preserve_acc)
                 fprintf(out_asm, "    pop AX\n");
+            if (preserve_dx)
+                fprintf(out_asm, "    pop DX\n");
         }
         return;
     }
@@ -4402,18 +4466,44 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         const char *acc = byte_out ? "AL" : "AX";
         int acc_preg = byte_out ? PREG_AL : PREG_AX;
         const char *val = vreg_asm(fn, ins->src1);
+        bool dynamic_port = !ins->has_imm;
+        bool port_is_dx = dynamic_port && vreg_preg(fn, ins->dst) == PREG_DX;
+        bool port_aliases_ax = dynamic_port &&
+            vreg_aliases_preg(fn, ins->dst, PREG_AX);
+        bool val_aliases_dx = vreg_aliases_preg(fn, ins->src1, PREG_DX);
         bool preserve_acc = strcmp(acc, val) != 0 &&
             preg_live_after_insn(fn, i, acc_preg);
+        bool preserve_dx = dynamic_port && !port_is_dx &&
+            preg_live_after_insn(fn, i, PREG_DX);
+        bool save_ax_port = dynamic_port && !port_is_dx &&
+            port_aliases_ax && val_aliases_dx;
+        bool port_loaded = false;
+        if (preserve_dx)
+            fprintf(out_asm, "    push DX\n");
         if (preserve_acc)
             fprintf(out_asm, "    push AX\n");
+        if (save_ax_port)
+            fprintf(out_asm, "    push AX\n");
+        if (dynamic_port && !port_is_dx && port_aliases_ax && !save_ax_port) {
+            fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->dst));
+            port_loaded = true;
+        }
         if (strcmp(acc, val) != 0)
             fprintf(out_asm, "    mov %s, %s\n", acc, val);
+        if (dynamic_port && !port_is_dx && !port_loaded) {
+            if (save_ax_port)
+                fprintf(out_asm, "    pop DX\n");
+            else
+                fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->dst));
+        }
         if (ins->has_imm)
             fprintf(out_asm, "    out 0x%02X, %s\n", ins->imm, acc);
         else
-            fprintf(out_asm, "    out %s, %s\n", vreg_asm(fn, ins->dst), acc);
+            fprintf(out_asm, "    out DX, %s\n", acc);
         if (preserve_acc)
             fprintf(out_asm, "    pop AX\n");
+        if (preserve_dx)
+            fprintf(out_asm, "    pop DX\n");
         return;
     }
 
@@ -5068,14 +5158,7 @@ static void emit_function(func_t *fn) {
                 ir_insn_t *cmp = &fn->insns[j];
                 if (cmp->op == IR_ALU || cmp->op == IR_CMP) {
                     if (cmp->dst == ins->src1) {
-                        /* Emit the CMP */
-                        if (cmp->has_imm)
-                            fprintf(out_asm, "    cmp %s, %d\n",
-                                    vreg_asm(fn, cmp->src1), cmp->imm);
-                        else
-                            fprintf(out_asm, "    cmp %s, %s\n",
-                                    vreg_asm(fn, cmp->src1),
-                                    vreg_asm(fn, cmp->src2));
+                        emit_cmp_operands(fn, cmp, j);
                         /* Map comparison kind to Jcc — note: jz means
                            "jump if condition NOT met" (the condition
                            vreg is zero), so we invert */
