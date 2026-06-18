@@ -1211,6 +1211,17 @@ if [ -f "$TEST_TMPDIR"/t_expr_sites.asm ]; then
     fi
 fi
 
+if [ -f tests/t_seg_param.nir ] && [ -f "$TEST_TMPDIR"/t_seg_param.asm ]; then
+    seg_param_call=$(sed -n '/t_seg_param_call_read_es:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_seg_param.asm)
+    if grep -q '^\.param %[0-9][0-9]*, seg, "src_seg", register, pin=ES' tests/t_seg_param.nir &&
+       printf "%s\n" "$seg_param_call" | grep -q 'mov ES, AX' &&
+       printf "%s\n" "$seg_param_call" | grep -q 'mov SI, 4'; then
+        pass "seg-param: seg in ES pins ABI segment parameter"
+    else
+        fail "seg-param" "seg in ES did not pin/pass ES"
+    fi
+fi
+
 # Near JMP backward: displacement must account for 3-byte instruction size
 if [ -f "$TEST_TMPDIR"/t_jmp_near.asm ]; then
     outbin="$TEST_TMPDIR/t_jmp_near_check.bin"
@@ -1423,6 +1434,13 @@ if ./nib "$TEST_TMPDIR"/t_err_deref_type.nib >/dev/null 2>&1; then
     fail "deref type" "u8 dereference should have failed"
 else
     pass "deref type (correctly rejected)"
+fi
+
+echo 'fn bad(s: seg in DS) { }' > "$TEST_TMPDIR"/t_err_seg_pin_ds.nib
+if ./nib "$TEST_TMPDIR"/t_err_seg_pin_ds.nib >/dev/null 2>&1; then
+    fail "seg pin DS" "seg in DS should have failed"
+else
+    pass "seg pin DS (correctly rejected)"
 fi
 
 echo ""

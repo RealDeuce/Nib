@@ -515,12 +515,33 @@ param
           } }
     | IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
+    | IDENT ':' type KW_IN seg_reg
+        { if (!$3 || $3->kind != TYPE_SEG) {
+              yyerror("segment register pin is only valid for seg parameters");
+              YYERROR;
+          }
+          if ($5.reg != SREG_ES) {
+              yyerror("only ES is valid for seg parameter pins; use ds() for DS");
+              YYERROR;
+          }
+          $$ = mk_param_pinned($1, $3, $5.reg, REGCLASS_SEG); }
     | IDENT ':' type KW_IN seg_reg ':' word_reg
         { if (!$3 || $3->kind != TYPE_FAR)
               yyerror("seg:reg pin is only valid for far32 parameters");
           $$ = mk_param_far_pinned($1, $7.reg, $5.reg); }
     | KW_VALUE IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($2, $4, $6.reg, $6.rclass); $$->is_value = true; }
+    | KW_VALUE IDENT ':' type KW_IN seg_reg
+        { if (!$4 || $4->kind != TYPE_SEG) {
+              yyerror("segment register pin is only valid for seg parameters");
+              YYERROR;
+          }
+          if ($6.reg != SREG_ES) {
+              yyerror("only ES is valid for seg parameter pins; use ds() for DS");
+              YYERROR;
+          }
+          $$ = mk_param_pinned($2, $4, $6.reg, REGCLASS_SEG);
+          $$->is_value = true; }
     | KW_VALUE IDENT ':' type KW_IN IDENT
         { if (strcmp($6, "stack") == 0)
               $$ = mk_param_placed($2, $4, true, ABI_PLACE_STACK);
@@ -549,6 +570,16 @@ extern_param
           } }
     | IDENT ':' type KW_IN reg_name
         { $$ = mk_param_pinned($1, $3, $5.reg, $5.rclass); }
+    | IDENT ':' type KW_IN seg_reg
+        { if (!$3 || $3->kind != TYPE_SEG) {
+              yyerror("segment register pin is only valid for seg parameters");
+              YYERROR;
+          }
+          if ($5.reg != SREG_ES) {
+              yyerror("only ES is valid for seg parameter pins; use ds() for DS");
+              YYERROR;
+          }
+          $$ = mk_param_pinned($1, $3, $5.reg, REGCLASS_SEG); }
     | IDENT ':' type KW_IN seg_reg ':' word_reg
         { if (!$3 || $3->kind != TYPE_FAR)
               yyerror("seg:reg pin is only valid for far32 parameters");

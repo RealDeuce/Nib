@@ -1,0 +1,10 @@
+// Test: seg parameters may be pinned to ES as an ABI value.
+
+fn read_es(src_seg: seg in ES, src_off: u16 in SI) -> u8 {
+    return [ES:src_off];
+}
+
+fn call_read_es() -> u8 {
+    seg src = 0xB800;
+    return read_es(src, 4);
+}

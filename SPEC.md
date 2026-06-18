@@ -417,6 +417,18 @@ fn blit(src: far32 in ES:SI, x: u16, y: u8) {
 }
 ```
 
+For raw segment values, only `ES` is a valid parameter pin:
+
+```
+fn write_to_es(dst_seg: seg in ES, dst_off: u16 in DI, value: u8 in AL) {
+    [ES:dst_off] := value;
+}
+```
+
+`DS` is controlled by a function's `ds(...)` boundary policy, not by
+ordinary parameter passing. `CS` and `SS` are likewise not valid segment
+parameter locations.
+
 A `far32` parameter is split into one offset word and one segment word
 internally. Unpinned `far32` parameters and return values default to
 stack ABI placement because that is usually lower pressure and can be
