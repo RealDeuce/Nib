@@ -33,12 +33,15 @@ Performs whole-program register allocation across all compiled modules.
 Reads `.nir` files and outputs fully-resolved V20 assembly.
 
 ```
-nibbind [-o output.asm] file1.nir [file2.nir ...]
+nibbind [-o output.asm] [--pressure-report file]
+        [--pressure-fn name] file1.nir [file2.nir ...]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-o file` | Output assembly file (default: `out.asm`) |
+| `--pressure-report file` | Write live-range and register-pressure diagnostics |
+| `--pressure-fn name` | Limit the pressure report to one function |
 
 Accepts multiple `.nir` files. Builds the call graph, propagates
 register preferences bottom-up from leaf functions, allocates physical
@@ -50,6 +53,8 @@ assembly with real register names.
 ```sh
 ./nibbind app.nir lib.nir -o program.asm
 ./nibbind module.nir -o module.asm
+./nibbind app.nir lib.nir -o program.asm \
+  --pressure-report pressure.txt --pressure-fn boot
 ```
 
 ---

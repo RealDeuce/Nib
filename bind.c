@@ -392,6 +392,9 @@ static void rins_store_call_temp_return(func_t *fn, int expected,
 static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
                                        bool is_byte);
 
+static const char *pressure_report_path = NULL;
+static const char *pressure_fn_filter = NULL;
+
 static bool insn_defines_dst(const ir_insn_t *ins) {
     if (!ins || ins->dst < 0)
         return false;
@@ -2159,6 +2162,413 @@ static void compute_liveness(func_t *fn) {
                 fn->vregs[v].in_loop = true;
         }
     }
+}
+
+typedef struct {
+    int live;
+    int u8;
+    int u16;
+    int seg;
+    int far32;
+} pressure_counts_t;
+
+static int vset_count_live(const uint64_t *s, int nvregs) {
+    int n = 0;
+    for (int w = 0; w < VREG_WORDS; w++) {
+        uint64_t bits = s[w];
+        if ((w + 1) * 64 > nvregs) {
+            int valid = nvregs - w * 64;
+            if (valid <= 0)
+                bits = 0;
+            else if (valid < 64)
+                bits &= (1ULL << valid) - 1;
+        }
+        n += __builtin_popcountll(bits);
+    }
+    return n;
+}
+
+static void collect_insn_uses_defs(ir_insn_t *ins, int nvregs,
+                                   int *uses, int *nuses, int use_cap,
+                                   int *defs, int *ndefs, int def_cap) {
+    *nuses = 0;
+    *ndefs = 0;
+
+    if (ins->src1 >= 0 && ins->src1 < nvregs && ins->op != IR_LEA &&
+        *nuses < use_cap)
+        uses[(*nuses)++] = ins->src1;
+    if (ins->src2 >= 0 && ins->src2 < nvregs && *nuses < use_cap)
+        uses[(*nuses)++] = ins->src2;
+    for (int j = 0; j < MAX_ABI_PARAMS - 2; j++) {
+        int v = ins->extra_args[j];
+        if (v >= 0 && v < nvregs && *nuses < use_cap)
+            uses[(*nuses)++] = v;
+    }
+    if (ins->op == IR_RETVAL) {
+        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+            int v = ins->ret_vregs[j];
+            if (v >= 0 && v < nvregs && *nuses < use_cap)
+                uses[(*nuses)++] = v;
+        }
+    }
+    if (insn_reads_dst(ins) && ins->dst >= 0 && ins->dst < nvregs &&
+        *nuses < use_cap)
+        uses[(*nuses)++] = ins->dst;
+
+    if (insn_defines_dst(ins) && ins->dst >= 0 && ins->dst < nvregs &&
+        *ndefs < def_cap)
+        defs[(*ndefs)++] = ins->dst;
+    if (ins->op == IR_MCALL) {
+        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
+            int v = ins->ret_vregs[j];
+            if (v >= 0 && v < nvregs && *ndefs < def_cap)
+                defs[(*ndefs)++] = v;
+        }
+    }
+}
+
+static void compute_live_before_sets(func_t *fn, uint64_t (*before)[VREG_WORDS]) {
+    for (int i = 0; i < fn->ninsns; i++)
+        vset_zero(before[i]);
+
+    for (int b = 0; b < fn->nblocks; b++) {
+        bblock_t *bb = &fn->blocks[b];
+        uint64_t live[VREG_WORDS];
+        memcpy(live, bb->live_out, sizeof(live));
+
+        for (int i = bb->end - 1; i >= bb->start; i--) {
+            int uses[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+            int defs[MAX_RETURNS + 2];
+            int nuses, ndefs;
+            collect_insn_uses_defs(&fn->insns[i], fn->nvregs,
+                                   uses, &nuses,
+                                   (int)(sizeof(uses) / sizeof(uses[0])),
+                                   defs, &ndefs,
+                                   (int)(sizeof(defs) / sizeof(defs[0])));
+
+            for (int d = 0; d < ndefs; d++)
+                vset_clear(live, defs[d]);
+            for (int u = 0; u < nuses; u++)
+                vset_set(live, uses[u]);
+            memcpy(before[i], live, VREG_WORDS * sizeof(uint64_t));
+        }
+    }
+}
+
+static pressure_counts_t pressure_counts(func_t *fn, const uint64_t *live) {
+    pressure_counts_t c = {0};
+    c.live = vset_count_live(live, fn->nvregs);
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (!vset_test(live, v))
+            continue;
+        if (fn->vregs[v].is_byte)
+            c.u8++;
+        else if (fn->vregs[v].is_seg) {
+            c.seg++;
+            c.far32++;
+        } else {
+            c.u16++;
+        }
+    }
+    return c;
+}
+
+static int insn_source_line(func_t *fn, int idx) {
+    if (idx < 0)
+        return 0;
+    if (idx >= fn->ninsns)
+        idx = fn->ninsns - 1;
+    for (int i = idx; i >= 0; i--) {
+        if (fn->insns[i].line > 0)
+            return fn->insns[i].line;
+    }
+    for (int i = idx + 1; i < fn->ninsns; i++) {
+        if (fn->insns[i].line > 0)
+            return fn->insns[i].line;
+    }
+    return 0;
+}
+
+static const char *insn_source_file(func_t *fn, int idx) {
+    if (idx < 0)
+        idx = 0;
+    if (idx >= fn->ninsns)
+        idx = fn->ninsns - 1;
+    for (int i = idx; i >= 0; i--) {
+        if (fn->insns[i].src_file[0])
+            return fn->insns[i].src_file;
+    }
+    for (int i = idx + 1; i < fn->ninsns; i++) {
+        if (fn->insns[i].src_file[0])
+            return fn->insns[i].src_file;
+    }
+    return fn->module[0] ? fn->module : "?";
+}
+
+static int vreg_first_use(func_t *fn, int v) {
+    for (int i = 0; i < fn->ninsns; i++) {
+        int uses[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+        int defs[MAX_RETURNS + 2];
+        int nuses, ndefs;
+        collect_insn_uses_defs(&fn->insns[i], fn->nvregs,
+                               uses, &nuses,
+                               (int)(sizeof(uses) / sizeof(uses[0])),
+                               defs, &ndefs,
+                               (int)(sizeof(defs) / sizeof(defs[0])));
+        (void)defs;
+        (void)ndefs;
+        for (int u = 0; u < nuses; u++)
+            if (uses[u] == v)
+                return i;
+    }
+    return -1;
+}
+
+static const char *vreg_kind(func_t *fn, int v) {
+    if (v < 0 || v >= fn->nvregs)
+        return "?";
+    if (fn->vregs[v].is_seg)
+        return "seg";
+    if (fn->vregs[v].is_byte)
+        return "u8";
+    if (fn->vregs[v].is_local_slot)
+        return "local";
+    return "u16";
+}
+
+static const char *vreg_note(func_t *fn, int v, char *buf, size_t bufsz) {
+    buf[0] = '\0';
+    if (v < 0 || v >= fn->nvregs)
+        return buf;
+    for (int p = 0; p < fn->nparams; p++) {
+        if (fn->param_vregs[p] == v && fn->param_names[p][0]) {
+            snprintf(buf, bufsz, " param:%s", fn->param_names[p]);
+            return buf;
+        }
+    }
+    if (fn->vregs[v].data_label[0]) {
+        snprintf(buf, bufsz, " data:%s", fn->vregs[v].data_label);
+    } else if (fn->vregs[v].is_local_slot) {
+        snprintf(buf, bufsz, " local[%d]", fn->vregs[v].local_size);
+    } else if (fn->vregs[v].is_cs_ref) {
+        snprintf(buf, bufsz, " csref");
+    } else if (fn->vregs[v].is_const) {
+        snprintf(buf, bufsz, " const");
+    }
+    return buf;
+}
+
+static void print_source_loc(FILE *out, func_t *fn, int idx) {
+    int line = insn_source_line(fn, idx);
+    fprintf(out, "%s:%d", insn_source_file(fn, idx), line);
+}
+
+static bool vreg_crosses_line_span(func_t *fn, int v, int start_line,
+                                   int end_line) {
+    int def_line = insn_source_line(fn, fn->vregs[v].def_pos);
+    int last_line = insn_source_line(fn, fn->vregs[v].last_use);
+    if (def_line <= 0 || last_line <= 0)
+        return false;
+    return def_line < start_line && last_line > end_line;
+}
+
+static int compare_vreg_lifetime_desc(const void *pa, const void *pb,
+                                      void *ctx) {
+    func_t *fn = (func_t *)ctx;
+    int a = *(const int *)pa;
+    int b = *(const int *)pb;
+    int alen = fn->vregs[a].last_use - fn->vregs[a].def_pos;
+    int blen = fn->vregs[b].last_use - fn->vregs[b].def_pos;
+    if (alen != blen)
+        return blen - alen;
+    return a - b;
+}
+
+static void sort_vregs_by_lifetime(func_t *fn, int *vregs, int n) {
+    for (int i = 1; i < n; i++) {
+        int v = vregs[i];
+        int j = i - 1;
+        while (j >= 0 &&
+               compare_vreg_lifetime_desc(&vregs[j], &v, fn) > 0) {
+            vregs[j + 1] = vregs[j];
+            j--;
+        }
+        vregs[j + 1] = v;
+    }
+}
+
+static void report_pressure_function(FILE *out, func_t *fn) {
+    if (pressure_fn_filter && strcmp(pressure_fn_filter, fn->name) != 0)
+        return;
+    if (fn->ninsns <= 0)
+        return;
+
+    uint64_t (*before)[VREG_WORDS] = calloc((size_t)fn->ninsns,
+                                            sizeof(*before));
+    if (!before)
+        return;
+    compute_live_before_sets(fn, before);
+
+    int peak_idx = 0;
+    pressure_counts_t peak = {0};
+    for (int i = 0; i < fn->ninsns; i++) {
+        pressure_counts_t c = pressure_counts(fn, before[i]);
+        if (c.live > peak.live) {
+            peak = c;
+            peak_idx = i;
+        }
+    }
+
+    int peak_line = insn_source_line(fn, peak_idx);
+    int span_start_line = peak_line;
+    int span_end_line = peak_line;
+    int threshold = peak.live > 1 ? (peak.live * 8 + 9) / 10 : peak.live;
+    for (int i = peak_idx; i >= 0; i--) {
+        pressure_counts_t c = pressure_counts(fn, before[i]);
+        if (c.live < threshold)
+            break;
+        int line = insn_source_line(fn, i);
+        if (line > 0)
+            span_start_line = line;
+    }
+    for (int i = peak_idx; i < fn->ninsns; i++) {
+        pressure_counts_t c = pressure_counts(fn, before[i]);
+        if (c.live < threshold)
+            break;
+        int line = insn_source_line(fn, i);
+        if (line > 0)
+            span_end_line = line;
+    }
+
+    fprintf(out, "\n== %s ==\n", fn->name);
+    fprintf(out, "summary: vregs=%d spills=%d peak_live=%d at ",
+            fn->nvregs, fn->nspill_slots, peak.live);
+    print_source_loc(out, fn, peak_idx);
+    fprintf(out, " u8=%d u16=%d seg=%d far32=%d\n",
+            peak.u8, peak.u16, peak.seg, peak.far32);
+
+    fprintf(out, "\npressure timeline:\n");
+    for (int i = 0; i < fn->ninsns; i++) {
+        int line = insn_source_line(fn, i);
+        if (line <= 0)
+            continue;
+        pressure_counts_t c = pressure_counts(fn, before[i]);
+        fprintf(out, "  ");
+        print_source_loc(out, fn, i);
+        fprintf(out, " live=%d u8=%d u16=%d seg=%d far32=%d i=%d",
+                c.live, c.u8, c.u16, c.seg, c.far32, i);
+        if (c.live == peak.live)
+            fprintf(out, " peak");
+        if (fn->nspill_slots > 0 && c.live >= threshold)
+            fprintf(out, " spills-likely");
+        fputc('\n', out);
+    }
+
+    fprintf(out, "\npeak pressure:\n");
+    fprintf(out, "  span: %s:%d-%d (%d%% peak threshold)\n",
+            insn_source_file(fn, peak_idx), span_start_line, span_end_line, 80);
+    fprintf(out, "  live across peak:\n");
+    int live_vregs[MAX_VREGS];
+    int nlive = 0;
+    for (int v = 0; v < fn->nvregs; v++)
+        if (vset_test(before[peak_idx], v) && nlive < MAX_VREGS)
+            live_vregs[nlive++] = v;
+    sort_vregs_by_lifetime(fn, live_vregs, nlive);
+    int nprint = nlive < 16 ? nlive : 16;
+    for (int i = 0; i < nprint; i++) {
+        int v = live_vregs[i];
+        char note[96];
+        fprintf(out, "    %%%d %-5s def ", v, vreg_kind(fn, v));
+        print_source_loc(out, fn, fn->vregs[v].def_pos);
+        fprintf(out, " last ");
+        print_source_loc(out, fn, fn->vregs[v].last_use);
+        fprintf(out, " len=%d%s\n",
+                fn->vregs[v].last_use - fn->vregs[v].def_pos,
+                vreg_note(fn, v, note, sizeof(note)));
+    }
+
+    fprintf(out, "\nlive ranges:\n");
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (fn->vregs[v].def_pos < 0 && fn->vregs[v].last_use < 0)
+            continue;
+        char note[96];
+        int first = vreg_first_use(fn, v);
+        fprintf(out, "  %%%d %-5s def ", v, vreg_kind(fn, v));
+        print_source_loc(out, fn, fn->vregs[v].def_pos);
+        fprintf(out, " first ");
+        print_source_loc(out, fn, first);
+        fprintf(out, " last ");
+        print_source_loc(out, fn, fn->vregs[v].last_use);
+        fprintf(out, " uses=%d%s\n", fn->vregs[v].use_count,
+                vreg_note(fn, v, note, sizeof(note)));
+    }
+
+    fprintf(out, "\ndead/early-load warnings:\n");
+    int nwarn = 0;
+    for (int v = 0; v < fn->nvregs; v++) {
+        int def = fn->vregs[v].def_pos;
+        int first = vreg_first_use(fn, v);
+        if (def < 0 || first < 0)
+            continue;
+        int def_line = insn_source_line(fn, def);
+        int first_line = insn_source_line(fn, first);
+        if (def_line > 0 && first_line > 0 && first_line - def_line >= 8) {
+            char note[96];
+            fprintf(out, "  %%%d loaded at %s:%d first-used at %s:%d%s\n",
+                    v, insn_source_file(fn, def), def_line,
+                    insn_source_file(fn, first), first_line,
+                    vreg_note(fn, v, note, sizeof(note)));
+            nwarn++;
+        }
+    }
+    if (nwarn == 0)
+        fprintf(out, "  none\n");
+
+    fprintf(out, "\ncall-split advisor:\n");
+    int local_drop = 0;
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (!vset_test(before[peak_idx], v))
+            continue;
+        int def_line = insn_source_line(fn, fn->vregs[v].def_pos);
+        int last_line = insn_source_line(fn, fn->vregs[v].last_use);
+        if (def_line >= span_start_line && last_line <= span_end_line)
+            local_drop++;
+    }
+    int crossing = 0;
+    for (int v = 0; v < fn->nvregs; v++)
+        if (vset_test(before[peak_idx], v) &&
+            vreg_crosses_line_span(fn, v, span_start_line, span_end_line))
+            crossing++;
+    fprintf(out,
+            "  candidate %s:%d-%d: parent peak may drop by up to %d vregs\n",
+            insn_source_file(fn, peak_idx), span_start_line, span_end_line,
+            local_drop);
+    fprintf(out,
+            "  helper boundary would carry about %d crossing values; call cost\n",
+            crossing);
+    fprintf(out,
+            "  starts near 3 bytes for a near call plus ABI moves/saves.\n");
+
+    free(before);
+}
+
+static void write_pressure_report(const char *path) {
+    if (!path)
+        return;
+
+    FILE *out = strcmp(path, "-") == 0 ? stdout : fopen(path, "w");
+    if (!out) {
+        perror(path);
+        bind_errors++;
+        return;
+    }
+
+    fprintf(out, "# Nib pressure report\n");
+    for (int i = 0; i < nfunctions; i++)
+        report_pressure_function(out, &functions[i]);
+
+    if (out != stdout)
+        fclose(out);
 }
 
 /* ================================================================
@@ -6840,13 +7250,20 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outpath = argv[++i];
+        } else if (strcmp(argv[i], "--pressure-report") == 0 &&
+                   i + 1 < argc) {
+            pressure_report_path = argv[++i];
+        } else if (strcmp(argv[i], "--pressure-fn") == 0 && i + 1 < argc) {
+            pressure_fn_filter = argv[++i];
         } else {
             inputs[ninputs++] = argv[i];
         }
     }
 
     if (ninputs == 0) {
-        fprintf(stderr, "usage: nibbind [-o out.asm] file.nir ...\n");
+        fprintf(stderr,
+                "usage: nibbind [-o out.asm] [--pressure-report file]\n"
+                "               [--pressure-fn name] file.nir ...\n");
         return 1;
     }
 
@@ -7071,6 +7488,10 @@ int main(int argc, char **argv) {
 
         /* Phase 4: deferred — emitted below in source order */
     }
+
+    write_pressure_report(pressure_report_path);
+    if (bind_errors > 0)
+        return 1;
 
     /* Emit in source order via depth-first walk of the use tree */
     out_asm = fopen(outpath, "w");

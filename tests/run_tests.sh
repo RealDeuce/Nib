@@ -1100,6 +1100,45 @@ else
     fail "high-vregs" "$(./nibbind "$TEST_TMPDIR"/t_high_vregs.nir -o "$TEST_TMPDIR"/t_high_vregs.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_pressure_report.nir <<'NIR'
+.fn pressure_probe
+.returns u16
+.vreg %0, u8, const
+.vreg %1, u16, const
+.vreg %2, seg
+; @probe.nib:10
+    mov %0, 1
+; @probe.nib:20
+    mov %1, 2
+; @probe.nib:30
+    mov %2, %1
+; @probe.nib:40
+    add %3, %1, %1
+; @probe.nib:50
+    add %4, %3, %1
+    retval %4
+    ret
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_pressure_report.txt \
+     --pressure-fn pressure_probe "$TEST_TMPDIR"/t_pressure_report.nir \
+     -o "$TEST_TMPDIR"/t_pressure_report.asm >/dev/null 2>&1; then
+    if grep -q '^== pressure_probe ==$' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^pressure timeline:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^peak pressure:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^live ranges:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^dead/early-load warnings:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^call-split advisor:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q 'probe.nib:20 live=' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q 'loaded at probe.nib:20 first-used at probe.nib:30' "$TEST_TMPDIR"/t_pressure_report.txt; then
+        pass "pressure-report: timeline, peak, ranges, warnings emitted"
+    else
+        fail "pressure-report" "expected pressure report sections missing"
+    fi
+else
+    fail "pressure-report" "$(./nibbind --pressure-report "$TEST_TMPDIR"/t_pressure_report.txt --pressure-fn pressure_probe "$TEST_TMPDIR"/t_pressure_report.nir -o "$TEST_TMPDIR"/t_pressure_report.asm 2>&1 | tail -1)"
+fi
+
 # Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)
 if [ -f "$TEST_TMPDIR"/t_byte_vreg.asm ]; then
     if grep -q 'mov [A-D]L, [A-D]L\|xor [A-D]H, [A-D]H\|xor [A-D]X, [A-D]X' "$TEST_TMPDIR"/t_byte_vreg.asm; then
