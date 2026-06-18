@@ -1211,6 +1211,20 @@ if [ -f "$TEST_TMPDIR"/t_expr_sites.asm ]; then
     fi
 fi
 
+if [ -f "$TEST_TMPDIR"/t_mem_width.asm ]; then
+    mem_width_load=$(sed -n '/t_mem_width_load_desc:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_mem_width.asm)
+    mem_width_word=$(sed -n '/t_mem_width_return_word:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_mem_width.asm)
+    mem_width_byte=$(sed -n '/t_mem_width_return_byte:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_mem_width.asm)
+    if printf "%s\n" "$mem_width_load" | grep -q 'mov AX, \[ES:SI+0x0000\]' &&
+       printf "%s\n" "$mem_width_load" | grep -q 'mov AX, \[ES:SI+0x0004\]' &&
+       printf "%s\n" "$mem_width_word" | grep -q 'mov AX, \[ES:SI+0x0006\]' &&
+       printf "%s\n" "$mem_width_byte" | grep -q 'mov AL, \[ES:SI+0x0008\]'; then
+        pass "mem-width: explicit segment loads use contextual width"
+    else
+        fail "mem-width" "explicit segment memory loads used wrong width"
+    fi
+fi
+
 if [ -f tests/t_seg_param.nir ] && [ -f "$TEST_TMPDIR"/t_seg_param.asm ]; then
     seg_param_call=$(sed -n '/t_seg_param_call_read_es:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_seg_param.asm)
     if grep -q '^\.param %[0-9][0-9]*, seg, "src_seg", register, pin=ES' tests/t_seg_param.nir &&

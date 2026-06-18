@@ -1,0 +1,18 @@
+// Test: explicit segment memory loads use declaration/return/cast width.
+
+fn load_desc(desc: far32 in ES:SI) -> u16 {
+    u16 first = [ES:SI + 0];
+    u16 later;
+
+    later := [ES:SI + 4];
+    const seg source_seg = [ES:SI + 2] as (seg);
+    return first + later;
+}
+
+fn return_word(desc: far32 in ES:SI) -> u16 {
+    return [ES:SI + 6];
+}
+
+fn return_byte(desc: far32 in ES:SI) -> u8 {
+    return [ES:SI + 8];
+}

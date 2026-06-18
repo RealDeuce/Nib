@@ -652,6 +652,7 @@ static type_t *check_compare(type_t *l, type_t *r, int line) {
 typedef struct { int vreg; int vreg_seg; type_t *type; } typed_vreg_t;
 
 static typed_vreg_t emit_expr_typed(expr_t *e);
+static typed_vreg_t emit_expr_typed_for(expr_t *e, type_t *target);
 static typed_vreg_t emit_initializer_expr_typed(expr_t *e, type_t *target);
 
 /* Recursively resolve all constant references to literals in an expression tree */
@@ -997,13 +998,17 @@ static int emit_segment_value(reg_id_t seg_id) {
     return seg;
 }
 
-static typed_vreg_t emit_deref_load(expr_t *e) {
+static bool is_contextual_mem_load_type(type_t *type);
+
+static typed_vreg_t emit_deref_load(expr_t *e, type_t *target) {
+    type_t *load_type = is_contextual_mem_load_type(target)
+        ? target : mk_type(TYPE_U8);
     int dst = alloc_vreg();
     char addr[128];
     format_direct_addr(e->u.deref.expr, e->u.deref.seg, addr, sizeof(addr));
     if (addr[0]) {
         fprintf(C.nir, "    loadmem %%%d, %s\n", dst, addr);
-        return TV(dst, mk_type(TYPE_U8));
+        return TV(dst, load_type);
     }
 
     typed_vreg_t ptr = emit_expr_typed(e->u.deref.expr);
@@ -1040,7 +1045,48 @@ static typed_vreg_t emit_deref_load(expr_t *e) {
         cerr(e->line, "pointer dereference requires u16 or far32, got %s",
              type_str(ptr.type));
     }
-    return TV(dst, mk_type(TYPE_U8));
+    return TV(dst, load_type);
+}
+
+static bool is_contextual_mem_load_type(type_t *type) {
+    return type && (type->kind == TYPE_U8 || type->kind == TYPE_U16 ||
+                    type->kind == TYPE_SEG);
+}
+
+static typed_vreg_t emit_mem_load_expr_typed(expr_t *e, type_t *target) {
+    type_t *load_type = is_contextual_mem_load_type(target)
+        ? target : mk_type(TYPE_U8);
+    int dst = alloc_vreg();
+    fprintf(C.nir, "    loadmem %%%d, [", dst);
+    if (e->u.mem.abs_seg) {
+        int seg = e->u.mem.abs_seg_expr
+            ? require_const_expr(e->u.mem.abs_seg_expr, e->line,
+                                 "absolute memory segment")
+            : e->u.mem.abs_seg_val;
+        fprintf(C.nir, "0x%04X:", seg & 0xFFFF);
+    } else if (e->u.mem.seg != REG_NONE) {
+        fprintf(C.nir, "%s:", sreg_name(e->u.mem.seg));
+    }
+    bool need_plus = false;
+    if (e->u.mem.base != REG_NONE) {
+        fprintf(C.nir, "%s", wreg_name(e->u.mem.base));
+        need_plus = true;
+    }
+    if (e->u.mem.index != REG_NONE) {
+        if (need_plus) fprintf(C.nir, "+");
+        fprintf(C.nir, "%s", wreg_name(e->u.mem.index));
+        need_plus = true;
+    }
+    if (e->u.mem.has_disp) {
+        int disp = e->u.mem.disp_expr
+            ? require_const_expr(e->u.mem.disp_expr, e->line,
+                                 "memory displacement")
+            : e->u.mem.disp;
+        if (need_plus) fprintf(C.nir, "+");
+        fprintf(C.nir, "0x%04X", disp & 0xFFFF);
+    }
+    fprintf(C.nir, "]\n");
+    return TV(dst, load_type);
 }
 
 static void emit_deref_store(expr_t *e, typed_vreg_t val) {
@@ -1946,42 +1992,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         return TV(dst, field_type);
     }
     case EXPR_MEM: {
-        /* Memory access type depends on context — default to u8 */
-        int dst = alloc_vreg();
-        fprintf(C.nir, "    loadmem %%%d, [", dst);
-        if (e->u.mem.abs_seg) {
-            int seg = e->u.mem.abs_seg_expr
-                ? require_const_expr(e->u.mem.abs_seg_expr, e->line,
-                                     "absolute memory segment")
-                : e->u.mem.abs_seg_val;
-            fprintf(C.nir, "0x%04X:", seg & 0xFFFF);
-        } else if (e->u.mem.seg != REG_NONE) {
-            fprintf(C.nir, "%s:", sreg_name(e->u.mem.seg));
-        }
-        bool need_plus = false;
-        if (e->u.mem.base != REG_NONE) {
-            fprintf(C.nir, "%s", wreg_name(e->u.mem.base));
-            need_plus = true;
-        }
-        if (e->u.mem.index != REG_NONE) {
-            if (need_plus) fprintf(C.nir, "+");
-            fprintf(C.nir, "%s", wreg_name(e->u.mem.index));
-            need_plus = true;
-        }
-        if (e->u.mem.has_disp) {
-            int disp = e->u.mem.disp_expr
-                ? require_const_expr(e->u.mem.disp_expr, e->line,
-                                     "memory displacement")
-                : e->u.mem.disp;
-            if (need_plus) fprintf(C.nir, "+");
-            fprintf(C.nir, "0x%04X", disp & 0xFFFF);
-        }
-        fprintf(C.nir, "]\n");
-        /* Type inferred from declaration context — caller must check */
-        return TV(dst, mk_type(TYPE_U8));
+        return emit_mem_load_expr_typed(e, NULL);
     }
     case EXPR_DEREF: {
-        return emit_deref_load(e);
+        return emit_deref_load(e, NULL);
     }
     case EXPR_FAR_LIT: {
         /* Far literal — load segment via word vreg, then offset */
@@ -2103,7 +2117,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_CAST: {
         /* as — zero-instruction type reinterpretation */
-        typed_vreg_t val = emit_expr_typed(e->u.cast.operand);
+        typed_vreg_t val = emit_expr_typed_for(e->u.cast.operand,
+                                               e->u.cast.target_type);
         return TV(val.vreg, e->u.cast.target_type);
     }
     case EXPR_PAREN:
@@ -2115,6 +2130,21 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     return TV(-1, NULL);
 }
 
+static typed_vreg_t emit_expr_typed_for(expr_t *e, type_t *target) {
+    if (e && e->kind == EXPR_MEM)
+        return emit_mem_load_expr_typed(e, target);
+    if (e && e->kind == EXPR_DEREF)
+        return emit_deref_load(e, target);
+    if (e && e->kind == EXPR_CAST && e->u.cast.target_type &&
+        is_contextual_mem_load_type(e->u.cast.target_type)) {
+        typed_vreg_t val = emit_expr_typed_for(e->u.cast.operand,
+                                               e->u.cast.target_type);
+        val.type = e->u.cast.target_type;
+        return val;
+    }
+    return emit_expr_typed(e);
+}
+
 static typed_vreg_t emit_initializer_expr_typed(expr_t *e, type_t *target) {
     int value;
 
@@ -2124,7 +2154,7 @@ static typed_vreg_t emit_initializer_expr_typed(expr_t *e, type_t *target) {
         return TV(r, target);
     }
 
-    return emit_expr_typed(e);
+    return emit_expr_typed_for(e, target);
 }
 
 /* ================================================================
@@ -2544,7 +2574,20 @@ static void emit_stmt(stmt_t *s) {
             }
         }
 
-        typed_vreg_t val = emit_expr_typed(val_expr);
+        type_t *assign_target_type = NULL;
+        if (t->kind == EXPR_IDENT) {
+            symbol_t *target_sym = sym_lookup(t->u.ident);
+            if (target_sym)
+                assign_target_type = target_sym->type;
+        } else if (t->kind == EXPR_REG) {
+            assign_target_type = (t->u.reg.rclass == REGCLASS_BYTE)
+                ? mk_type(TYPE_U8) : mk_type(TYPE_U16);
+        } else if (t->kind == EXPR_SREG) {
+            assign_target_type = mk_type(TYPE_SEG);
+        } else if (t->kind == EXPR_FLAG) {
+            assign_target_type = mk_type(TYPE_BOOL);
+        }
+        typed_vreg_t val = emit_expr_typed_for(val_expr, assign_target_type);
         if (t->kind == EXPR_IDENT) {
             symbol_t *sym = sym_lookup(t->u.ident);
             if (!sym) {
@@ -2815,8 +2858,8 @@ static void emit_stmt(stmt_t *s) {
             int vals[MAX_RETURNS];
             int i = 0;
             for (expr_t *e = s->u.ret_expr; e && i < MAX_RETURNS; e = e->next, i++) {
-                typed_vreg_t val = emit_expr_typed(e);
                 return_t *ret = return_nth(C.cur_fn_returns, i);
+                typed_vreg_t val = emit_expr_typed_for(e, ret ? ret->type : NULL);
                 if (ret && val.type && !type_assignable(ret->type, val.type) &&
                     val.type->kind != TYPE_VOID)
                     cerr(s->line, "return type mismatch: return %d is %s, got %s",
