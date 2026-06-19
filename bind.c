@@ -7379,15 +7379,19 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             emit_push_scratch(fn, PREG_BX);
             emit_spill_load_to_reg(fn, PREG_BX, ins->src1);
             if (is_spilled(fn, ins->dst)) {
+                bool preserve_ax = emit_push_acc_if_live(fn, i, false);
                 fprintf(out_asm, "    mov AX, [%sBX]\n", seg);
                 emit_spill_store_from_reg(fn, ins->dst, "AX");
+                emit_pop_acc_if_pushed_for_func(fn, preserve_ax);
             } else {
                 fprintf(out_asm, "    mov %s, [%sBX]\n", vreg_asm(fn, ins->dst), seg);
             }
             emit_pop_scratch(fn, PREG_BX);
         } else if (is_spilled(fn, ins->dst)) {
+            bool preserve_ax = emit_push_acc_if_live(fn, i, false);
             fprintf(out_asm, "    mov AX, [%s%s]\n", seg, vreg_asm(fn, ins->src1));
             emit_spill_store_from_reg(fn, ins->dst, "AX");
+            emit_pop_acc_if_pushed_for_func(fn, preserve_ax);
         } else {
             fprintf(out_asm, "    mov %s, [%s%s]\n",
                     vreg_asm(fn, ins->dst), seg, vreg_asm(fn, ins->src1));
@@ -7423,11 +7427,13 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             emit_push_scratch(fn, PREG_BX);
             emit_spill_load_to_reg(fn, PREG_BX, ins->src1);
             if (dst_seg || is_spilled(fn, ins->dst)) {
+                bool preserve_ax = emit_push_acc_if_live(fn, i, false);
                 fprintf(out_asm, "    mov AX, [%sBX+2]\n", seg);
                 if (is_spilled(fn, ins->dst))
                     emit_spill_store_from_reg(fn, ins->dst, "AX");
                 else
                     fprintf(out_asm, "    mov %s, AX\n", d);
+                emit_pop_acc_if_pushed_for_func(fn, preserve_ax);
             } else {
                 fprintf(out_asm, "    mov %s, [%sBX+2]\n", d, seg);
             }
@@ -7435,11 +7441,13 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         } else {
             const char *s = vreg_asm(fn, ins->src1);
             if (dst_seg || is_spilled(fn, ins->dst)) {
+                bool preserve_ax = emit_push_acc_if_live(fn, i, false);
                 fprintf(out_asm, "    mov AX, [%s%s+2]\n", seg, s);
                 if (is_spilled(fn, ins->dst))
                     emit_spill_store_from_reg(fn, ins->dst, "AX");
                 else
                     fprintf(out_asm, "    mov %s, AX\n", d);
+                emit_pop_acc_if_pushed_for_func(fn, preserve_ax);
             } else {
                 fprintf(out_asm, "    mov %s, [%s%s+2]\n", d, seg, s);
             }

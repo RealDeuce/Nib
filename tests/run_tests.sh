@@ -1021,6 +1021,38 @@ else
     fail "icall-bl-arg-scratch" "$(./nibbind "$TEST_TMPDIR"/t_icall_bl_arg_scratch.nir -o "$TEST_TMPDIR"/t_icall_bl_arg_scratch.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_far_seg_spill_preserve_ax.nir <<'NIR'
+; Binder regression: a live AX parameter must survive far.seg
+; materialization when AX is used as the segment-transfer scratch.
+.extern tone
+.eparam u16, "divisor", register, pin=AX
+.preserves CX, DX, BX, BP, SI, DI, ES, CS, SS, DS
+.endextern
+
+.fn far_seg_spill_preserve_ax
+.param %0, u16, "divisor", register, pin=AX
+.vreg %2, seg
+    mov %1, buzzer_table
+    far.seg %2, %1
+    call %3, tone, %0
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_far_seg_spill_preserve_ax.nir -o "$TEST_TMPDIR"/t_far_seg_spill_preserve_ax.asm >/dev/null 2>&1; then
+    ax_spill_window=$(sed -n '/far_seg_spill_preserve_ax_far_seg_spill_preserve_ax:/,/call tone/p' "$TEST_TMPDIR"/t_far_seg_spill_preserve_ax.asm)
+    if printf "%s\n" "$ax_spill_window" | grep -q 'push AX' &&
+       printf "%s\n" "$ax_spill_window" | grep -q 'mov AX, \[.*+2\]' &&
+       printf "%s\n" "$ax_spill_window" | grep -q 'mov ES, AX' &&
+       printf "%s\n" "$ax_spill_window" | grep -q 'pop AX' &&
+       printf "%s\n" "$ax_spill_window" | grep -q 'call tone'; then
+        pass "far-seg-preserve-ax: live AX survives far.seg scratch"
+    else
+        fail "far-seg-preserve-ax" "far.seg scratch clobbered live AX"
+    fi
+else
+    fail "far-seg-preserve-ax" "$(./nibbind "$TEST_TMPDIR"/t_far_seg_spill_preserve_ax.nir -o "$TEST_TMPDIR"/t_far_seg_spill_preserve_ax.asm 2>&1 | tail -1)"
+fi
+
 # Flags returned by an indirect API call must be consumed from FLAGS,
 # not from the arbitrary vreg assigned to the getflag pseudo-result.
 if [ -f "$TEST_TMPDIR"/t_flag_after_icall.asm ]; then
