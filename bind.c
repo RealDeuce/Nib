@@ -5053,6 +5053,31 @@ static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
     }
 }
 
+static bool vreg_is_byte_value(func_t *fn, int v) {
+    return v >= 0 && v < fn->nvregs && fn->vregs[v].is_byte;
+}
+
+static const char *acc_name_for_width(bool is_byte) {
+    return is_byte ? "AL" : "AX";
+}
+
+static int acc_preg_for_width(bool is_byte) {
+    return is_byte ? PREG_AL : PREG_AX;
+}
+
+static bool emit_push_acc_if_live(func_t *fn, int insn_idx, bool is_byte) {
+    bool preserve = preg_live_after_insn(fn, insn_idx,
+                                         acc_preg_for_width(is_byte));
+    if (preserve)
+        fprintf(out_asm, "    push AX\n");
+    return preserve;
+}
+
+static void emit_pop_acc_if_pushed(bool pushed) {
+    if (pushed)
+        fprintf(out_asm, "    pop AX\n");
+}
+
 static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
     if (cmp->has_imm) {
         fprintf(out_asm, "    cmp %s, %d\n",
@@ -5061,18 +5086,13 @@ static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
     }
 
     if (is_spilled(fn, cmp->src1) && is_spilled(fn, cmp->src2)) {
-        bool cmp_byte = (cmp->src1 >= 0 && cmp->src1 < fn->nvregs &&
-                         fn->vregs[cmp->src1].is_byte) ||
-                        (cmp->src2 >= 0 && cmp->src2 < fn->nvregs &&
-                         fn->vregs[cmp->src2].is_byte);
-        const char *acc = cmp_byte ? "AL" : "AX";
-        bool preserve_ax = preg_live_after_insn(fn, cmp_idx, PREG_AX);
-        if (preserve_ax)
-            fprintf(out_asm, "    push AX\n");
+        bool cmp_byte = vreg_is_byte_value(fn, cmp->src1) ||
+                        vreg_is_byte_value(fn, cmp->src2);
+        const char *acc = acc_name_for_width(cmp_byte);
+        bool preserve_ax = emit_push_acc_if_live(fn, cmp_idx, false);
         fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, cmp->src2));
         fprintf(out_asm, "    cmp %s, %s\n", vreg_asm(fn, cmp->src1), acc);
-        if (preserve_ax)
-            fprintf(out_asm, "    pop AX\n");
+        emit_pop_acc_if_pushed(preserve_ax);
         return;
     }
 
@@ -6313,22 +6333,16 @@ static void emit_function(func_t *fn) {
         case IR_LOADMEM:
         case IR_STOREMEM: {
             if (ins->op == IR_LOADMEM) {
-                bool dst_byte = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
-                                 fn->vregs[ins->dst].is_byte);
+                bool dst_byte = vreg_is_byte_value(fn, ins->dst);
                 if (ins->name[0]) {
                     /* Label-based: loadmem %dst, [addr_text] */
                     if (is_spilled(fn, ins->dst)) {
-                        const char *acc = dst_byte ? "AL" : "AX";
+                        const char *acc = acc_name_for_width(dst_byte);
                         bool preserve_acc =
-                            preg_live_after_insn(fn, i,
-                                                 dst_byte ? PREG_AL
-                                                          : PREG_AX);
-                        if (preserve_acc)
-                            fprintf(out_asm, "    push AX\n");
+                            emit_push_acc_if_live(fn, i, dst_byte);
                         fprintf(out_asm, "    mov %s, %s\n", acc, ins->name);
                         fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
-                        if (preserve_acc)
-                            fprintf(out_asm, "    pop AX\n");
+                        emit_pop_acc_if_pushed(preserve_acc);
                     } else {
                         fprintf(out_asm, "    mov %s, %s\n",
                                 vreg_asm(fn, ins->dst), ins->name);
@@ -6337,7 +6351,7 @@ static void emit_function(func_t *fn) {
                     /* Vreg-based: loadmem %dst, %off [, %seg] */
                     bool has_seg = (ins->src2 >= 0);
                     const char *d = vreg_asm(fn, ins->dst);
-                    const char *acc = dst_byte ? "AL" : "AX";
+                    const char *acc = acc_name_for_width(dst_byte);
                     /* Resolve offset register — if spilled, load into BX scratch */
                     const char *off_reg;
                     bool off_spilled = is_spilled(fn, ins->src1);
@@ -6358,15 +6372,10 @@ static void emit_function(func_t *fn) {
                         }
                         if (is_spilled(fn, ins->dst)) {
                             bool preserve_acc =
-                                preg_live_after_insn(fn, i,
-                                                     dst_byte ? PREG_AL
-                                                              : PREG_AX);
-                            if (preserve_acc)
-                                fprintf(out_asm, "    push AX\n");
+                                emit_push_acc_if_live(fn, i, dst_byte);
                             fprintf(out_asm, "    mov %s, [ES:%s]\n", acc, off_reg);
                             fprintf(out_asm, "    mov %s, %s\n", d, acc);
-                            if (preserve_acc)
-                                fprintf(out_asm, "    pop AX\n");
+                            emit_pop_acc_if_pushed(preserve_acc);
                         } else {
                             fprintf(out_asm, "    mov %s, [ES:%s]\n", d, off_reg);
                         }
@@ -6376,15 +6385,10 @@ static void emit_function(func_t *fn) {
                         const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
                         if (is_spilled(fn, ins->dst)) {
                             bool preserve_acc =
-                                preg_live_after_insn(fn, i,
-                                                     dst_byte ? PREG_AL
-                                                              : PREG_AX);
-                            if (preserve_acc)
-                                fprintf(out_asm, "    push AX\n");
+                                emit_push_acc_if_live(fn, i, dst_byte);
                             fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg, off_reg);
                             fprintf(out_asm, "    mov %s, %s\n", d, acc);
-                            if (preserve_acc)
-                                fprintf(out_asm, "    pop AX\n");
+                            emit_pop_acc_if_pushed(preserve_acc);
                         } else {
                             fprintf(out_asm, "    mov %s, [%s%s]\n", d, seg, off_reg);
                         }
@@ -6396,20 +6400,14 @@ static void emit_function(func_t *fn) {
             } else {
                 if (ins->name[0]) {
                     /* Label-based: storemem [addr_text], %val */
-                    bool src_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                                     fn->vregs[ins->src1].is_byte);
+                    bool src_byte = vreg_is_byte_value(fn, ins->src1);
                     if (is_spilled(fn, ins->src1)) {
-                        const char *acc = src_byte ? "AL" : "AX";
+                        const char *acc = acc_name_for_width(src_byte);
                         bool preserve_acc =
-                            preg_live_after_insn(fn, i,
-                                                 src_byte ? PREG_AL
-                                                          : PREG_AX);
-                        if (preserve_acc)
-                            fprintf(out_asm, "    push AX\n");
+                            emit_push_acc_if_live(fn, i, src_byte);
                         fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
                         fprintf(out_asm, "    mov %s, %s\n", ins->name, acc);
-                        if (preserve_acc)
-                            fprintf(out_asm, "    pop AX\n");
+                        emit_pop_acc_if_pushed(preserve_acc);
                     } else {
                         fprintf(out_asm, "    mov %s, %s\n",
                                 ins->name, vreg_asm(fn, ins->src1));
@@ -6417,8 +6415,7 @@ static void emit_function(func_t *fn) {
                 } else {
                     /* Vreg-based: storemem %off [, %seg], %val */
                     bool has_seg = (ins->src2 >= 0);
-                    bool val_byte = (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-                                     fn->vregs[ins->src1].is_byte);
+                    bool val_byte = vreg_is_byte_value(fn, ins->src1);
                     /* Resolve offset register — if spilled, load into BX scratch */
                     const char *off_reg;
                     bool off_spilled = is_spilled(fn, ins->dst);
@@ -6434,13 +6431,9 @@ static void emit_function(func_t *fn) {
                     bool val_spilled = is_spilled(fn, ins->src1);
                     bool preserve_val_acc = false;
                     if (val_spilled) {
-                        const char *acc = val_byte ? "AL" : "AX";
+                        const char *acc = acc_name_for_width(val_byte);
                         preserve_val_acc =
-                            preg_live_after_insn(fn, i,
-                                                 val_byte ? PREG_AL
-                                                          : PREG_AX);
-                        if (preserve_val_acc)
-                            fprintf(out_asm, "    push AX\n");
+                            emit_push_acc_if_live(fn, i, val_byte);
                         fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
                         val_reg = acc;
                     } else {
@@ -6461,8 +6454,7 @@ static void emit_function(func_t *fn) {
                         fprintf(out_asm, "    mov [%s%s], %s\n", seg, off_reg, val_reg);
                         emit_es_data_suffix(use_es);
                     }
-                    if (preserve_val_acc)
-                        fprintf(out_asm, "    pop AX\n");
+                    emit_pop_acc_if_pushed(preserve_val_acc);
                     if (off_spilled)
                         fprintf(out_asm, "    pop BX\n");
                 }
