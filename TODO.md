@@ -21,6 +21,14 @@
     - done: opposite byte shifts from one source get allocator affinities
       for sibling low/high halves, so non-special cases naturally prefer
       `DL`/`DH`-style placement;
+    - done: load/and/or/store and load/and/xor/store byte RMW sequences
+      fold through a generic memory combiner instead of a shifted-blit
+      special case;
+    - remaining: teach the sibling-shift selector to carry spilled byte
+      fragments directly into their immediate memory RMW uses, or lower the
+      IR so the source byte is copied before either destructive shift; the
+      current selector only fires when the fragment copies are already in
+      sibling byte registers;
     - remaining: when two overlapping byte vregs occupy sibling halves of
       one parent word, extend and spill them as one word lifetime so frame
       spill/load traffic can be combined across byte-heavy code.

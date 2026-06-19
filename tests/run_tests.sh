@@ -1457,6 +1457,42 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_mem_rmw_fold.nir <<'NIR'
+; Binder regression: a load/and/or/store byte RMW should lower through the
+; generic memory combiner, independent of shifted-byte source patterns.
+.fn mem_rmw_fold
+.param %0, u16, "dst", register, pin=SI
+.param %1, u8, "val", register, pin=DL
+    loadmem %2, %0
+.vreg %2, u8
+    and %3, %2, 240
+.vreg %3, u8
+    or %4, %3, %1
+.vreg %4, u8
+    storemem %0, %4
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_mem_rmw_fold.nir \
+       -o "$TEST_TMPDIR"/t_mem_rmw_fold.asm >/dev/null 2>&1; then
+    mem_rmw_window=$(sed -n '/mem_rmw_fold:$/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_mem_rmw_fold.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_mem_rmw_fold.asm \
+           -o "$TEST_TMPDIR"/t_mem_rmw_fold.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$mem_rmw_window" | grep -Fq 'and byte [SI], 240' &&
+       printf "%s\n" "$mem_rmw_window" | grep -Fq 'or byte [SI], DL' &&
+       ! printf "%s\n" "$mem_rmw_window" | grep -Fq 'mov AL, [SI]' &&
+       ! printf "%s\n" "$mem_rmw_window" | grep -Fq 'mov [SI],'; then
+        pass "mem-rmw-fold: byte load/and/or/store folds in place"
+    else
+        fail "mem-rmw-fold" "byte RMW did not fold to memory operations"
+    fi
+else
+    fail "mem-rmw-fold" "$(
+        ./nibbind "$TEST_TMPDIR"/t_mem_rmw_fold.nir \
+            -o "$TEST_TMPDIR"/t_mem_rmw_fold.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_shift_pair_rmw.nir <<'NIR'
 ; Binder regression: shifted byte fragments feeding adjacent destination
 ; bytes should stay paired in DL/DH and update memory in place.
@@ -1497,7 +1533,7 @@ cat > "$TEST_TMPDIR"/t_shift_pair_rmw.nir <<'NIR'
 NIR
 if ./nibbind "$TEST_TMPDIR"/t_shift_pair_rmw.nir \
        -o "$TEST_TMPDIR"/t_shift_pair_rmw.asm >/dev/null 2>&1; then
-    shift_pair_window=$(sed -n '/shift_pair_rmw_shift_pair_rmw:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_shift_pair_rmw.asm)
+    shift_pair_window=$(sed -n '/shift_pair_rmw:$/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_shift_pair_rmw.asm)
     if ./nibasm "$TEST_TMPDIR"/t_shift_pair_rmw.asm \
            -o "$TEST_TMPDIR"/t_shift_pair_rmw.bin >/dev/null 2>&1 &&
        printf "%s\n" "$shift_pair_window" | grep -Fq 'mov DL, [ES:BX]' &&
@@ -1543,7 +1579,7 @@ cat > "$TEST_TMPDIR"/t_shift_pair_affinity.nir <<'NIR'
 NIR
 if ./nibbind "$TEST_TMPDIR"/t_shift_pair_affinity.nir \
        -o "$TEST_TMPDIR"/t_shift_pair_affinity.asm >/dev/null 2>&1; then
-    shift_affinity_window=$(sed -n '/shift_pair_affinity_shift_pair_affinity:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_shift_pair_affinity.asm)
+    shift_affinity_window=$(sed -n '/shift_pair_affinity:$/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_shift_pair_affinity.asm)
     if ./nibasm "$TEST_TMPDIR"/t_shift_pair_affinity.asm \
            -o "$TEST_TMPDIR"/t_shift_pair_affinity.bin >/dev/null 2>&1 &&
        printf "%s\n" "$shift_affinity_window" | grep -Fq 'shr DL, 1' &&
