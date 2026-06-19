@@ -138,10 +138,6 @@ static int abi_type_words(const char *type) {
  * IR representation
  * ================================================================ */
 
-#define MAX_FNS      192
-#define MAX_RETURNS  8
-#define MAX_ABI_PARAMS 64
-
 /* IR instruction opcodes */
 typedef enum {
     IR_MOV,         /* mov %d, %s  or  mov %d, imm */
@@ -185,9 +181,13 @@ typedef struct {
     ir_op_t op;
     int     dst;            /* vreg written, or -1 */
     int     src1, src2;     /* vregs read, or -1 */
-    int     extra_args[MAX_ABI_PARAMS - 2];  /* for calls with >2 args */
+    int    *extra_args;     /* additional call args / instruction operands */
+    int     nextra_args;
+    int     cap_extra_args;
     int     nargs;          /* total args for calls */
-    int     ret_vregs[MAX_RETURNS]; /* extra return destinations/sources */
+    int    *ret_vregs;     /* extra return destinations/sources */
+    int     nret_vregs;
+    int     cap_ret_vregs;
     int     nrets;
     int     imm;            /* immediate value */
     bool    has_imm;
@@ -318,6 +318,10 @@ static const char *spill_action_name[SPILL_NUM] = {
     "mem-route",
 };
 
+typedef struct {
+    int preg;
+} abi_pin_t;
+
 /* Function */
 typedef struct {
     char        name[64];
@@ -343,19 +347,21 @@ typedef struct {
     int         cap_vregs;
 
     int         nparams;
-    char        param_names[MAX_ABI_PARAMS][64];
-    int         param_vregs[MAX_ABI_PARAMS];
-    abi_place_t param_places[MAX_ABI_PARAMS];
-    int         param_stack_offsets[MAX_ABI_PARAMS];
-    struct { int preg; } param_pins[MAX_ABI_PARAMS]; /* pinned register for params */
+    int         cap_params;
+    char      (*param_names)[64];
+    int        *param_vregs;
+    abi_place_t *param_places;
+    int        *param_stack_offsets;
+    abi_pin_t  *param_pins; /* pinned register for params */
 
     bool        has_return;
     char        return_type[32];
     int         ret_pin;            /* PREG_NONE or pinned return register */
     int         nreturns;
-    char        return_types[MAX_RETURNS][32];
-    int         ret_pins[MAX_RETURNS];
-    abi_place_t ret_places[MAX_RETURNS];
+    int         cap_returns;
+    char      (*return_types)[32];
+    int        *ret_pins;
+    abi_place_t *ret_places;
 
     bblock_t   *blocks;
     int         nblocks;
@@ -407,15 +413,17 @@ typedef struct {
     bool has_address;
     int  addr_seg;
     int  addr_off;
-    struct { int preg; } param_pins[MAX_ABI_PARAMS];
-    abi_place_t param_places[MAX_ABI_PARAMS];
-    int  param_stack_offsets[MAX_ABI_PARAMS];
+    abi_pin_t *param_pins;
+    abi_place_t *param_places;
+    int  *param_stack_offsets;
+    int  cap_params;
     int  nparams;
     int  nreturns;
-    char return_types[MAX_RETURNS][32];
-    int  ret_pins[MAX_RETURNS];
-    abi_place_t ret_places[MAX_RETURNS];
-    int  return_stack_offsets[MAX_RETURNS];
+    int  cap_returns;
+    char (*return_types)[32];
+    int  *ret_pins;
+    abi_place_t *ret_places;
+    int  *return_stack_offsets;
     int  preserves[NUM_PREGS];  /* list of PREG_* preserved by extern */
     int  npreserves;
 } extern_fn_t;
@@ -424,6 +432,131 @@ typedef NIB_VEC(extern_fn_t) extern_vec_t;
 static extern_vec_t extern_vec;
 #define externs (extern_vec.items)
 #define nexterns (extern_vec.len)
+
+static void fn_ensure_param(func_t *fn, int idx) {
+    if (!fn || idx < 0)
+        return;
+    if (idx >= fn->cap_params) {
+        int old_cap = fn->cap_params;
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_params,
+                                             (size_t)idx + 1);
+        fn->param_names = nib_xrealloc_array(fn->param_names,
+                                             (size_t)new_cap,
+                                             sizeof(fn->param_names[0]),
+                                             "function parameters");
+        fn->param_vregs = nib_xrealloc_array(fn->param_vregs,
+                                             (size_t)new_cap,
+                                             sizeof(fn->param_vregs[0]),
+                                             "function parameters");
+        fn->param_places = nib_xrealloc_array(fn->param_places,
+                                              (size_t)new_cap,
+                                              sizeof(fn->param_places[0]),
+                                              "function parameters");
+        fn->param_stack_offsets =
+            nib_xrealloc_array(fn->param_stack_offsets, (size_t)new_cap,
+                               sizeof(fn->param_stack_offsets[0]),
+                               "function parameters");
+        fn->param_pins = nib_xrealloc_array(fn->param_pins,
+                                            (size_t)new_cap,
+                                            sizeof(fn->param_pins[0]),
+                                            "function parameters");
+        fn->cap_params = new_cap;
+        for (int i = old_cap; i < new_cap; i++) {
+            fn->param_names[i][0] = '\0';
+            fn->param_vregs[i] = -1;
+            fn->param_places[i] = ABI_PLACE_DEFAULT;
+            fn->param_stack_offsets[i] = 0;
+            fn->param_pins[i].preg = PREG_NONE;
+        }
+    }
+}
+
+static void fn_ensure_return(func_t *fn, int idx) {
+    if (!fn || idx < 0)
+        return;
+    if (idx >= fn->cap_returns) {
+        int old_cap = fn->cap_returns;
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_returns,
+                                             (size_t)idx + 1);
+        fn->return_types = nib_xrealloc_array(fn->return_types,
+                                              (size_t)new_cap,
+                                              sizeof(fn->return_types[0]),
+                                              "function returns");
+        fn->ret_pins = nib_xrealloc_array(fn->ret_pins, (size_t)new_cap,
+                                          sizeof(fn->ret_pins[0]),
+                                          "function returns");
+        fn->ret_places = nib_xrealloc_array(fn->ret_places,
+                                            (size_t)new_cap,
+                                            sizeof(fn->ret_places[0]),
+                                            "function returns");
+        fn->cap_returns = new_cap;
+        for (int i = old_cap; i < new_cap; i++) {
+            fn->return_types[i][0] = '\0';
+            fn->ret_pins[i] = PREG_NONE;
+            fn->ret_places[i] = ABI_PLACE_DEFAULT;
+        }
+    }
+}
+
+static void ext_ensure_param(extern_fn_t *ext, int idx) {
+    if (!ext || idx < 0)
+        return;
+    if (idx >= ext->cap_params) {
+        int old_cap = ext->cap_params;
+        int new_cap = (int)nib_grow_capacity((size_t)ext->cap_params,
+                                             (size_t)idx + 1);
+        ext->param_pins = nib_xrealloc_array(ext->param_pins,
+                                             (size_t)new_cap,
+                                             sizeof(ext->param_pins[0]),
+                                             "extern parameters");
+        ext->param_places = nib_xrealloc_array(ext->param_places,
+                                               (size_t)new_cap,
+                                               sizeof(ext->param_places[0]),
+                                               "extern parameters");
+        ext->param_stack_offsets =
+            nib_xrealloc_array(ext->param_stack_offsets, (size_t)new_cap,
+                               sizeof(ext->param_stack_offsets[0]),
+                               "extern parameters");
+        ext->cap_params = new_cap;
+        for (int i = old_cap; i < new_cap; i++) {
+            ext->param_pins[i].preg = PREG_NONE;
+            ext->param_places[i] = ABI_PLACE_DEFAULT;
+            ext->param_stack_offsets[i] = 0;
+        }
+    }
+}
+
+static void ext_ensure_return(extern_fn_t *ext, int idx) {
+    if (!ext || idx < 0)
+        return;
+    if (idx >= ext->cap_returns) {
+        int old_cap = ext->cap_returns;
+        int new_cap = (int)nib_grow_capacity((size_t)ext->cap_returns,
+                                             (size_t)idx + 1);
+        ext->return_types = nib_xrealloc_array(ext->return_types,
+                                               (size_t)new_cap,
+                                               sizeof(ext->return_types[0]),
+                                               "extern returns");
+        ext->ret_pins = nib_xrealloc_array(ext->ret_pins, (size_t)new_cap,
+                                           sizeof(ext->ret_pins[0]),
+                                           "extern returns");
+        ext->ret_places = nib_xrealloc_array(ext->ret_places,
+                                             (size_t)new_cap,
+                                             sizeof(ext->ret_places[0]),
+                                             "extern returns");
+        ext->return_stack_offsets =
+            nib_xrealloc_array(ext->return_stack_offsets, (size_t)new_cap,
+                               sizeof(ext->return_stack_offsets[0]),
+                               "extern returns");
+        ext->cap_returns = new_cap;
+        for (int i = old_cap; i < new_cap; i++) {
+            ext->return_types[i][0] = '\0';
+            ext->ret_pins[i] = PREG_NONE;
+            ext->ret_places[i] = ABI_PLACE_DEFAULT;
+            ext->return_stack_offsets[i] = 0;
+        }
+    }
+}
 
 /* Forward declarations */
 static const char *fn_asm_name(func_t *fn);
@@ -492,11 +625,69 @@ static ir_insn_t *fn_push_insn(func_t *fn) {
     ir_insn_t *ins = &fn->insns[fn->ninsns++];
     memset(ins, 0, sizeof(*ins));
     ins->dst = ins->src1 = ins->src2 = -1;
-    for (int i = 0; i < MAX_ABI_PARAMS - 2; i++)
-        ins->extra_args[i] = -1;
-    for (int i = 0; i < MAX_RETURNS; i++)
-        ins->ret_vregs[i] = -1;
     return ins;
+}
+
+static void ins_ensure_extra_arg(ir_insn_t *ins, int idx) {
+    if (!ins || idx < 0)
+        return;
+    if (idx >= ins->cap_extra_args) {
+        int old_cap = ins->cap_extra_args;
+        int new_cap = (int)nib_grow_capacity((size_t)ins->cap_extra_args,
+                                             (size_t)idx + 1);
+        ins->extra_args = nib_xrealloc_array(ins->extra_args,
+                                             (size_t)new_cap,
+                                             sizeof(ins->extra_args[0]),
+                                             "instruction arguments");
+        ins->cap_extra_args = new_cap;
+        for (int i = old_cap; i < new_cap; i++)
+            ins->extra_args[i] = -1;
+    }
+    if (idx >= ins->nextra_args)
+        ins->nextra_args = idx + 1;
+}
+
+static void ins_set_extra_arg(ir_insn_t *ins, int idx, int vreg) {
+    ins_ensure_extra_arg(ins, idx);
+    if (idx >= 0)
+        ins->extra_args[idx] = vreg;
+}
+
+static int ins_extra_arg(const ir_insn_t *ins, int idx) {
+    if (!ins || idx < 0 || idx >= ins->nextra_args)
+        return -1;
+    return ins->extra_args[idx];
+}
+
+static void ins_ensure_ret_vreg(ir_insn_t *ins, int idx) {
+    if (!ins || idx < 0)
+        return;
+    if (idx >= ins->cap_ret_vregs) {
+        int old_cap = ins->cap_ret_vregs;
+        int new_cap = (int)nib_grow_capacity((size_t)ins->cap_ret_vregs,
+                                             (size_t)idx + 1);
+        ins->ret_vregs = nib_xrealloc_array(ins->ret_vregs,
+                                            (size_t)new_cap,
+                                            sizeof(ins->ret_vregs[0]),
+                                            "instruction returns");
+        ins->cap_ret_vregs = new_cap;
+        for (int i = old_cap; i < new_cap; i++)
+            ins->ret_vregs[i] = -1;
+    }
+    if (idx >= ins->nret_vregs)
+        ins->nret_vregs = idx + 1;
+}
+
+static void ins_set_ret_vreg(ir_insn_t *ins, int idx, int vreg) {
+    ins_ensure_ret_vreg(ins, idx);
+    if (idx >= 0)
+        ins->ret_vregs[idx] = vreg;
+}
+
+static int ins_ret_vreg(const ir_insn_t *ins, int idx) {
+    if (!ins || idx < 0 || idx >= ins->nret_vregs)
+        return -1;
+    return ins->ret_vregs[idx];
 }
 
 static bblock_t *fn_push_block(func_t *fn) {
@@ -713,23 +904,35 @@ static void mark_vreg_clobber(func_t *fn, bool *clobbers, int vreg) {
 
 typedef struct {
     bool clobbers[NUM_PREGS];
-    int  hard_reg[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-    int  hard_vreg[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    int *hard_reg;
+    int *hard_vreg;
     int  nhard;
-    int  addr_vreg[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-    int  addr_prefer[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-    bool needs_base[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-    bool needs_index[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-    bool needs_ds_addr[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    int  cap_hard;
+    int *addr_vreg;
+    int *addr_prefer;
+    bool *needs_base;
+    bool *needs_index;
+    bool *needs_ds_addr;
     int  naddr;
+    int  cap_addr;
 } machine_constraint_t;
 
 static void mc_add_hard(machine_constraint_t *mc, int vreg, int preg) {
     if (!mc || vreg < 0 || preg == PREG_NONE)
         return;
-    int cap = (int)(sizeof(mc->hard_vreg) / sizeof(mc->hard_vreg[0]));
-    if (mc->nhard >= cap)
-        return;
+    if (mc->nhard >= mc->cap_hard) {
+        int new_cap = (int)nib_grow_capacity((size_t)mc->cap_hard,
+                                             (size_t)mc->nhard + 1);
+        mc->hard_vreg = nib_xrealloc_array(mc->hard_vreg,
+                                           (size_t)new_cap,
+                                           sizeof(mc->hard_vreg[0]),
+                                           "hard register constraints");
+        mc->hard_reg = nib_xrealloc_array(mc->hard_reg,
+                                          (size_t)new_cap,
+                                          sizeof(mc->hard_reg[0]),
+                                          "hard register constraints");
+        mc->cap_hard = new_cap;
+    }
     mc->hard_vreg[mc->nhard] = vreg;
     mc->hard_reg[mc->nhard] = preg;
     mc->nhard++;
@@ -739,15 +942,49 @@ static void mc_add_addr(machine_constraint_t *mc, int vreg, bool base,
                         bool index, bool ds_addr, int prefer) {
     if (!mc || vreg < 0)
         return;
-    int cap = (int)(sizeof(mc->needs_base) / sizeof(mc->needs_base[0]));
-    if (mc->naddr >= cap)
-        return;
+    if (mc->naddr >= mc->cap_addr) {
+        int new_cap = (int)nib_grow_capacity((size_t)mc->cap_addr,
+                                             (size_t)mc->naddr + 1);
+        mc->addr_vreg = nib_xrealloc_array(mc->addr_vreg,
+                                           (size_t)new_cap,
+                                           sizeof(mc->addr_vreg[0]),
+                                           "address constraints");
+        mc->addr_prefer = nib_xrealloc_array(mc->addr_prefer,
+                                             (size_t)new_cap,
+                                             sizeof(mc->addr_prefer[0]),
+                                             "address constraints");
+        mc->needs_base = nib_xrealloc_array(mc->needs_base,
+                                            (size_t)new_cap,
+                                            sizeof(mc->needs_base[0]),
+                                            "address constraints");
+        mc->needs_index = nib_xrealloc_array(mc->needs_index,
+                                             (size_t)new_cap,
+                                             sizeof(mc->needs_index[0]),
+                                             "address constraints");
+        mc->needs_ds_addr = nib_xrealloc_array(mc->needs_ds_addr,
+                                               (size_t)new_cap,
+                                               sizeof(mc->needs_ds_addr[0]),
+                                               "address constraints");
+        mc->cap_addr = new_cap;
+    }
     mc->addr_vreg[mc->naddr] = vreg;
     mc->addr_prefer[mc->naddr] = prefer;
     mc->needs_base[mc->naddr] = base;
     mc->needs_index[mc->naddr] = index;
     mc->needs_ds_addr[mc->naddr] = ds_addr;
     mc->naddr++;
+}
+
+static void mc_free(machine_constraint_t *mc) {
+    if (!mc)
+        return;
+    free(mc->hard_reg);
+    free(mc->hard_vreg);
+    free(mc->addr_vreg);
+    free(mc->addr_prefer);
+    free(mc->needs_base);
+    free(mc->needs_index);
+    free(mc->needs_ds_addr);
 }
 
 static void collect_machine_constraints(func_t *fn, ir_insn_t *ins,
@@ -765,8 +1002,8 @@ static void collect_machine_constraints(func_t *fn, ir_insn_t *ins,
     collect_asm_clobbers(ins, mc->clobbers);
 
     if (ins->op == IR_MCALL) {
-        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
-            mark_vreg_clobber(fn, mc->clobbers, ins->ret_vregs[j]);
+        for (int j = 0; j < ins->nret_vregs; j++)
+            mark_vreg_clobber(fn, mc->clobbers, ins_ret_vreg(ins, j));
     }
 
     if (ins->op == IR_ALU &&
@@ -813,12 +1050,12 @@ static void collect_machine_constraints(func_t *fn, ir_insn_t *ins,
             mc_add_hard(mc, ins->dst, PREG_AX);
             mc_add_addr(mc, ins->src1, false, true, false, PREG_SI);
             mc_add_hard(mc, ins->src2, PREG_CL);
-            mc_add_hard(mc, ins->extra_args[0], PREG_DL);
+            mc_add_hard(mc, ins_extra_arg(ins, 0), PREG_DL);
         } else if (strcmp(op, "bins") == 0) {
             mc_add_addr(mc, ins->dst, false, true, false, PREG_DI);
             mc_add_hard(mc, ins->src1, PREG_CL);
             mc_add_hard(mc, ins->src2, PREG_DL);
-            mc_add_hard(mc, ins->extra_args[0], PREG_AX);
+            mc_add_hard(mc, ins_extra_arg(ins, 0), PREG_AX);
         }
     }
 
@@ -843,17 +1080,20 @@ static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
     for (int r = 0; r < NUM_PREGS; r++)
         if (mc.clobbers[r])
             clobbers[r] = true;
+    mc_free(&mc);
 }
 
 /* Resolved parameter register assignments per function */
 typedef struct {
-    int param_regs[MAX_ABI_PARAMS];     /* PREG_* for each parameter, or PREG_NONE */
-    abi_place_t param_places[MAX_ABI_PARAMS];
-    int param_stack_offsets[MAX_ABI_PARAMS];
+    int *param_regs;        /* PREG_* for each parameter, or PREG_NONE */
+    abi_place_t *param_places;
+    int *param_stack_offsets;
+    int cap_params;
     int return_reg;         /* PREG_* for return value, or PREG_NONE */
-    int return_regs[MAX_RETURNS];
-    abi_place_t return_places[MAX_RETURNS];
-    int return_stack_offsets[MAX_RETURNS];
+    int *return_regs;
+    abi_place_t *return_places;
+    int *return_stack_offsets;
+    int cap_returns;
     int nreturns;
     bool resolved;
     bool clobbers[NUM_PREGS]; /* true if function clobbers this register */
@@ -862,6 +1102,62 @@ typedef struct {
 typedef NIB_VEC(fn_assignment_t) fn_assignment_vec_t;
 static fn_assignment_vec_t fn_assigns_vec;
 #define fn_assigns (fn_assigns_vec.items)
+
+static void fa_ensure_param(fn_assignment_t *fa, int idx) {
+    if (!fa || idx < 0)
+        return;
+    if (idx >= fa->cap_params) {
+        int old_cap = fa->cap_params;
+        int new_cap = (int)nib_grow_capacity((size_t)fa->cap_params,
+                                             (size_t)idx + 1);
+        fa->param_regs = nib_xrealloc_array(fa->param_regs,
+                                            (size_t)new_cap,
+                                            sizeof(fa->param_regs[0]),
+                                            "function assignment parameters");
+        fa->param_places = nib_xrealloc_array(fa->param_places,
+                                              (size_t)new_cap,
+                                              sizeof(fa->param_places[0]),
+                                              "function assignment parameters");
+        fa->param_stack_offsets =
+            nib_xrealloc_array(fa->param_stack_offsets, (size_t)new_cap,
+                               sizeof(fa->param_stack_offsets[0]),
+                               "function assignment parameters");
+        fa->cap_params = new_cap;
+        for (int i = old_cap; i < new_cap; i++) {
+            fa->param_regs[i] = PREG_NONE;
+            fa->param_places[i] = ABI_PLACE_DEFAULT;
+            fa->param_stack_offsets[i] = 0;
+        }
+    }
+}
+
+static void fa_ensure_return(fn_assignment_t *fa, int idx) {
+    if (!fa || idx < 0)
+        return;
+    if (idx >= fa->cap_returns) {
+        int old_cap = fa->cap_returns;
+        int new_cap = (int)nib_grow_capacity((size_t)fa->cap_returns,
+                                             (size_t)idx + 1);
+        fa->return_regs = nib_xrealloc_array(fa->return_regs,
+                                             (size_t)new_cap,
+                                             sizeof(fa->return_regs[0]),
+                                             "function assignment returns");
+        fa->return_places = nib_xrealloc_array(fa->return_places,
+                                               (size_t)new_cap,
+                                               sizeof(fa->return_places[0]),
+                                               "function assignment returns");
+        fa->return_stack_offsets =
+            nib_xrealloc_array(fa->return_stack_offsets, (size_t)new_cap,
+                               sizeof(fa->return_stack_offsets[0]),
+                               "function assignment returns");
+        fa->cap_returns = new_cap;
+        for (int i = old_cap; i < new_cap; i++) {
+            fa->return_regs[i] = PREG_NONE;
+            fa->return_places[i] = ABI_PLACE_DEFAULT;
+            fa->return_stack_offsets[i] = 0;
+        }
+    }
+}
 
 
 /* Data blocks (initialized globals with placement) */
@@ -1120,19 +1416,19 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 p++;
                 char *e = strchr(p, '"');
                 int nlen = e ? (int)(e - p) : 0;
-                if (pidx < MAX_ABI_PARAMS) {
-                    memcpy(fn->param_names[pidx], p, nlen);
-                    fn->param_names[pidx][nlen] = '\0';
-                    fn->param_vregs[pidx] = v;
-                    fn->param_places[pidx] = parse_abi_place(e ? e + 1 : p);
-                    fn->nparams++;
-                }
+                fn_ensure_param(fn, pidx);
+                memcpy(fn->param_names[pidx], p, nlen);
+                fn->param_names[pidx][nlen] = '\0';
+                fn->param_vregs[pidx] = v;
+                fn->param_places[pidx] = parse_abi_place(e ? e + 1 : p);
+                fn->nparams++;
                 if (e) p = e + 1;
             }
             /* Check for "pin=REG" (new) or "in REG" (legacy) */
             char *pin_ptr = strstr(p, "pin=");
             char *in_ptr = strstr(p, " in ");
-            if (pin_ptr && pidx < MAX_ABI_PARAMS) {
+            if (pin_ptr) {
+                fn_ensure_param(fn, pidx);
                 char reg[16];
                 read_word(pin_ptr + 4, reg, sizeof(reg));
                 fn->param_pins[pidx].preg = parse_preg(reg);
@@ -1140,7 +1436,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 fn_ensure_vreg(fn, v);
                 if (fn->param_pins[pidx].preg != PREG_NONE)
                     fn->vregs[v].prefer = fn->param_pins[pidx].preg;
-            } else if (in_ptr && pidx < MAX_ABI_PARAMS) {
+            } else if (in_ptr) {
+                fn_ensure_param(fn, pidx);
                 char reg[16];
                 read_word(in_ptr + 4, reg, sizeof(reg));
                 fn->param_pins[pidx].preg = parse_preg(reg);
@@ -1162,8 +1459,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             p += 8;
             p = skip_ws(p);
             int ri = fn->nreturns;
-            if (ri >= MAX_RETURNS)
-                ri = MAX_RETURNS - 1;
+            fn_ensure_return(fn, ri);
             p = read_word(p, fn->return_types[ri], sizeof(fn->return_types[ri]));
             if (fn->nreturns == 0)
                 strncpy(fn->return_type, fn->return_types[ri], sizeof(fn->return_type) - 1);
@@ -1185,8 +1481,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             }
             fn->ret_places[ri] = rplace;
             fn->ret_pin = fn->ret_pins[0];
-            if (fn->nreturns < MAX_RETURNS)
-                fn->nreturns++;
+            fn->nreturns++;
             continue;
         }
 
@@ -1467,7 +1762,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 if (*p != '%') break;
                 int rv = parse_vreg(p, &p);
                 if (ins->nrets == 0) ins->src1 = rv;
-                else if (ins->nrets - 1 < MAX_RETURNS) ins->ret_vregs[ins->nrets - 1] = rv;
+                else ins_set_ret_vreg(ins, ins->nrets - 1, rv);
                 ins->nrets++;
             }
         }
@@ -1495,7 +1790,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 int a = parse_vreg(p, &p);
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
-                else if (ins->nargs - 2 < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs - 2] = a;
+                else ins_set_extra_arg(ins, ins->nargs - 2, a);
                 ins->nargs++;
             }
         }
@@ -1508,7 +1803,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 if (*p != '%') break;
                 int rv = parse_vreg(p, &p);
                 if (ins->nrets == 0) ins->dst = rv;
-                else if (ins->nrets - 1 < MAX_RETURNS) ins->ret_vregs[ins->nrets - 1] = rv;
+                else ins_set_ret_vreg(ins, ins->nrets - 1, rv);
                 ins->nrets++;
             }
             skip_comma(&p);
@@ -1521,7 +1816,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 int a = parse_vreg(p, &p);
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
-                else if (ins->nargs - 2 < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs - 2] = a;
+                else ins_set_extra_arg(ins, ins->nargs - 2, a);
                 ins->nargs++;
             }
         }
@@ -1551,7 +1846,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 p = skip_ws(p);
                 if (*p != '%') break;
                 int a = parse_vreg(p, &p);
-                if (ins->nargs < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs] = a;
+                ins_set_extra_arg(ins, ins->nargs, a);
                 ins->nargs++;
             }
         }
@@ -1570,7 +1865,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 int a = parse_vreg(p, &p);
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
-                else if (ins->nargs - 2 < MAX_ABI_PARAMS - 2) ins->extra_args[ins->nargs - 2] = a;
+                else ins_set_extra_arg(ins, ins->nargs - 2, a);
                 ins->nargs++;
             }
         }
@@ -1730,7 +2025,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 skip_comma(&p);
                 int off_val = (int)strtol(p, (char **)&p, 0);
                 ins->imm = seg_val;
-                ins->extra_args[0] = off_val;
+                ins_set_extra_arg(ins, 0, off_val);
                 ins->has_imm = true;
             } else {
                 /* far.off / far.seg — load word from [ptr] or [ptr+2] */
@@ -1866,7 +2161,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             skip_comma(&p);
             ins->src2 = parse_vreg(p, &p);
             skip_comma(&p);
-            ins->extra_args[0] = parse_vreg(p, &p);
+            ins_set_extra_arg(ins, 0, parse_vreg(p, &p));
         }
         else if (strcmp(opname, "bins") == 0) {
             /* V20 INS: insert bit field */
@@ -1878,7 +2173,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             skip_comma(&p);
             ins->src2 = parse_vreg(p, &p);
             skip_comma(&p);
-            ins->extra_args[0] = parse_vreg(p, &p);
+            ins_set_extra_arg(ins, 0, parse_vreg(p, &p));
         }
         else if (strcmp(opname, "rol4") == 0 || strcmp(opname, "ror4") == 0) {
             /* V20 ROL4/ROR4: nibble rotation */
@@ -1985,10 +2280,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         fn_ensure_vreg(fn, ins->dst);
         fn_ensure_vreg(fn, ins->src1);
         fn_ensure_vreg(fn, ins->src2);
-        for (int i = 0; i < MAX_ABI_PARAMS - 2; i++)
-            fn_ensure_vreg(fn, ins->extra_args[i]);
-        for (int i = 0; i < MAX_RETURNS; i++)
-            fn_ensure_vreg(fn, ins->ret_vregs[i]);
+        for (int i = 0; i < ins->nextra_args; i++)
+            fn_ensure_vreg(fn, ins_extra_arg(ins, i));
+        for (int i = 0; i < ins->nret_vregs; i++)
+            fn_ensure_vreg(fn, ins_ret_vreg(ins, i));
 
         /* Attach debug info from last ; @ comment */
         if (cur_dbg_line > 0) {
@@ -2026,18 +2321,12 @@ static void parse_nir(const char *path) {
             memset(fn, 0, sizeof(*fn));
             fn->ret_pin = PREG_NONE;
             strncpy(fn->module, cur_module, 63);
-            for (int i = 0; i < MAX_ABI_PARAMS; i++)
-                fn->param_pins[i].preg = PREG_NONE;
-            for (int i = 0; i < MAX_RETURNS; i++)
-                fn->ret_pins[i] = PREG_NONE;
             parse_function(fp, fn, p);
             record_emit(EMIT_FN, nfunctions - 1);
         }
         if (strncmp(p, ".extern ", 8) == 0) {
             extern_fn_t *ext = NIB_VEC_PUSH(&extern_vec, "externs");
             memset(ext, 0, sizeof(*ext));
-            for (int i = 0; i < MAX_RETURNS; i++)
-                ext->ret_pins[i] = PREG_NONE;
             p += 8;
             char word[64];
             p = read_word(p, ext->name, sizeof(ext->name));
@@ -2083,17 +2372,17 @@ static void parse_nir(const char *path) {
                 while (*ep == ' ' || *ep == '\t') ep++;
                 if (strncmp(ep, ".endextern", 10) == 0) break;
                 if (strncmp(ep, ".eparam", 7) == 0) {
-                    if (pi < MAX_ABI_PARAMS)
-                        ext->param_places[pi] = parse_abi_place(ep);
+                    ext_ensure_param(ext, pi);
+                    ext->param_places[pi] = parse_abi_place(ep);
                     /* Parse "pin=REG" (new) or "in REG" (legacy) */
                     char *pin_ptr = strstr(ep, "pin=");
                     char *in_ptr = strstr(ep, " in ");
-                    if (pin_ptr && pi < MAX_ABI_PARAMS) {
+                    if (pin_ptr) {
                         char reg[16];
                         read_word(pin_ptr + 4, reg, sizeof(reg));
                         ext->param_pins[pi].preg = parse_preg(reg);
                         ext->param_places[pi] = ABI_PLACE_REGISTER;
-                    } else if (in_ptr && pi < MAX_ABI_PARAMS) {
+                    } else if (in_ptr) {
                         char reg[16];
                         read_word(in_ptr + 4, reg, sizeof(reg));
                         ext->param_pins[pi].preg = parse_preg(reg);
@@ -2103,8 +2392,7 @@ static void parse_nir(const char *path) {
                 }
                 if (strncmp(ep, ".returns", 8) == 0) {
                     int ri = ext->nreturns;
-                    if (ri >= MAX_RETURNS)
-                        ri = MAX_RETURNS - 1;
+                    ext_ensure_return(ext, ri);
                     ep += 8;
                     ep = skip_ws(ep);
                     ep = read_word(ep, ext->return_types[ri],
@@ -2124,8 +2412,7 @@ static void parse_nir(const char *path) {
                         rplace = ABI_PLACE_REGISTER;
                     }
                     ext->ret_places[ri] = rplace;
-                    if (ext->nreturns < MAX_RETURNS)
-                        ext->nreturns++;
+                    ext->nreturns++;
                 }
                 if (strncmp(ep, ".preserves", 10) == 0) {
                     /* Parse comma-separated register list */
@@ -2310,8 +2597,8 @@ static void compute_liveness(func_t *fn) {
             fn->vregs[ins->dst].def_pos < 0)
             fn->vregs[ins->dst].def_pos = i;
         if (ins->op == IR_MCALL) {
-            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                int rv = ins->ret_vregs[j];
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                int rv = ins_ret_vreg(ins, j);
                 if (rv >= 0 && rv < fn->nvregs && fn->vregs[rv].def_pos < 0)
                     fn->vregs[rv].def_pos = i;
             }
@@ -2352,13 +2639,15 @@ static void compute_liveness(func_t *fn) {
             if (ins->src2 >= 0 && ins->src2 < fn->nvregs &&
                 i > fn->vregs[ins->src2].last_use)
                 fn->vregs[ins->src2].last_use = i;
-            for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
-                if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs &&
-                    i > fn->vregs[ins->extra_args[j]].last_use)
-                    fn->vregs[ins->extra_args[j]].last_use = i;
+            for (int j = 0; j < ins->nextra_args; j++) {
+                int v = ins_extra_arg(ins, j);
+                if (v >= 0 && v < fn->nvregs &&
+                    i > fn->vregs[v].last_use)
+                    fn->vregs[v].last_use = i;
+            }
             if (ins->op == IR_RETVAL) {
-                for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                    int rv = ins->ret_vregs[j];
+                for (int j = 0; j < ins->nret_vregs; j++) {
+                    int rv = ins_ret_vreg(ins, j);
                     if (rv >= 0 && rv < fn->nvregs &&
                         i > fn->vregs[rv].last_use)
                         fn->vregs[rv].last_use = i;
@@ -2386,19 +2675,21 @@ static void compute_liveness(func_t *fn) {
             fn->vregs[ins->src1].use_count++;
         if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
             fn->vregs[ins->src2].use_count++;
-        for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
-            if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
-                fn->vregs[ins->extra_args[j]].use_count++;
+        for (int j = 0; j < ins->nextra_args; j++) {
+            int v = ins_extra_arg(ins, j);
+            if (v >= 0 && v < fn->nvregs)
+                fn->vregs[v].use_count++;
+        }
         if (ins->op == IR_RETVAL) {
-            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                int rv = ins->ret_vregs[j];
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                int rv = ins_ret_vreg(ins, j);
                 if (rv >= 0 && rv < fn->nvregs)
                     fn->vregs[rv].use_count++;
             }
         }
         if (ins->op == IR_MCALL) {
-            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                int rv = ins->ret_vregs[j];
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                int rv = ins_ret_vreg(ins, j);
                 if (rv >= 0 && rv < fn->nvregs &&
                     fn->vregs[rv].def_pos >= 0 &&
                     fn->vregs[rv].def_pos < i)
@@ -2462,14 +2753,14 @@ static void collect_insn_uses_defs(ir_insn_t *ins, int nvregs,
         uses[(*nuses)++] = ins->src1;
     if (ins->src2 >= 0 && ins->src2 < nvregs && *nuses < use_cap)
         uses[(*nuses)++] = ins->src2;
-    for (int j = 0; j < MAX_ABI_PARAMS - 2; j++) {
-        int v = ins->extra_args[j];
+    for (int j = 0; j < ins->nextra_args; j++) {
+        int v = ins_extra_arg(ins, j);
         if (v >= 0 && v < nvregs && *nuses < use_cap)
             uses[(*nuses)++] = v;
     }
     if (ins->op == IR_RETVAL) {
-        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-            int v = ins->ret_vregs[j];
+        for (int j = 0; j < ins->nret_vregs; j++) {
+            int v = ins_ret_vreg(ins, j);
             if (v >= 0 && v < nvregs && *nuses < use_cap)
                 uses[(*nuses)++] = v;
         }
@@ -2482,8 +2773,8 @@ static void collect_insn_uses_defs(ir_insn_t *ins, int nvregs,
         *ndefs < def_cap)
         defs[(*ndefs)++] = ins->dst;
     if (ins->op == IR_MCALL) {
-        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-            int v = ins->ret_vregs[j];
+        for (int j = 0; j < ins->nret_vregs; j++) {
+            int v = ins_ret_vreg(ins, j);
             if (v >= 0 && v < nvregs && *ndefs < def_cap)
                 defs[(*ndefs)++] = v;
         }
@@ -2506,14 +2797,16 @@ static void compute_live_before_sets(func_t *fn, uint64_t *before) {
                (size_t)fn->vset_words * sizeof(uint64_t));
 
         for (int i = bb->end - 1; i >= bb->start; i--) {
-            int uses[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-            int defs[MAX_RETURNS + 2];
+            ir_insn_t *ins = &fn->insns[i];
+            int use_cap = 4 + ins->nextra_args + ins->nret_vregs;
+            int def_cap = 2 + ins->nret_vregs;
+            int *uses = nib_xmalloc((size_t)use_cap * sizeof(uses[0]),
+                                    "instruction use list");
+            int *defs = nib_xmalloc((size_t)def_cap * sizeof(defs[0]),
+                                    "instruction def list");
             int nuses, ndefs;
-            collect_insn_uses_defs(&fn->insns[i], fn->nvregs,
-                                   uses, &nuses,
-                                   (int)(sizeof(uses) / sizeof(uses[0])),
-                                   defs, &ndefs,
-                                   (int)(sizeof(defs) / sizeof(defs[0])));
+            collect_insn_uses_defs(ins, fn->nvregs, uses, &nuses,
+                                   use_cap, defs, &ndefs, def_cap);
 
             for (int d = 0; d < ndefs; d++)
                 vset_clear(live, defs[d]);
@@ -2521,6 +2814,8 @@ static void compute_live_before_sets(func_t *fn, uint64_t *before) {
                 vset_set(live, uses[u]);
             memcpy(live_before_row(fn, before, i), live,
                    (size_t)fn->vset_words * sizeof(uint64_t));
+            free(defs);
+            free(uses);
         }
         free(live);
     }
@@ -2578,19 +2873,26 @@ static const char *insn_source_file(func_t *fn, int idx) {
 
 static int vreg_first_use(func_t *fn, int v) {
     for (int i = 0; i < fn->ninsns; i++) {
-        int uses[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-        int defs[MAX_RETURNS + 2];
+        ir_insn_t *ins = &fn->insns[i];
+        int use_cap = 4 + ins->nextra_args + ins->nret_vregs;
+        int def_cap = 2 + ins->nret_vregs;
+        int *uses = nib_xmalloc((size_t)use_cap * sizeof(uses[0]),
+                                "instruction use list");
+        int *defs = nib_xmalloc((size_t)def_cap * sizeof(defs[0]),
+                                "instruction def list");
         int nuses, ndefs;
-        collect_insn_uses_defs(&fn->insns[i], fn->nvregs,
-                               uses, &nuses,
-                               (int)(sizeof(uses) / sizeof(uses[0])),
-                               defs, &ndefs,
-                               (int)(sizeof(defs) / sizeof(defs[0])));
-        (void)defs;
+        collect_insn_uses_defs(ins, fn->nvregs, uses, &nuses,
+                               use_cap, defs, &ndefs, def_cap);
         (void)ndefs;
-        for (int u = 0; u < nuses; u++)
-            if (uses[u] == v)
+        for (int u = 0; u < nuses; u++) {
+            if (uses[u] == v) {
+                free(defs);
+                free(uses);
                 return i;
+            }
+        }
+        free(defs);
+        free(uses);
     }
     return -1;
 }
@@ -3412,20 +3714,25 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
 
         /* Uses: vregs read by this instruction.
          * Only counts as a use if not already defined in this block. */
-        int use_vregs[MAX_ABI_PARAMS + MAX_RETURNS + 4];
-        int use_cap = (int)(sizeof(use_vregs) / sizeof(use_vregs[0]));
+        int use_cap = 4 + ins->nextra_args + ins->nret_vregs;
+        int *use_vregs = nib_xmalloc((size_t)use_cap * sizeof(use_vregs[0]),
+                                     "block use vregs");
         int nuses = 0;
         if (ins->src1 >= 0 && ins->op != IR_LEA && nuses < use_cap)
             use_vregs[nuses++] = ins->src1;
         if (ins->src2 >= 0 && nuses < use_cap)
             use_vregs[nuses++] = ins->src2;
-        for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
-            if (ins->extra_args[j] >= 0 && nuses < use_cap)
-                use_vregs[nuses++] = ins->extra_args[j];
+        for (int j = 0; j < ins->nextra_args; j++) {
+            int v = ins_extra_arg(ins, j);
+            if (v >= 0 && nuses < use_cap)
+                use_vregs[nuses++] = v;
+        }
         if (ins->op == IR_RETVAL) {
-            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
-                if (ins->ret_vregs[j] >= 0 && nuses < use_cap)
-                    use_vregs[nuses++] = ins->ret_vregs[j];
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                int v = ins_ret_vreg(ins, j);
+                if (v >= 0 && nuses < use_cap)
+                    use_vregs[nuses++] = v;
+            }
         }
         if (insn_reads_dst(ins) && nuses < use_cap)
             use_vregs[nuses++] = ins->dst;
@@ -3435,13 +3742,14 @@ static void compute_block_def_use(func_t *fn, bblock_t *bb) {
             if (v >= 0 && v < fn->nvregs && !vset_test(bb->defs, v))
                 vset_set(bb->uses, v);
         }
+        free(use_vregs);
 
         /* Defs: vreg written by this instruction */
         if (insn_defines_dst(ins) && ins->dst < fn->nvregs)
             vset_set(bb->defs, ins->dst);
         if (ins->op == IR_MCALL) {
-            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                int rv = ins->ret_vregs[j];
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                int rv = ins_ret_vreg(ins, j);
                 if (rv >= 0 && rv < fn->nvregs)
                     vset_set(bb->defs, rv);
             }
@@ -3572,13 +3880,17 @@ static void build_igraph(func_t *fn) {
                     vset_set(live, ins->src1);
                 if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
                     vset_set(live, ins->src2);
-                for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
-                    if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
-                        vset_set(live, ins->extra_args[j]);
+                for (int j = 0; j < ins->nextra_args; j++) {
+                    int v = ins_extra_arg(ins, j);
+                    if (v >= 0 && v < fn->nvregs)
+                        vset_set(live, v);
+                }
                 if (ins->op == IR_RETVAL) {
-                    for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
-                        if (ins->ret_vregs[j] >= 0 && ins->ret_vregs[j] < fn->nvregs)
-                            vset_set(live, ins->ret_vregs[j]);
+                    for (int j = 0; j < ins->nret_vregs; j++) {
+                        int rv = ins_ret_vreg(ins, j);
+                        if (rv >= 0 && rv < fn->nvregs)
+                            vset_set(live, rv);
+                    }
                 }
                 if (insn_reads_dst(ins) && ins->dst < fn->nvregs)
                     vset_set(live, ins->dst);
@@ -3606,8 +3918,8 @@ static void build_igraph(func_t *fn) {
                 vset_clear(live, def);
             }
             if (ins->op == IR_MCALL) {
-                for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                    int rdef = ins->ret_vregs[j];
+                for (int j = 0; j < ins->nret_vregs; j++) {
+                    int rdef = ins_ret_vreg(ins, j);
                     if (rdef < 0 || rdef >= fn->nvregs) continue;
                     for (int w = 0; w < fn->vset_words; w++) {
                         uint64_t bits = live[w];
@@ -3918,6 +4230,7 @@ static void scan_addressing_constraints(func_t *fn) {
             if (mc.addr_prefer[a] != PREG_NONE)
                 add_vreg_affinity(fn, v, mc.addr_prefer[a], 10);
         }
+        mc_free(&mc);
     }
     /* Propagate is_cs_ref through mov chains */
     for (int i = 0; i < fn->ninsns; i++) {
@@ -4228,8 +4541,8 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
         if (insn_defines_dst(ins) && ins->dst < fn->nvregs)
             vset_clear(live, ins->dst);
         if (ins->op == IR_MCALL) {
-            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                int rv = ins->ret_vregs[j];
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                int rv = ins_ret_vreg(ins, j);
                 if (rv >= 0 && rv < fn->nvregs)
                     vset_clear(live, rv);
             }
@@ -4240,12 +4553,14 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
             vset_set(live, ins->src1);
         if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
             vset_set(live, ins->src2);
-        for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
-            if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
-                vset_set(live, ins->extra_args[j]);
+        for (int j = 0; j < ins->nextra_args; j++) {
+            int v = ins_extra_arg(ins, j);
+            if (v >= 0 && v < fn->nvregs)
+                vset_set(live, v);
+        }
         if (ins->op == IR_RETVAL) {
-            for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-                int rv = ins->ret_vregs[j];
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                int rv = ins_ret_vreg(ins, j);
                 if (rv >= 0 && rv < fn->nvregs)
                     vset_set(live, rv);
             }
@@ -4287,12 +4602,14 @@ static void add_insn_uses_to_live(func_t *fn, ir_insn_t *ins,
         vset_set(live, ins->src1);
     if (ins->src2 >= 0 && ins->src2 < fn->nvregs)
         vset_set(live, ins->src2);
-    for (int j = 0; j < MAX_ABI_PARAMS - 2; j++)
-        if (ins->extra_args[j] >= 0 && ins->extra_args[j] < fn->nvregs)
-            vset_set(live, ins->extra_args[j]);
+    for (int j = 0; j < ins->nextra_args; j++) {
+        int v = ins_extra_arg(ins, j);
+        if (v >= 0 && v < fn->nvregs)
+            vset_set(live, v);
+    }
     if (ins->op == IR_RETVAL) {
-        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-            int rv = ins->ret_vregs[j];
+        for (int j = 0; j < ins->nret_vregs; j++) {
+            int rv = ins_ret_vreg(ins, j);
             if (rv >= 0 && rv < fn->nvregs)
                 vset_set(live, rv);
         }
@@ -4306,8 +4623,8 @@ static void remove_insn_defs_from_live(func_t *fn, ir_insn_t *ins,
     if (insn_defines_dst(ins) && ins->dst < fn->nvregs)
         vset_clear(live, ins->dst);
     if (ins->op == IR_MCALL) {
-        for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
-            int rv = ins->ret_vregs[j];
+        for (int j = 0; j < ins->nret_vregs; j++) {
+            int rv = ins_ret_vreg(ins, j);
             if (rv >= 0 && rv < fn->nvregs)
                 vset_clear(live, rv);
         }
@@ -4573,7 +4890,7 @@ static int default_return_reg(const char *type, int idx) {
 static int function_return_reg(func_t *fn, int idx) {
     if (!fn->has_return)
         return PREG_NONE;
-    if (idx < 0 || idx >= fn->nreturns || idx >= MAX_RETURNS)
+    if (idx < 0 || idx >= fn->nreturns)
         return PREG_NONE;
     if (abi_place_is_stack(fn->ret_places[idx]))
         return PREG_NONE;
@@ -4583,7 +4900,7 @@ static int function_return_reg(func_t *fn, int idx) {
 }
 
 static int extern_return_reg(extern_fn_t *ext, int idx) {
-    if (idx < 0 || idx >= ext->nreturns || idx >= MAX_RETURNS)
+    if (idx < 0 || idx >= ext->nreturns)
         return PREG_NONE;
     if (abi_place_is_stack(ext->ret_places[idx]))
         return PREG_NONE;
@@ -4595,15 +4912,12 @@ static int extern_return_reg(extern_fn_t *ext, int idx) {
 static int call_arg_vreg(ir_insn_t *ins, int a) {
     if (a == 0) return ins->src1;
     if (a == 1) return ins->src2;
-    int idx = a - 2;
-    if (idx < 0 || idx >= MAX_ABI_PARAMS - 2)
-        return -1;
-    return ins->extra_args[idx];
+    return ins_extra_arg(ins, a - 2);
 }
 
 static int stack_param_words(abi_place_t *places, int nparams) {
     int words = 0;
-    for (int a = 0; a < nparams && a < MAX_ABI_PARAMS; a++)
+    for (int a = 0; a < nparams; a++)
         if (abi_place_is_stack(places[a]))
             words++;
     return words;
@@ -4611,7 +4925,7 @@ static int stack_param_words(abi_place_t *places, int nparams) {
 
 static int stack_return_words(abi_place_t *places, char types[][32], int nreturns) {
     int words = 0;
-    for (int ri = 0; ri < nreturns && ri < MAX_RETURNS; ri++)
+    for (int ri = 0; ri < nreturns; ri++)
         if (abi_place_is_stack(places[ri]))
             words += abi_type_words(types[ri]);
     return words;
@@ -4637,6 +4951,21 @@ static int direct_stack_ret_words(int callee_fi, int callee_ext) {
                                   externs[callee_ext].return_types,
                                   externs[callee_ext].nreturns);
     return 0;
+}
+
+static int call_expected_nreturns(ir_insn_t *ins, int callee_fi,
+                                  int callee_ext) {
+    int declared = -1;
+    if (callee_fi >= 0)
+        declared = functions[callee_fi].nreturns;
+    else if (callee_ext >= 0)
+        declared = externs[callee_ext].nreturns;
+
+    int requested = ins->op == IR_MCALL ? ins->nrets :
+                    (ins->dst >= 0 ? 1 : 0);
+    if (declared >= 0 && requested > declared)
+        requested = declared;
+    return requested;
 }
 
 static bool call_returns_need_temp(func_t *fn) {
@@ -4665,10 +4994,9 @@ static bool call_returns_need_temp(func_t *fn) {
             }
         }
 
-        int nrets = ins->op == IR_MCALL ? ins->nrets :
-                    (ins->dst >= 0 ? 1 : 0);
-        for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
-            int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+        int nrets = call_expected_nreturns(ins, callee_fi, callee_ext);
+        for (int ri = 0; ri < nrets; ri++) {
+            int ret_v = (ri == 0) ? ins->dst : ins_ret_vreg(ins, ri - 1);
             if (ret_v < 0 || ret_v >= fn->nvregs)
                 continue;
             bool ret_stack = false;
@@ -5078,7 +5406,9 @@ static void emit_planned_register_moves(func_t *fn, planned_move_t *moves,
 static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
                                          int callee_fi, int callee_ext,
                                          bool indirect_args) {
-    planned_move_t moves[MAX_ABI_PARAMS];
+    int move_cap = ins->nargs > 0 ? ins->nargs : 1;
+    planned_move_t *moves = nib_xcalloc((size_t)move_cap, sizeof(*moves),
+                                        "call argument moves");
     int nmoves = 0;
     int nparams = 0;
 
@@ -5087,7 +5417,7 @@ static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
     else if (callee_ext >= 0)
         nparams = externs[callee_ext].nparams;
 
-    for (int a = 0; a < ins->nargs && a < nparams && a < MAX_ABI_PARAMS; a++) {
+    for (int a = 0; a < ins->nargs && a < nparams; a++) {
         abi_place_t place = ABI_PLACE_DEFAULT;
         int expected = PREG_NONE;
         if (callee_fi >= 0) {
@@ -5101,7 +5431,7 @@ static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
         if (abi_place_is_stack(place) || expected == PREG_NONE)
             continue;
 
-        int arg_vreg = indirect_args ? ins->extra_args[a] :
+        int arg_vreg = indirect_args ? ins_extra_arg(ins, a) :
                        call_arg_vreg(ins, a);
         if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
             continue;
@@ -5122,6 +5452,7 @@ static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
     }
 
     emit_planned_register_moves(fn, moves, nmoves);
+    free(moves);
 }
 
 /* Build the resolved instruction stream.
@@ -5325,7 +5656,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             bool caller_bp_live = fn->needs_frame;
             if (callee_fi >= 0) {
                 fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
-                for (int a = 0; a < ins->nargs && a < MAX_ABI_PARAMS; a++) {
+                for (int a = 0; a < ins->nargs && a < functions[callee_fi].nparams; a++) {
                     if (abi_place_is_stack(callee_fa->param_places[a]))
                         continue;
                     int expected = callee_fa->param_regs[a];
@@ -5370,8 +5701,8 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     if (v == ins->dst) continue;
                     bool is_ret_dst = false;
                     if (ins->op == IR_MCALL) {
-                        for (int ri = 0; ri < ins->nrets - 1 && ri < MAX_RETURNS; ri++) {
-                            if (v == ins->ret_vregs[ri]) {
+                        for (int ri = 0; ri < ins->nret_vregs; ri++) {
+                            if (v == ins_ret_vreg(ins, ri)) {
                                 is_ret_dst = true;
                                 break;
                             }
@@ -5393,8 +5724,8 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     if (v == ins->dst) continue;
                     bool is_ret_dst = false;
                     if (ins->op == IR_MCALL) {
-                        for (int ri = 0; ri < ins->nrets - 1 && ri < MAX_RETURNS; ri++) {
-                            if (v == ins->ret_vregs[ri]) {
+                        for (int ri = 0; ri < ins->nret_vregs; ri++) {
+                            if (v == ins_ret_vreg(ins, ri)) {
                                 is_ret_dst = true;
                                 break;
                             }
@@ -5415,8 +5746,11 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 if (v == ins->dst) continue;
                 bool is_ret_dst = false;
                 if (ins->op == IR_MCALL) {
-                    for (int ri = 0; ri < ins->nrets - 1 && ri < MAX_RETURNS; ri++) {
-                        if (v == ins->ret_vregs[ri]) { is_ret_dst = true; break; }
+                    for (int ri = 0; ri < ins->nret_vregs; ri++) {
+                        if (v == ins_ret_vreg(ins, ri)) {
+                            is_ret_dst = true;
+                            break;
+                        }
                     }
                 }
                 if (is_ret_dst) continue;
@@ -5463,19 +5797,26 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             /* Emit the call instruction itself (emitter handles encoding) */
             rins_ir(fn, i);
 
-            int nrets = ins->op == IR_MCALL ? ins->nrets : 1;
-            bool temp_ret[MAX_RETURNS] = {0};
-            int temp_expected[MAX_RETURNS];
-            bool temp_is_byte[MAX_RETURNS] = {0};
-            for (int ri = 0; ri < MAX_RETURNS; ri++)
+            int nrets = call_expected_nreturns(ins, callee_fi, callee_ext);
+            int nret_slots = nrets > 0 ? nrets : 1;
+            bool *temp_ret = nib_xcalloc((size_t)nret_slots,
+                                         sizeof(*temp_ret),
+                                         "call return temps");
+            int *temp_expected = nib_xmalloc((size_t)nret_slots *
+                                             sizeof(*temp_expected),
+                                             "call return registers");
+            bool *temp_is_byte = nib_xcalloc((size_t)nret_slots,
+                                             sizeof(*temp_is_byte),
+                                             "call return widths");
+            for (int ri = 0; ri < nret_slots; ri++)
                 temp_expected[ri] = PREG_NONE;
 
             /* Capture return registers before restoring caller-saves unless
              * the chosen destination aliases one of the registers being
              * restored. In that case, save the ABI return value to the call
              * temp slot and reload it after the restore. */
-            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
-                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+            for (int ri = 0; ri < nrets; ri++) {
+                int ret_v = (ri == 0) ? ins->dst : ins_ret_vreg(ins, ri - 1);
                 if (ret_v < 0 || ret_v >= fn->nvregs) continue;
                 int expected = PREG_NONE;
                 bool ret_stack = false;
@@ -5543,15 +5884,18 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             /* Caller-restore */
             emit_call_restores(fn, call_saved, call_nsaved, call_use_pusha);
 
-            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+            for (int ri = 0; ri < nrets; ri++) {
                 if (!temp_ret[ri])
                     continue;
-                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+                int ret_v = (ri == 0) ? ins->dst : ins_ret_vreg(ins, ri - 1);
                 if (temp_expected[ri] == PREG_NONE)
                     continue;
                 note_fixup(fn, FIXUP_RET_RELOAD);
                 rins_load_call_temp_return(fn, ret_v, temp_is_byte[ri]);
             }
+            free(temp_is_byte);
+            free(temp_expected);
+            free(temp_ret);
 
             continue;
         }
@@ -5584,7 +5928,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     int expected = externs[callee_ext].param_pins[a].preg;
                     if (expected == PREG_NONE || expected == PREG_SP)
                         continue;
-                    int arg_vreg = ins->extra_args[a];
+                    int arg_vreg = ins_extra_arg(ins, a);
                     if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
                         continue;
                     int actual = fn->vregs[arg_vreg].assigned;
@@ -5624,14 +5968,21 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
 
             int nrets = (callee_ext >= 0) ? externs[callee_ext].nreturns :
                         (ins->dst >= 0 ? 1 : 0);
-            bool temp_ret[MAX_RETURNS] = {0};
-            int temp_expected[MAX_RETURNS];
-            bool temp_is_byte[MAX_RETURNS] = {0};
-            for (int ri = 0; ri < MAX_RETURNS; ri++)
+            int nret_slots = nrets > 0 ? nrets : 1;
+            bool *temp_ret = nib_xcalloc((size_t)nret_slots,
+                                         sizeof(*temp_ret),
+                                         "indirect call return temps");
+            int *temp_expected = nib_xmalloc((size_t)nret_slots *
+                                             sizeof(*temp_expected),
+                                             "indirect call return registers");
+            bool *temp_is_byte = nib_xcalloc((size_t)nret_slots,
+                                             sizeof(*temp_is_byte),
+                                             "indirect call return widths");
+            for (int ri = 0; ri < nret_slots; ri++)
                 temp_expected[ri] = PREG_NONE;
 
-            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
-                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+            for (int ri = 0; ri < nrets; ri++) {
+                int ret_v = (ri == 0) ? ins->dst : ins_ret_vreg(ins, ri - 1);
                 if (ret_v < 0 || ret_v >= fn->nvregs)
                     continue;
                 int expected = PREG_NONE;
@@ -5662,15 +6013,18 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
 
             emit_call_restores(fn, call_saved, call_nsaved, call_use_pusha);
 
-            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+            for (int ri = 0; ri < nrets; ri++) {
                 if (!temp_ret[ri])
                     continue;
-                int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
+                int ret_v = (ri == 0) ? ins->dst : ins_ret_vreg(ins, ri - 1);
                 if (temp_expected[ri] == PREG_NONE)
                     continue;
                 note_fixup(fn, FIXUP_RET_RELOAD);
                 rins_load_call_temp_return(fn, ret_v, temp_is_byte[ri]);
             }
+            free(temp_is_byte);
+            free(temp_expected);
+            free(temp_ret);
 
             continue;
         }
@@ -5679,21 +6033,23 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
         if (ins->op == IR_RETVAL) {
             int nrets = ins->nrets > 0 ? ins->nrets : 1;
             bool has_stack_ret = false;
-            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
-                if (abi_place_is_stack(fn->ret_places[ri])) {
+            for (int ri = 0; ri < nrets; ri++) {
+                if (ri < fn->nreturns &&
+                    abi_place_is_stack(fn->ret_places[ri])) {
                     has_stack_ret = true;
                     break;
                 }
             }
             if (has_stack_ret) {
-                for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
-                    int src = (ri == 0) ? ins->src1 : ins->ret_vregs[ri - 1];
+                for (int ri = 0; ri < nrets; ri++) {
+                    int src = (ri == 0) ? ins->src1 : ins_ret_vreg(ins, ri - 1);
                     rins_push_ret_src(fn, src);
                 }
-                int last_ret = nrets < MAX_RETURNS ? nrets - 1 : MAX_RETURNS - 1;
+                int last_ret = nrets - 1;
                 for (int ri = last_ret; ri >= 0; ri--) {
-                    if (abi_place_is_stack(fn->ret_places[ri])) {
-                        int src = (ri == 0) ? ins->src1 : ins->ret_vregs[ri - 1];
+                    if (ri < fn->nreturns &&
+                        abi_place_is_stack(fn->ret_places[ri])) {
+                        int src = (ri == 0) ? ins->src1 : ins_ret_vreg(ins, ri - 1);
                         bool is_byte = (src >= 0 && src < fn->nvregs &&
                                         fn->vregs[src].is_byte);
                         rins_pop_bp_slot(fn,
@@ -5706,11 +6062,13 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 rins_ir(fn, i);
                 continue;
             }
-            struct { int dst_reg; int src_vreg; int src_reg; bool done; } moves[MAX_RETURNS];
+            struct { int dst_reg; int src_vreg; int src_reg; bool done; }
+                *moves = nib_xcalloc((size_t)nrets, sizeof(*moves),
+                                     "return moves");
             int nmoves = 0;
-            for (int ri = 0; ri < nrets && ri < MAX_RETURNS; ri++) {
+            for (int ri = 0; ri < nrets; ri++) {
                 int ret_reg = function_return_reg(fn, ri);
-                int src = (ri == 0) ? ins->src1 : ins->ret_vregs[ri - 1];
+                int src = (ri == 0) ? ins->src1 : ins_ret_vreg(ins, ri - 1);
                 if (ret_reg == PREG_NONE || src < 0 || src >= fn->nvregs)
                     continue;
                 int src_reg = fn->vregs[src].assigned;
@@ -5747,6 +6105,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 done++;
             }
             rins_ir(fn, i);
+            free(moves);
             continue;
         }
         /* Default: pass through unchanged */
@@ -6630,7 +6989,7 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src1));
         fprintf(out_asm, "    bext %s, %s\n",
                 vreg_asm(fn, ins->src2),
-                vreg_asm(fn, ins->extra_args[0]));
+                vreg_asm(fn, ins_extra_arg(ins, 0)));
         fprintf(out_asm, "    pop SI\n");
         if (!dst_is_ax) {
             fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
@@ -6641,9 +7000,10 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     if (strcmp(op, "bins") == 0) {
         fprintf(out_asm, "    push AX\n");
         fprintf(out_asm, "    push DI\n");
-        if (!(ins->extra_args[0] >= 0 && ins->extra_args[0] < fn->nvregs &&
-              fn->vregs[ins->extra_args[0]].assigned == PREG_AX))
-            fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->extra_args[0]));
+        int val = ins_extra_arg(ins, 0);
+        if (!(val >= 0 && val < fn->nvregs &&
+              fn->vregs[val].assigned == PREG_AX))
+            fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, val));
         if (!(ins->dst >= 0 && ins->dst < fn->nvregs &&
               fn->vregs[ins->dst].assigned == PREG_DI))
             fprintf(out_asm, "    mov DI, %s\n", vreg_asm(fn, ins->dst));
@@ -7626,7 +7986,7 @@ static void emit_function(func_t *fn) {
         case IR_FAR_LIT: {
             /* Store far literal (seg:off) on stack, point dst at it */
             int seg_val = ins->imm;
-            int off_val = ins->extra_args[0];
+            int off_val = ins_extra_arg(ins, 0);
             const char *d = vreg_asm(fn, ins->dst);
             fprintf(out_asm, "    sub sp, 4\n");
             fprintf(out_asm, "    mov word [sp], 0x%04X\n", off_val);
@@ -7688,11 +8048,13 @@ typedef struct {
     int caller_fn;          /* index into functions[] */
     int callee_fn;          /* index into functions[], or -1 if external */
     int insn_idx;           /* call instruction index in caller */
-    int arg_vregs[MAX_ABI_PARAMS];      /* caller's vregs for each argument */
+    int *arg_vregs;         /* caller's vregs for each argument */
     int nargs;
     int ret_vreg;           /* caller's vreg receiving return value */
-    int ret_vregs[MAX_RETURNS];
+    int *ret_vregs;
     int nrets;
+    int cap_args;
+    int cap_rets;
     char callee_name[64];
 } call_edge_t;
 
@@ -7709,9 +8071,41 @@ static int find_fn(const char *name) {
     return -1;
 }
 
+static void edge_add_arg(call_edge_t *e, int vreg) {
+    if (e->nargs >= e->cap_args) {
+        int new_cap = (int)nib_grow_capacity((size_t)e->cap_args,
+                                             (size_t)e->nargs + 1);
+        e->arg_vregs = nib_xrealloc_array(e->arg_vregs, (size_t)new_cap,
+                                          sizeof(e->arg_vregs[0]),
+                                          "call edge arguments");
+        e->cap_args = new_cap;
+    }
+    e->arg_vregs[e->nargs++] = vreg;
+}
+
+static void edge_add_ret(call_edge_t *e, int vreg) {
+    if (e->nrets >= e->cap_rets) {
+        int new_cap = (int)nib_grow_capacity((size_t)e->cap_rets,
+                                             (size_t)e->nrets + 1);
+        e->ret_vregs = nib_xrealloc_array(e->ret_vregs, (size_t)new_cap,
+                                          sizeof(e->ret_vregs[0]),
+                                          "call edge returns");
+        e->cap_rets = new_cap;
+    }
+    e->ret_vregs[e->nrets++] = vreg;
+}
+
+static void clear_call_graph(void) {
+    for (int i = 0; i < nedges; i++) {
+        free(call_edges[i].arg_vregs);
+        free(call_edges[i].ret_vregs);
+    }
+    call_edges_vec.len = 0;
+}
+
 /* Build call graph by scanning all functions for call instructions */
 static void build_call_graph(void) {
-    call_edges_vec.len = 0;
+    clear_call_graph();
     for (int fi = 0; fi < nfunctions; fi++) {
         func_t *fn = &functions[fi];
         for (int i = 0; i < fn->ninsns; i++) {
@@ -7720,33 +8114,37 @@ static void build_call_graph(void) {
                 ins->op != IR_ICALL) continue;
 
             call_edge_t *e = NIB_VEC_PUSH(&call_edges_vec, "call graph");
+            memset(e, 0, sizeof(*e));
             e->caller_fn = fi;
             e->callee_fn = (ins->op == IR_ICALL) ? -1 : find_fn(ins->name);
             e->insn_idx = i;
             strncpy(e->callee_name, ins->name, 63);
             e->ret_vreg = ins->dst;
-            e->nrets = ins->op == IR_MCALL ? ins->nrets :
-                       (ins->dst >= 0 ? 1 : 0);
-            for (int ri = 0; ri < MAX_RETURNS; ri++)
-                e->ret_vregs[ri] = -1;
-            if (e->nrets > 0)
-                e->ret_vregs[0] = ins->dst;
+            int nrets = ins->op == IR_MCALL ? ins->nrets :
+                        (ins->dst >= 0 ? 1 : 0);
+            if (nrets > 0)
+                edge_add_ret(e, ins->dst);
             if (ins->op == IR_MCALL) {
-                for (int ri = 1; ri < e->nrets && ri < MAX_RETURNS; ri++)
-                    e->ret_vregs[ri] = ins->ret_vregs[ri - 1];
+                for (int ri = 1; ri < nrets; ri++)
+                    edge_add_ret(e, ins_ret_vreg(ins, ri - 1));
             }
-            e->nargs = 0;
 
             if (ins->op == IR_ICALL) {
                 /* icall: args are in extra_args (src1 is addr vreg) */
-                for (int j = 0; j < MAX_ABI_PARAMS - 2 && ins->extra_args[j] >= 0; j++)
-                    e->arg_vregs[e->nargs++] = ins->extra_args[j];
+                for (int j = 0; j < ins->nextra_args; j++) {
+                    int v = ins_extra_arg(ins, j);
+                    if (v >= 0)
+                        edge_add_arg(e, v);
+                }
             } else {
                 /* call/tailcall: args in src1, src2, extra_args */
-                if (ins->src1 >= 0) e->arg_vregs[e->nargs++] = ins->src1;
-                if (ins->src2 >= 0) e->arg_vregs[e->nargs++] = ins->src2;
-                for (int j = 0; j < MAX_ABI_PARAMS - 2 && ins->extra_args[j] >= 0; j++)
-                    e->arg_vregs[e->nargs++] = ins->extra_args[j];
+                if (ins->src1 >= 0) edge_add_arg(e, ins->src1);
+                if (ins->src2 >= 0) edge_add_arg(e, ins->src2);
+                for (int j = 0; j < ins->nextra_args; j++) {
+                    int v = ins_extra_arg(ins, j);
+                    if (v >= 0)
+                        edge_add_arg(e, v);
+                }
             }
         }
     }
@@ -7832,13 +8230,14 @@ static void propagate_preferences(void) {
         fn_assigns[i].resolved = false;
         fn_assigns[i].return_reg = PREG_NONE;
         fn_assigns[i].nreturns = functions[i].nreturns;
-        for (int j = 0; j < MAX_RETURNS; j++)
+        for (int j = 0; j < functions[i].nreturns; j++) {
+            fa_ensure_return(&fn_assigns[i], j);
             fn_assigns[i].return_regs[j] = PREG_NONE;
-        for (int j = 0; j < MAX_RETURNS; j++) {
             fn_assigns[i].return_places[j] = functions[i].ret_places[j];
             fn_assigns[i].return_stack_offsets[j] = 0;
         }
-        for (int j = 0; j < MAX_ABI_PARAMS; j++) {
+        for (int j = 0; j < functions[i].nparams; j++) {
+            fa_ensure_param(&fn_assigns[i], j);
             fn_assigns[i].param_regs[j] = PREG_NONE;
             fn_assigns[i].param_places[j] = functions[i].param_places[j];
             fn_assigns[i].param_stack_offsets[j] = 0;
@@ -7848,14 +8247,14 @@ static void propagate_preferences(void) {
     for (int x = 0; x < nexterns; x++) {
         int base = externs[x].is_far ? 6 : 4;
         int slot = 0;
-        for (int p = 0; p < externs[x].nparams && p < MAX_ABI_PARAMS; p++) {
+        for (int p = 0; p < externs[x].nparams; p++) {
             if (!abi_place_is_stack(externs[x].param_places[p]))
                 continue;
             externs[x].param_stack_offsets[p] = base + slot * 2;
             slot++;
         }
         slot = 0;
-        for (int ri = 0; ri < externs[x].nreturns && ri < MAX_RETURNS; ri++) {
+        for (int ri = 0; ri < externs[x].nreturns; ri++) {
             if (!abi_place_is_stack(externs[x].ret_places[ri]))
                 continue;
             externs[x].return_stack_offsets[ri] = base + slot * 2;
@@ -7916,7 +8315,7 @@ static void propagate_preferences(void) {
         }
 
         stack_slot = 0;
-        for (int ri = 0; ri < fn->nreturns && ri < MAX_RETURNS; ri++) {
+        for (int ri = 0; ri < fn->nreturns; ri++) {
             if (!abi_place_is_stack(fn->ret_places[ri]))
                 continue;
             int off = base + stack_slot * 2;
@@ -8030,7 +8429,7 @@ static void propagate_preferences(void) {
 
         /* Assign return register */
         if (fn->has_return) {
-            for (int ri = 0; ri < fn->nreturns && ri < MAX_RETURNS; ri++)
+            for (int ri = 0; ri < fn->nreturns; ri++)
                 fa->return_regs[ri] = function_return_reg(fn, ri);
             fa->return_reg = fa->return_regs[0];
         }
@@ -8087,7 +8486,7 @@ static void propagate_preferences(void) {
         fprintf(stderr, "]");
         if (fa->return_reg != PREG_NONE) {
             fprintf(stderr, " -> ");
-            for (int ri = 0; ri < fa->nreturns && ri < MAX_RETURNS; ri++) {
+            for (int ri = 0; ri < fa->nreturns; ri++) {
                 if (ri > 0) fprintf(stderr, ",");
                 fprintf(stderr, "%s", preg_name[fa->return_regs[ri]]);
             }

@@ -269,6 +269,75 @@ if (cd "$many_modules_dir" &&
 else
     fail "many-modules" "$(tail -1 "$TEST_TMPDIR"/many_modules_build.log)"
 fi
+
+binder_grow_nir="$TEST_TMPDIR"/t_binder_grow.nir
+{
+    cat <<'NIR'
+.fn huge_vregs
+    mov %1099, 0
+    retval %1099
+    ret
+.endfn
+
+.fn huge_insns
+    mov %0, 0
+NIR
+    i=0
+    while [ "$i" -lt 4300 ]; do
+        printf '    add %%0, %%0, 1\n'
+        i=$((i + 1))
+    done
+    cat <<'NIR'
+    retval %0
+    ret
+.endfn
+
+.fn huge_blocks
+NIR
+    i=0
+    while [ "$i" -lt 600 ]; do
+        next=$((i + 1))
+        printf 'label_%s:\n' "$i"
+        if [ "$i" -lt 599 ]; then
+            printf '    jmp label_%s\n' "$next"
+        else
+            printf '    ret\n'
+        fi
+        i=$next
+    done
+    cat <<'NIR'
+.endfn
+
+.fn huge_consts
+NIR
+    i=0
+    while [ "$i" -lt 96 ]; do
+        printf '.const _C%s, far 0xE000:0x%04X\n' "$i" "$i"
+        i=$((i + 1))
+    done
+    cat <<'NIR'
+    ret
+.endfn
+NIR
+} > "$binder_grow_nir"
+if ./nibbind "$binder_grow_nir" \
+     -o "$TEST_TMPDIR"/t_binder_grow.asm >/dev/null 2>&1; then
+    if ./nibasm "$TEST_TMPDIR"/t_binder_grow.asm \
+         -o "$TEST_TMPDIR"/t_binder_grow.bin >/dev/null 2>&1 &&
+       grep -q '_huge_vregs:' "$TEST_TMPDIR"/t_binder_grow.asm &&
+       grep -q '_huge_blocks_label_599:' "$TEST_TMPDIR"/t_binder_grow.asm &&
+       grep -q '_huge_consts__C95 dw 0x005F, 0xE000' \
+         "$TEST_TMPDIR"/t_binder_grow.asm; then
+        pass "binder-grow: vregs, insns, blocks, constants grow"
+    else
+        fail "binder-grow" "generated binder stress assembly is invalid"
+    fi
+else
+    fail "binder-grow" "$(
+        ./nibbind "$binder_grow_nir" \
+          -o "$TEST_TMPDIR"/t_binder_grow.asm 2>&1 | tail -1
+    )"
+fi
 echo ""
 
 # Phase 6: Full build test
