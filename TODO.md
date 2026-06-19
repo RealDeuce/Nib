@@ -10,8 +10,6 @@
 - Binder allocator next pass:
   - Use the reports to target high-pressure Serif functions such as RTC
     read/write paths and framebuffer blits before changing heuristics.
-  - Replace use-count spill-cost proxies with V20 clock-cost estimates
-    for rematerialization, reload/store, push/pop, and scratch routes.
   - Widen stack-cache spill planning from single-block exact LIFO spans to
     full CFG state propagation:
     - compute stack-cache entry/exit state per basic block,
@@ -21,6 +19,10 @@
     - fall back to frame spills when states cannot be proven identical.
   - Add stack-cache eligibility for byte values whose parent word is owned
     or whose sibling byte is dead.
+  - Revisit Serif shifted full-copy blit loops after byte stack-cache
+    eligibility is added. The current hot case still spills the shifted
+    low/high byte fragments to frame slots (`[BP-4]`/`[BP-6]`) even after
+    tail loops improved.
   - Add rematerialization locations for constants and labels so cheap
     values do not require frame spill homes.
 
