@@ -5078,6 +5078,27 @@ static void emit_pop_acc_if_pushed(bool pushed) {
         fprintf(out_asm, "    pop AX\n");
 }
 
+static const char *emit_vreg_or_spill_scratch(func_t *fn, int vreg,
+                                              int scratch_preg,
+                                              bool *pushed) {
+    if (pushed)
+        *pushed = false;
+    if (!is_spilled(fn, vreg))
+        return vreg_asm(fn, vreg);
+
+    fprintf(out_asm, "    push %s\n", preg_name[scratch_preg]);
+    fprintf(out_asm, "    mov %s, %s\n", preg_name[scratch_preg],
+            vreg_asm(fn, vreg));
+    if (pushed)
+        *pushed = true;
+    return preg_name[scratch_preg];
+}
+
+static void emit_pop_scratch_if_pushed(int scratch_preg, bool pushed) {
+    if (pushed)
+        fprintf(out_asm, "    pop %s\n", preg_name[scratch_preg]);
+}
+
 static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
     if (cmp->has_imm) {
         fprintf(out_asm, "    cmp %s, %d\n",
@@ -5649,17 +5670,11 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
     if (dst_conflicts_with_scratch)
         fprintf(out_asm, "    push AX\n");
 
-    if (base_spilled) {
-        fprintf(out_asm, "    push BX\n");
-        fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
-        base_str = "BX"; pushed_bx = true;
-    } else {
-        base_str = vreg_asm(fn, ins->src1);
-    }
+    base_str = emit_vreg_or_spill_scratch(fn, ins->src1, PREG_BX,
+                                          &pushed_bx);
     if (idx_spilled) {
-        fprintf(out_asm, "    push SI\n");
-        fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src2));
-        idx_str = "SI"; pushed_si = true;
+        idx_str = emit_vreg_or_spill_scratch(fn, ins->src2, PREG_SI,
+                                             &pushed_si);
     } else if (ins->src2 >= 0) {
         idx_str = vreg_asm(fn, ins->src2);
     }
@@ -5671,8 +5686,8 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
             fprintf(out_asm, "    mov AX, [%s%s+%s]\n", seg_pfx, base_str, idx_str);
         else
             fprintf(out_asm, "    mov AX, [%s%s]\n", seg_pfx, base_str);
-        if (pushed_si) fprintf(out_asm, "    pop SI\n");
-        if (pushed_bx) fprintf(out_asm, "    pop BX\n");
+        emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
+        emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
         emit_es_data_suffix(use_es);
         fprintf(out_asm, "    mov ES, AX\n");
         fprintf(out_asm, "    pop AX\n");
@@ -5686,8 +5701,8 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
             fprintf(out_asm, "    mov %s, [%s%s+%s]\n", acc, seg_pfx, base_str, idx_str);
         else
             fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg_pfx, base_str);
-        if (pushed_si) fprintf(out_asm, "    pop SI\n");
-        if (pushed_bx) fprintf(out_asm, "    pop BX\n");
+        emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
+        emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
         fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
         if (dst_conflicts_with_scratch)
             fprintf(out_asm, "    pop AX\n");
@@ -5699,8 +5714,8 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
         else
             fprintf(out_asm, "    mov %s, [%s%s]\n",
                     vreg_asm(fn, ins->dst), seg_pfx, base_str);
-        if (pushed_si) fprintf(out_asm, "    pop SI\n");
-        if (pushed_bx) fprintf(out_asm, "    pop BX\n");
+        emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
+        emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
         emit_es_data_suffix(use_es);
     }
 }
@@ -5742,9 +5757,8 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
                 val_str = acc;
             }
         }
-        fprintf(out_asm, "    push BX\n");
-        fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
-        base_str = "BX"; pushed_bx = true;
+        base_str = emit_vreg_or_spill_scratch(fn, ins->src1, PREG_BX,
+                                              &pushed_bx);
     } else {
         base_str = vreg_asm(fn, ins->src1);
     }
@@ -5759,9 +5773,8 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
                 val_str = acc;
             }
         }
-        fprintf(out_asm, "    push SI\n");
-        fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src2));
-        idx_str = "SI"; pushed_si = true;
+        idx_str = emit_vreg_or_spill_scratch(fn, ins->src2, PREG_SI,
+                                             &pushed_si);
     } else if (ins->src2 >= 0) {
         idx_str = vreg_asm(fn, ins->src2);
     }
@@ -5771,8 +5784,8 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
         fprintf(out_asm, "    mov [%s%s+%s], %s\n", seg_pfx, base_str, idx_str, val_str);
     else
         fprintf(out_asm, "    mov [%s%s], %s\n", seg_pfx, base_str, val_str);
-    if (pushed_si) fprintf(out_asm, "    pop SI\n");
-    if (pushed_bx) fprintf(out_asm, "    pop BX\n");
+    emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
+    emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
     emit_es_data_suffix(use_es);
     if (pushed_val_ax)
         fprintf(out_asm, "    pop AX\n");
@@ -6355,13 +6368,9 @@ static void emit_function(func_t *fn) {
                     /* Resolve offset register — if spilled, load into BX scratch */
                     const char *off_reg;
                     bool off_spilled = is_spilled(fn, ins->src1);
-                    if (off_spilled) {
-                        fprintf(out_asm, "    push BX\n");
-                        fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
-                        off_reg = "BX";
-                    } else {
-                        off_reg = vreg_asm(fn, ins->src1);
-                    }
+                    off_reg = emit_vreg_or_spill_scratch(fn, ins->src1,
+                                                         PREG_BX,
+                                                         &off_spilled);
                     if (has_seg) {
                         /* Far: set up ES from seg vreg, then mov dst, [ES:off] */
                         if (is_spilled(fn, ins->src2)) {
@@ -6394,8 +6403,7 @@ static void emit_function(func_t *fn) {
                         }
                         emit_es_data_suffix(use_es);
                     }
-                    if (off_spilled)
-                        fprintf(out_asm, "    pop BX\n");
+                    emit_pop_scratch_if_pushed(PREG_BX, off_spilled);
                 }
             } else {
                 if (ins->name[0]) {
@@ -6419,13 +6427,9 @@ static void emit_function(func_t *fn) {
                     /* Resolve offset register — if spilled, load into BX scratch */
                     const char *off_reg;
                     bool off_spilled = is_spilled(fn, ins->dst);
-                    if (off_spilled) {
-                        fprintf(out_asm, "    push BX\n");
-                        fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->dst));
-                        off_reg = "BX";
-                    } else {
-                        off_reg = vreg_asm(fn, ins->dst);
-                    }
+                    off_reg = emit_vreg_or_spill_scratch(fn, ins->dst,
+                                                         PREG_BX,
+                                                         &off_spilled);
                     /* Resolve value — if spilled, load into accumulator */
                     const char *val_reg;
                     bool val_spilled = is_spilled(fn, ins->src1);
@@ -6455,8 +6459,7 @@ static void emit_function(func_t *fn) {
                         emit_es_data_suffix(use_es);
                     }
                     emit_pop_acc_if_pushed(preserve_val_acc);
-                    if (off_spilled)
-                        fprintf(out_asm, "    pop BX\n");
+                    emit_pop_scratch_if_pushed(PREG_BX, off_spilled);
                 }
             }
             break;
