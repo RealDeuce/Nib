@@ -40,13 +40,20 @@ nibbind [-o output.asm] [--pressure-report file]
 | Flag | Description |
 |------|-------------|
 | `-o file` | Output assembly file (default: `out.asm`) |
-| `--pressure-report file` | Write live-range and register-pressure diagnostics |
+| `--pressure-report file` | Write pressure, allocation, and fixup diagnostics |
 | `--pressure-fn name` | Limit the pressure report to one function |
 
 Accepts multiple `.nir` files. Builds the call graph, propagates
 register preferences bottom-up from leaf functions, allocates physical
 registers, inserts spill code and callee-save push/pop, and emits
 assembly with real register names.
+
+The pressure report includes a per-function pressure timeline, the peak
+live span, allocation summaries, fixup counts by reason, live ranges with
+their final allocation, dead/early-load warnings, and call-split advice.
+Fixup reasons include call argument routing, caller-save save/restore,
+CL routing for variable shifts, address-register routing, and return-value
+capture/reload around calls.
 
 ### Examples
 
