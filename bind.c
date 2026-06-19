@@ -227,6 +227,9 @@ typedef struct {
     int     affinity[NUM_PREGS]; /* speed hints from machine constraints */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
+    bool    stack_spill_eligible; /* true if CFG stack-cache proof succeeded */
+    int     stack_spill_def;
+    int     stack_spill_use;
     /* Liveness */
     int     def_pos;        /* first def position */
     int     last_use;       /* last use position */
@@ -307,6 +310,9 @@ static const char *fixup_reason_name[FIXUP_NUM] = {
 typedef enum {
     SPILL_LOAD,
     SPILL_STORE,
+    SPILL_STACK_PUSH,
+    SPILL_STACK_POP,
+    SPILL_REMAT,
     SPILL_SCRATCH_SAVE,
     SPILL_SCRATCH_RESTORE,
     SPILL_MEM_ROUTE,
@@ -316,9 +322,34 @@ typedef enum {
 static const char *spill_action_name[SPILL_NUM] = {
     "spill-load",
     "spill-store",
+    "stack-cache-push",
+    "stack-cache-pop",
+    "remat",
     "scratch-save",
     "scratch-restore",
     "mem-route",
+};
+
+typedef struct {
+    int mov_reg_imm16;
+    int mov_reg_reg;
+    int mov_reg_mem16;
+    int mov_mem16_reg;
+    int push_reg16;
+    int pop_reg16;
+    int push_mem16;
+    int pop_mem16;
+} v20_cost_model_t;
+
+static const v20_cost_model_t v20_cost = {
+    .mov_reg_imm16 = 4,
+    .mov_reg_reg = 2,
+    .mov_reg_mem16 = 15,
+    .mov_mem16_reg = 13,
+    .push_reg16 = 12,
+    .pop_reg16 = 12,
+    .push_mem16 = 26,
+    .pop_mem16 = 25,
 };
 
 typedef struct {
@@ -391,6 +422,7 @@ typedef struct {
     int         ncl_fixups;     /* CL routing fixups (push/pop CX) */
     int         fixup_counts[FIXUP_NUM];
     int         spill_action_counts[SPILL_NUM];
+    int         estimated_alloc_clocks;
     int         local_size;     /* total bytes for source stack locals */
     int         frame_size;     /* total bytes for spills and source locals */
     bool        needs_call_temp;
@@ -568,6 +600,8 @@ static bool is_spilled(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
 static bool flags_live_after_insn(func_t *fn, int insn_idx);
 static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg);
+static uint32_t free_regs_at(func_t *fn, int b_idx, int pos);
+static int block_of(func_t *fn, int pos);
 static int vreg_preg(func_t *fn, int v);
 static int ret_capture_restore_reg(func_t *fn, int ret_vreg);
 static bool call_saved_restores_reg(int *call_saved, int call_nsaved,
@@ -576,6 +610,8 @@ static void rins_store_call_temp_return(func_t *fn, int expected,
                                         bool is_byte);
 static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
                                        bool is_byte);
+static void rins_asm_spill(func_t *fn, spill_action_t action,
+                           const char *fmt, ...);
 
 static const char *pressure_report_path = NULL;
 static const char *pressure_fn_filter = NULL;
@@ -596,6 +632,8 @@ static void init_vreg_info(vreg_info_t *vr) {
     vr->spill_slot = -1;
     vr->def_pos = -1;
     vr->last_use = -1;
+    vr->stack_spill_def = -1;
+    vr->stack_spill_use = -1;
 }
 
 static void fn_ensure_vreg(func_t *fn, int v) {
@@ -3178,6 +3216,8 @@ static void report_pressure_function(FILE *out, func_t *fn) {
         total_spill_actions += fn->spill_action_counts[a];
     }
     fprintf(out, " total=%d\n", total_spill_actions);
+    fprintf(out, "estimated-clocks: alloc-overhead=%d\n",
+            fn->estimated_alloc_clocks);
 
     fprintf(out, "\npressure timeline:\n");
     for (int i = 0; i < fn->ninsns; i++) {
@@ -3516,9 +3556,11 @@ static int parse_pressure_compare_report(const char *path,
             cur->has_fixups = ok;
         } else if (line_starts(line, "spill-actions:")) {
             bool ok = true;
-            for (int i = 0; i < SPILL_NUM; i++)
-                ok = parse_report_metric(line, spill_action_name[i],
-                                         &cur->spill_actions[i]) && ok;
+            for (int i = 0; i < SPILL_NUM; i++) {
+                int value = 0;
+                if (parse_report_metric(line, spill_action_name[i], &value))
+                    cur->spill_actions[i] = value;
+            }
             ok = parse_report_metric(line, "total",
                                      &cur->spill_action_total) && ok;
             cur->has_spill_actions = ok;
@@ -4475,17 +4517,57 @@ static int choose_color(func_t *fn, int v, int *pool, int psz) {
     return best;
 }
 
-static int spill_cost(func_t *fn, int v) {
+static int vreg_loop_weight(func_t *fn, int v) {
+    return fn->vregs[v].in_loop ? 10 : 1;
+}
+
+static int vreg_frame_spill_cost(func_t *fn, int v) {
     int uses = fn->vregs[v].use_count;
     if (uses <= 0)
         uses = 1;
 
-    int cost = uses * 100;
-    if (fn->vregs[v].in_loop)
-        cost *= 10;
-    if (fn->vregs[v].is_const &&
-        !(fn->vregs[v].is_byte && fn->vregs[v].in_loop))
-        cost /= 4;
+    int width_cost = v20_cost.mov_mem16_reg +
+                     uses * v20_cost.mov_reg_mem16;
+    return width_cost * vreg_loop_weight(fn, v);
+}
+
+static bool vreg_can_rematerialize(func_t *fn, int v) {
+    return fn->vregs[v].is_const && !fn->vregs[v].is_seg &&
+           !fn->vregs[v].needs_addressable &&
+           !fn->vregs[v].needs_base && !fn->vregs[v].needs_index &&
+           !fn->vregs[v].needs_ds_addr && !fn->vregs[v].needs_cl;
+}
+
+static int vreg_remat_cost(func_t *fn, int v) {
+    int uses = fn->vregs[v].use_count;
+    if (uses <= 0)
+        uses = 1;
+    return uses * v20_cost.mov_reg_imm16 * vreg_loop_weight(fn, v);
+}
+
+static int vreg_stack_cache_cost(func_t *fn, int v) {
+    if (!fn->vregs[v].stack_spill_eligible)
+        return INT_MAX / 4;
+    if (fn->vregs[v].is_byte || fn->vregs[v].is_seg)
+        return INT_MAX / 4;
+    return v20_cost.push_reg16 + v20_cost.pop_reg16;
+}
+
+static int vreg_best_spill_cost(func_t *fn, int v) {
+    int cost = vreg_frame_spill_cost(fn, v);
+    int stack_cost = vreg_stack_cache_cost(fn, v);
+    if (stack_cost < cost)
+        cost = stack_cost;
+    if (vreg_can_rematerialize(fn, v)) {
+        int remat = vreg_remat_cost(fn, v);
+        if (remat < cost)
+            cost = remat;
+    }
+    return cost;
+}
+
+static int spill_cost(func_t *fn, int v) {
+    int cost = vreg_best_spill_cost(fn, v) * 100;
     if (fn->vregs[v].fixed)
         cost += 10000;
     else if (fn->vregs[v].prefer != PREG_NONE)
@@ -4493,10 +4575,184 @@ static int spill_cost(func_t *fn, int v) {
 
     int range = fn->vregs[v].last_use - fn->vregs[v].def_pos;
     if (range > 0)
-        cost -= range;
+        cost -= range * v20_cost.pop_reg16;
     if (cost < 1)
         cost = 1;
     return cost;
+}
+
+static bool insn_uses_vreg(const ir_insn_t *ins, int v) {
+    if (!ins || v < 0)
+        return false;
+    if (ins->src1 == v && ins->op != IR_LEA)
+        return true;
+    if (ins->src2 == v)
+        return true;
+    for (int j = 0; j < ins->nextra_args; j++)
+        if (ins_extra_arg(ins, j) == v)
+            return true;
+    if (ins->op == IR_RETVAL) {
+        for (int j = 0; j < ins->nret_vregs; j++)
+            if (ins_ret_vreg(ins, j) == v)
+                return true;
+    }
+    return insn_reads_dst(ins) && ins->dst == v;
+}
+
+static bool stack_cache_barrier(const ir_insn_t *ins) {
+    if (!ins)
+        return true;
+    switch (ins->op) {
+    case IR_CALL:
+    case IR_MCALL:
+    case IR_ICALL:
+    case IR_TAILCALL:
+    case IR_GOTO_FN:
+    case IR_RET:
+    case IR_JMP:
+    case IR_JZ:
+    case IR_CJMP:
+    case IR_LOOP:
+    case IR_FAR_LIT:
+    case IR_FRAME_ENTER:
+    case IR_FRAME_LEAVE:
+    case IR_ASM:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool find_stack_cache_span(func_t *fn, int v, int *def_out,
+                                  int *use_out) {
+    int def = -1, use = -1;
+    int ndefs = 0, nuses = 0;
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (insn_defines_dst(ins) && ins->dst == v) {
+            def = i;
+            ndefs++;
+        }
+        if (insn_uses_vreg(ins, v)) {
+            use = i;
+            nuses++;
+        }
+    }
+    if (ndefs != 1 || nuses != 1 || def < 0 || use <= def)
+        return false;
+
+    int def_block = block_of(fn, def);
+    int use_block = block_of(fn, use);
+    if (def_block != use_block)
+        return false;
+
+    for (int i = def + 1; i < use; i++)
+        if (stack_cache_barrier(&fn->insns[i]))
+            return false;
+
+    *def_out = def;
+    *use_out = use;
+    return true;
+}
+
+static int choose_stack_cache_reg(func_t *fn, int v, int def, int use,
+                                  bool bp_available) {
+    int pool[16];
+    int psz = get_vreg_pool(fn, v, bp_available, pool);
+    uint32_t def_free = free_regs_at(fn, block_of(fn, def), def);
+    uint32_t use_free = free_regs_at(fn, block_of(fn, use), use);
+    int best = PREG_NONE;
+    int best_score = INT_MIN;
+    for (int r = 0; r < psz; r++) {
+        int preg = pool[r];
+        if (preg == PREG_SP || preg >= PREG_ES)
+            continue;
+        if (((def_free >> preg) & 1u) == 0)
+            continue;
+        if (((use_free >> preg) & 1u) == 0)
+            continue;
+        int score = color_speed_score(fn, v, preg, r);
+        if (score > best_score) {
+            best = preg;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+static bool function_has_stack_homes(func_t *fn) {
+    for (int v = 0; v < fn->nvregs; v++)
+        if (fn->vregs[v].is_stack_home)
+            return true;
+    return false;
+}
+
+static void compact_spill_slots(func_t *fn) {
+    int *slot_map = nib_xmalloc((size_t)(fn->nspill_slots > 0 ?
+                              fn->nspill_slots : 1) * sizeof(int),
+                              "spill slot map");
+    for (int i = 0; i < fn->nspill_slots; i++)
+        slot_map[i] = -1;
+    int next = 0;
+    for (int v = 0; v < fn->nvregs; v++) {
+        int slot = fn->vregs[v].spill_slot;
+        if (slot < 0)
+            continue;
+        if (slot_map[slot] < 0)
+            slot_map[slot] = next++;
+        fn->vregs[v].spill_slot = slot_map[slot];
+    }
+    fn->nspill_slots = next;
+    free(slot_map);
+}
+
+static bool stack_cache_span_compatible(func_t *fn, int def, int use) {
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (!fn->vregs[v].stack_spill_eligible)
+            continue;
+        int other_def = fn->vregs[v].stack_spill_def;
+        int other_use = fn->vregs[v].stack_spill_use;
+        if (use < other_def || other_use < def)
+            continue;
+        if (def < other_def && other_use < use)
+            continue;
+        if (other_def < def && use < other_use)
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static void plan_stack_cache_spills(func_t *fn, bool bp_available) {
+    bool changed = false;
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (fn->vregs[v].spill_slot < 0)
+            continue;
+        if (fn->vregs[v].is_byte || fn->vregs[v].is_seg ||
+            fn->vregs[v].fixed || fn->vregs[v].is_stack_home ||
+            fn->vregs[v].is_local_slot)
+            continue;
+        int def = -1, use = -1;
+        if (!find_stack_cache_span(fn, v, &def, &use))
+            continue;
+        if (!stack_cache_span_compatible(fn, def, use))
+            continue;
+        int preg = choose_stack_cache_reg(fn, v, def, use, bp_available);
+        if (preg == PREG_NONE)
+            continue;
+        fn->vregs[v].assigned = preg;
+        fn->vregs[v].spill_slot = -1;
+        fn->vregs[v].stack_spill_eligible = true;
+        fn->vregs[v].stack_spill_def = def;
+        fn->vregs[v].stack_spill_use = use;
+        changed = true;
+    }
+    if (!changed)
+        return;
+    compact_spill_slots(fn);
+    if (fn->nspill_slots == 0 && fn->local_size == 0 &&
+        !fn->needs_call_temp && !function_has_stack_homes(fn))
+        fn->needs_frame = false;
 }
 
 /* Chaitin-Briggs register allocation using the interference graph.
@@ -4896,6 +5152,32 @@ static void rins_ir(func_t *fn, int ir_idx) {
     resolved_insn_t *r = fn_push_resolved(fn);
     r->kind = RINS_IR;
     r->ir_idx = ir_idx;
+}
+
+static void rins_stack_cache_pop_for_insn(func_t *fn, int ir_idx) {
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (!fn->vregs[v].stack_spill_eligible ||
+            fn->vregs[v].stack_spill_use != ir_idx)
+            continue;
+        rins_asm_spill(fn, SPILL_STACK_POP, "    pop %s",
+                       preg_name[fn->vregs[v].assigned]);
+    }
+}
+
+static void rins_stack_cache_push_for_insn(func_t *fn, int ir_idx) {
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (!fn->vregs[v].stack_spill_eligible ||
+            fn->vregs[v].stack_spill_def != ir_idx)
+            continue;
+        rins_asm_spill(fn, SPILL_STACK_PUSH, "    push %s",
+                       preg_name[fn->vregs[v].assigned]);
+    }
+}
+
+static void rins_ir_stack_cached(func_t *fn, int ir_idx) {
+    rins_stack_cache_pop_for_insn(fn, ir_idx);
+    rins_ir(fn, ir_idx);
+    rins_stack_cache_push_for_insn(fn, ir_idx);
 }
 
 /* Add a resolved pre-formatted assembly line */
@@ -5632,6 +5914,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
     fn->nresolved = 0;
     memset(fn->fixup_counts, 0, sizeof(fn->fixup_counts));
     memset(fn->spill_action_counts, 0, sizeof(fn->spill_action_counts));
+    fn->estimated_alloc_clocks = 0;
 
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
@@ -5666,7 +5949,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 };
                 emit_planned_register_moves(fn, &move, 1);
                 fn->vregs[ins->src2].assigned = PREG_CL;
-                rins_ir(fn, i);
+                rins_ir_stack_cached(fn, i);
                 fn->vregs[ins->src2].assigned = src2_preg; /* restore */
             } else if (!dst_is_cx) {
                 /* CX is occupied — push/pop CX around the route */
@@ -5683,7 +5966,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    push CX");
                 emit_planned_register_moves(fn, &move, 1);
                 fn->vregs[ins->src2].assigned = PREG_CL;
-                rins_ir(fn, i);
+                rins_ir_stack_cached(fn, i);
                 fn->vregs[ins->src2].assigned = src2_preg;
                 rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    pop CX");
             } else {
@@ -5755,7 +6038,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 }
             }
             emit_planned_register_moves(fn, moves, nmoves);
-            rins_ir(fn, i);
+            rins_ir_stack_cached(fn, i);
             continue;
         }
 
@@ -5965,7 +6248,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                                          false);
 
             /* Emit the call instruction itself (emitter handles encoding) */
-            rins_ir(fn, i);
+            rins_ir_stack_cached(fn, i);
 
             int nrets = call_expected_nreturns(ins, callee_fi, callee_ext);
             int nret_slots = nrets > 0 ? nrets : 1;
@@ -6134,7 +6417,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
 
             emit_call_arg_register_moves(fn, ins, -1, callee_ext, true);
 
-            rins_ir(fn, i);
+            rins_ir_stack_cached(fn, i);
 
             int nrets = (callee_ext >= 0) ? externs[callee_ext].nreturns :
                         (ins->dst >= 0 ? 1 : 0);
@@ -6229,7 +6512,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                         rins_pop_ret_reg(fn, function_return_reg(fn, ri));
                     }
                 }
-                rins_ir(fn, i);
+                rins_ir_stack_cached(fn, i);
                 continue;
             }
             struct { int dst_reg; int src_vreg; int src_reg; bool done; }
@@ -6274,12 +6557,12 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 moves[pick].done = true;
                 done++;
             }
-            rins_ir(fn, i);
+            rins_ir_stack_cached(fn, i);
             free(moves);
             continue;
         }
         /* Default: pass through unchanged */
-        rins_ir(fn, i);
+        rins_ir_stack_cached(fn, i);
     }
 }
 
@@ -6385,10 +6668,34 @@ typedef struct {
     int preg;
 } operand_plan_t;
 
+static int spill_action_clock_cost(spill_action_t action) {
+    switch (action) {
+    case SPILL_LOAD:
+        return v20_cost.mov_reg_mem16;
+    case SPILL_STORE:
+        return v20_cost.mov_mem16_reg;
+    case SPILL_STACK_PUSH:
+        return v20_cost.push_reg16;
+    case SPILL_STACK_POP:
+        return v20_cost.pop_reg16;
+    case SPILL_REMAT:
+        return v20_cost.mov_reg_imm16;
+    case SPILL_SCRATCH_SAVE:
+        return v20_cost.push_reg16;
+    case SPILL_SCRATCH_RESTORE:
+        return v20_cost.pop_reg16;
+    case SPILL_MEM_ROUTE:
+        return v20_cost.mov_reg_mem16 + v20_cost.mov_mem16_reg;
+    default:
+        return 0;
+    }
+}
+
 static void note_spill_action(func_t *fn, spill_action_t action) {
     if (!fn || action < 0 || action >= SPILL_NUM)
         return;
     fn->spill_action_counts[action]++;
+    fn->estimated_alloc_clocks += spill_action_clock_cost(action);
 }
 
 static operand_plan_t plan_vreg_operand(func_t *fn, int vreg) {
@@ -9136,6 +9443,7 @@ int main(int argc, char **argv) {
             fn->nspill_slots = 0;
             allocate_registers(fn, false);
         }
+        plan_stack_cache_spills(fn, !fn->needs_frame);
         fn->frame_size = fn->nspill_slots * 2 + fn->local_size;
         if (fn->needs_call_temp) {
             fn->call_temp_off = -(fn->frame_size + 4);

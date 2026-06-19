@@ -1519,6 +1519,60 @@ else
     fail "pressure-report-spill-actions" "spill action counts missing"
 fi
 
+cat > "$TEST_TMPDIR"/t_stack_cache_spill.nir <<'NIR'
+; Binder regression: exact LIFO spill spans may use push/pop cache
+; traffic instead of assigning every spill to a BP frame slot.
+.fn stack_cache_spill
+    mov %0, 1
+    mov %1, 2
+    mov %2, 3
+    mov %3, 4
+    mov %4, 5
+    mov %5, 6
+    mov %6, 7
+    mov %7, 8
+    mov %8, 9
+    add %9, %1, %2
+    add %10, %3, %4
+    add %11, %5, %6
+    add %12, %7, %8
+    add %13, %9, %10
+    add %14, %11, %12
+    add %15, %0, %13
+    add %16, %15, %14
+    retval %16
+    ret
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_spill.txt \
+     --pressure-fn stack_cache_spill "$TEST_TMPDIR"/t_stack_cache_spill.nir \
+     -o "$TEST_TMPDIR"/t_stack_cache_spill.asm >/dev/null 2>&1; then
+    if ./nibasm "$TEST_TMPDIR"/t_stack_cache_spill.asm \
+          -o "$TEST_TMPDIR"/t_stack_cache_spill.bin >/dev/null 2>&1 &&
+       grep -q '^spill-actions: .*stack-cache-push=[1-9]' \
+          "$TEST_TMPDIR"/t_stack_cache_spill.txt &&
+       grep -q '^spill-actions: .*stack-cache-pop=[1-9]' \
+          "$TEST_TMPDIR"/t_stack_cache_spill.txt &&
+       grep -q '^estimated-clocks: alloc-overhead=' \
+          "$TEST_TMPDIR"/t_stack_cache_spill.txt &&
+       awk '
+           /^[[:space:]]*push[[:space:]]+[A-Z][A-Z]?$/ { pushes++ }
+           /^[[:space:]]*pop[[:space:]]+[A-Z][A-Z]?$/ { pops++ }
+           END { exit (pushes >= 1 && pops >= 1 && pushes == pops) ? 0 : 1 }
+       ' "$TEST_TMPDIR"/t_stack_cache_spill.asm; then
+        pass "stack-cache-spill: exact LIFO spill uses push/pop cache"
+    else
+        fail "stack-cache-spill" "stack-cache spill route missing"
+    fi
+else
+    fail "stack-cache-spill" "$(
+        ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_spill.txt \
+          --pressure-fn stack_cache_spill \
+          "$TEST_TMPDIR"/t_stack_cache_spill.nir \
+          -o "$TEST_TMPDIR"/t_stack_cache_spill.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_high_vregs.nir <<'NIR'
 ; Binder regression: functions with vregs above 255 must still get
 ; real registers/spills and address operands, not PREG_NONE/(null).
