@@ -11,16 +11,16 @@ nib.tab.c nib.tab.h: nib.y
 lex.yy.c: nib.l nib.tab.h
 	$(FLEX) nib.l
 
-nib: nib.tab.c lex.yy.c ast.h ast.c compile.c compile.h
+nib: nib.tab.c lex.yy.c ast.h ast.c compile.c compile.h table.h
 	$(CC) $(CFLAGS) -o nib nib.tab.c lex.yy.c ast.c compile.c
 
-nibasm: asm.c
+nibasm: asm.c table.h
 	$(CC) $(CFLAGS) -o nibasm asm.c
 
-nibbind: bind.c
+nibbind: bind.c table.h
 	$(CC) $(CFLAGS) -o nibbind bind.c
 
-nibbuild: build.c
+nibbuild: build.c table.h
 	$(CC) $(CFLAGS) -o nibbuild build.c
 
 nibdis: dis.cpp

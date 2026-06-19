@@ -20,11 +20,12 @@
 #include <libgen.h>
 #include <spawn.h>
 
+#include "table.h"
+
 extern char **environ;
 
-#define MAX_MODULES 128
-#define MAX_EXTRA_ARGS 32
-#define MAX_ARGV 256
+typedef NIB_VEC(int) int_vec_t;
+typedef NIB_VEC(char *) str_vec_t;
 
 typedef struct {
     char nib_path[256];     /* source file */
@@ -32,20 +33,23 @@ typedef struct {
     char nif_path[256];     /* interface output */
     char dir[256];          /* directory of the .nib file */
     bool needs_compile;
-    int  deps[MAX_MODULES]; /* indices of modules this one depends on */
-    int  ndeps;
+    int_vec_t deps;         /* indices of modules this one depends on */
 } module_t;
 
-static module_t modules[MAX_MODULES];
-static int nmodules = 0;
+typedef NIB_VEC(module_t) module_vec_t;
+static module_vec_t modules;
 
 /* Per-stage extra arguments */
-static char *nib_extra[MAX_EXTRA_ARGS];
-static int   nib_nextra = 0;
-static char *bind_extra[MAX_EXTRA_ARGS];
-static int   bind_nextra = 0;
-static char *asm_extra[MAX_EXTRA_ARGS];
-static int   asm_nextra = 0;
+static str_vec_t nib_extra;
+static str_vec_t bind_extra;
+static str_vec_t asm_extra;
+
+static char *xstrdup(const char *s) {
+    size_t len = strlen(s) + 1;
+    char *p = nib_xmalloc(len, "string");
+    memcpy(p, s, len);
+    return p;
+}
 
 /* ---- Path helpers ---- */
 
@@ -118,8 +122,8 @@ static int run_argv(char **argv) {
 /* ---- Module discovery ---- */
 
 static int find_module(const char *nib_path) {
-    for (int i = 0; i < nmodules; i++)
-        if (strcmp(modules[i].nib_path, nib_path) == 0)
+    for (int i = 0; i < modules.len; i++)
+        if (strcmp(modules.items[i].nib_path, nib_path) == 0)
             return i;
     return -1;
 }
@@ -127,7 +131,7 @@ static int find_module(const char *nib_path) {
 static int add_module(const char *nib_path);
 
 static void scan_uses(int mod_idx) {
-    module_t *m = &modules[mod_idx];
+    module_t *m = &modules.items[mod_idx];
 
     FILE *fp = fopen(m->nib_path, "r");
     if (!fp) {
@@ -169,9 +173,8 @@ static void scan_uses(int mod_idx) {
         }
 
         int dep = add_module(resolved);
-        if (dep >= 0 && m->ndeps < MAX_MODULES) {
-            m->deps[m->ndeps++] = dep;
-        }
+        if (dep >= 0)
+            *NIB_VEC_PUSH(&m->deps, "module dependencies") = dep;
     }
 
     fclose(fp);
@@ -181,18 +184,14 @@ static int add_module(const char *nib_path) {
     int idx = find_module(nib_path);
     if (idx >= 0) return idx;
 
-    if (nmodules >= MAX_MODULES) {
-        fprintf(stderr, "error: too many modules\n");
-        return -1;
-    }
-
-    idx = nmodules++;
-    module_t *m = &modules[idx];
+    idx = modules.len;
+    module_t *m = NIB_VEC_PUSH(&modules, "modules");
+    memset(m, 0, sizeof(*m));
     strncpy(m->nib_path, nib_path, 255);
     replace_ext(nib_path, ".nir", m->nir_path, sizeof(m->nir_path));
     replace_ext(nib_path, ".nif", m->nif_path, sizeof(m->nif_path));
     get_dir(nib_path, m->dir, sizeof(m->dir));
-    m->ndeps = 0;
+    NIB_VEC_INIT(&m->deps);
 
     scan_uses(idx);
 
@@ -201,52 +200,53 @@ static int add_module(const char *nib_path) {
 
 /* ---- Topological sort ---- */
 
-static int build_order[MAX_MODULES];
-static int nbuild;
+static int_vec_t build_order;
 
 static void topo_sort(void) {
-    bool visited[MAX_MODULES] = {0};
-    nbuild = 0;
+    bool *visited = nib_xcalloc((size_t)modules.len, sizeof(bool),
+                                "module visit set");
+    build_order.len = 0;
 
     bool changed = true;
     while (changed) {
         changed = false;
-        for (int i = 0; i < nmodules; i++) {
+        for (int i = 0; i < modules.len; i++) {
             if (visited[i]) continue;
             bool ready = true;
-            for (int d = 0; d < modules[i].ndeps; d++) {
-                if (!visited[modules[i].deps[d]]) {
+            module_t *m = &modules.items[i];
+            for (int d = 0; d < m->deps.len; d++) {
+                if (!visited[m->deps.items[d]]) {
                     ready = false;
                     break;
                 }
             }
             if (ready) {
-                build_order[nbuild++] = i;
+                *NIB_VEC_PUSH(&build_order, "build order") = i;
                 visited[i] = true;
                 changed = true;
             }
         }
     }
 
-    for (int i = 0; i < nmodules; i++) {
+    for (int i = 0; i < modules.len; i++) {
         if (!visited[i]) {
             fprintf(stderr, "error: dependency cycle involving '%s'\n",
-                    modules[i].nib_path);
-            build_order[nbuild++] = i;
+                    modules.items[i].nib_path);
+            *NIB_VEC_PUSH(&build_order, "build order") = i;
         }
     }
+    free(visited);
 }
 
 /* ---- Build file (nib.build) ---- */
 
-static void add_extra(char **arr, int *cnt, const char *arg) {
-    if (*cnt < MAX_EXTRA_ARGS)
-        arr[(*cnt)++] = strdup(arg);
+static void add_extra(str_vec_t *arr, const char *arg) {
+    *NIB_VEC_PUSH(arr, "extra arguments") = xstrdup(arg);
 }
 
 /* Tokenize a value string and append tokens to an extra array.
  * Splits on whitespace, respects double quotes. */
-static void tokenize_into(char **arr, int *cnt, const char *value) {
+static void tokenize_into(str_vec_t *arr, const char *value) {
     const char *p = value;
     while (*p) {
         while (*p == ' ' || *p == '\t') p++;
@@ -265,7 +265,7 @@ static void tokenize_into(char **arr, int *cnt, const char *value) {
         }
         token[ti] = '\0';
         if (ti > 0)
-            add_extra(arr, cnt, token);
+            add_extra(arr, token);
     }
 }
 
@@ -297,15 +297,15 @@ static bool load_build_file(const char *path, const char **root_out, const char 
         while (*p == ' ' || *p == '\t') p++;
 
         if (strcmp(key, "root") == 0) {
-            *root_out = strdup(p);
+            *root_out = xstrdup(p);
         } else if (strcmp(key, "output") == 0) {
-            *output_out = strdup(p);
+            *output_out = xstrdup(p);
         } else if (strcmp(key, "nib") == 0) {
-            tokenize_into(nib_extra, &nib_nextra, p);
+            tokenize_into(&nib_extra, p);
         } else if (strcmp(key, "asm") == 0) {
-            tokenize_into(asm_extra, &asm_nextra, p);
+            tokenize_into(&asm_extra, p);
         } else if (strcmp(key, "bind") == 0) {
-            tokenize_into(bind_extra, &bind_nextra, p);
+            tokenize_into(&bind_extra, p);
         } else {
             fprintf(stderr, "warning: unknown build file key '%s'\n", key);
         }
@@ -321,6 +321,12 @@ int main(int argc, char **argv) {
     const char *root = NULL;
     const char *outbin = NULL;
     bool force_rebuild = false;
+
+    NIB_VEC_INIT(&modules);
+    NIB_VEC_INIT(&build_order);
+    NIB_VEC_INIT(&nib_extra);
+    NIB_VEC_INIT(&bind_extra);
+    NIB_VEC_INIT(&asm_extra);
 
     resolve_tool_dir(argv[0]);
 
@@ -345,11 +351,11 @@ int main(int argc, char **argv) {
             else
                 root = argv[i];
         } else if (section == 1) {
-            add_extra(nib_extra, &nib_nextra, argv[i]);
+            add_extra(&nib_extra, argv[i]);
         } else if (section == 2) {
-            add_extra(bind_extra, &bind_nextra, argv[i]);
+            add_extra(&bind_extra, argv[i]);
         } else if (section == 3) {
-            add_extra(asm_extra, &asm_nextra, argv[i]);
+            add_extra(&asm_extra, argv[i]);
         }
     }
 
@@ -376,13 +382,14 @@ int main(int argc, char **argv) {
     /* Sort */
     topo_sort();
 
-    fprintf(stderr, "Build order (%d modules):\n", nbuild);
-    for (int i = 0; i < nbuild; i++)
-        fprintf(stderr, "  %s\n", modules[build_order[i]].nib_path);
+    fprintf(stderr, "Build order (%d modules):\n", build_order.len);
+    for (int i = 0; i < build_order.len; i++)
+        fprintf(stderr, "  %s\n",
+                modules.items[build_order.items[i]].nib_path);
 
     /* Determine what needs recompilation */
-    for (int i = 0; i < nmodules; i++) {
-        module_t *m = &modules[i];
+    for (int i = 0; i < modules.len; i++) {
+        module_t *m = &modules.items[i];
         time_t src_time = file_mtime(m->nib_path);
         time_t nir_time = file_mtime(m->nir_path);
         time_t nif_time = file_mtime(m->nif_path);
@@ -396,8 +403,9 @@ int main(int argc, char **argv) {
                             (nir_time == 0 || nif_time == 0 ||
                             src_time > nir_time || src_time > nif_time);
 
-        for (int d = 0; d < m->ndeps; d++) {
-            time_t dep_nif = file_mtime(modules[m->deps[d]].nif_path);
+        for (int d = 0; d < m->deps.len; d++) {
+            time_t dep_nif =
+                file_mtime(modules.items[m->deps.items[d]].nif_path);
             if (dep_nif > nir_time)
                 m->needs_compile = true;
         }
@@ -408,25 +416,26 @@ int main(int argc, char **argv) {
     char nib_tool[256];
     tool_path("nib", nib_tool, sizeof(nib_tool));
 
-    for (int i = 0; i < nbuild; i++) {
-        module_t *m = &modules[build_order[i]];
+    for (int i = 0; i < build_order.len; i++) {
+        module_t *m = &modules.items[build_order.items[i]];
         if (!m->needs_compile) {
             fprintf(stderr, "  [skip] %s (up to date)\n", m->nib_path);
             continue;
         }
 
-        char *av[MAX_ARGV];
-        int ac = 0;
-        av[ac++] = nib_tool;
-        av[ac++] = m->nib_path;
-        for (int j = 0; j < nib_nextra; j++)
-            av[ac++] = nib_extra[j];
-        av[ac] = NULL;
+        str_vec_t av;
+        NIB_VEC_INIT(&av);
+        *NIB_VEC_PUSH(&av, "nib argv") = nib_tool;
+        *NIB_VEC_PUSH(&av, "nib argv") = m->nib_path;
+        for (int j = 0; j < nib_extra.len; j++)
+            *NIB_VEC_PUSH(&av, "nib argv") = nib_extra.items[j];
+        *NIB_VEC_PUSH(&av, "nib argv") = NULL;
 
-        if (run_argv(av) != 0) {
+        if (run_argv(av.items) != 0) {
             fprintf(stderr, "error: compilation failed for '%s'\n", m->nib_path);
             errors++;
         }
+        NIB_VEC_FREE(&av);
     }
 
     if (errors > 0) return 1;
@@ -437,40 +446,43 @@ int main(int argc, char **argv) {
     char asm_path[256];
     replace_ext(root, ".asm", asm_path, sizeof(asm_path));
 
-    char *bav[MAX_ARGV];
-    int bac = 0;
-    bav[bac++] = bind_tool;
-    for (int i = 0; i < nbuild; i++)
-        bav[bac++] = modules[build_order[i]].nir_path;
-    for (int j = 0; j < bind_nextra; j++)
-        bav[bac++] = bind_extra[j];
-    bav[bac++] = "-o";
-    bav[bac++] = asm_path;
-    bav[bac] = NULL;
+    str_vec_t bav;
+    NIB_VEC_INIT(&bav);
+    *NIB_VEC_PUSH(&bav, "bind argv") = bind_tool;
+    for (int i = 0; i < build_order.len; i++)
+        *NIB_VEC_PUSH(&bav, "bind argv") =
+            modules.items[build_order.items[i]].nir_path;
+    for (int j = 0; j < bind_extra.len; j++)
+        *NIB_VEC_PUSH(&bav, "bind argv") = bind_extra.items[j];
+    *NIB_VEC_PUSH(&bav, "bind argv") = "-o";
+    *NIB_VEC_PUSH(&bav, "bind argv") = asm_path;
+    *NIB_VEC_PUSH(&bav, "bind argv") = NULL;
 
-    if (run_argv(bav) != 0) {
+    if (run_argv(bav.items) != 0) {
         fprintf(stderr, "error: binding failed\n");
         return 1;
     }
+    NIB_VEC_FREE(&bav);
 
     /* Phase 3: Assemble */
     char asm_tool[256];
     tool_path("nibasm", asm_tool, sizeof(asm_tool));
 
-    char *aav[MAX_ARGV];
-    int aac = 0;
-    aav[aac++] = asm_tool;
-    aav[aac++] = asm_path;
-    aav[aac++] = "-o";
-    aav[aac++] = (char *)outbin;
-    for (int j = 0; j < asm_nextra; j++)
-        aav[aac++] = asm_extra[j];
-    aav[aac] = NULL;
+    str_vec_t aav;
+    NIB_VEC_INIT(&aav);
+    *NIB_VEC_PUSH(&aav, "asm argv") = asm_tool;
+    *NIB_VEC_PUSH(&aav, "asm argv") = asm_path;
+    *NIB_VEC_PUSH(&aav, "asm argv") = "-o";
+    *NIB_VEC_PUSH(&aav, "asm argv") = (char *)outbin;
+    for (int j = 0; j < asm_extra.len; j++)
+        *NIB_VEC_PUSH(&aav, "asm argv") = asm_extra.items[j];
+    *NIB_VEC_PUSH(&aav, "asm argv") = NULL;
 
-    if (run_argv(aav) != 0) {
+    if (run_argv(aav.items) != 0) {
         fprintf(stderr, "error: assembly failed\n");
         return 1;
     }
+    NIB_VEC_FREE(&aav);
 
     fprintf(stderr, "Build complete: %s\n", outbin);
     return 0;
