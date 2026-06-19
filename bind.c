@@ -3290,6 +3290,52 @@ static int get_vreg_pool(func_t *fn, int v, bool bp_available, int *pool) {
     return n;
 }
 
+static bool preg_in_pool(int preg, int *pool, int psz) {
+    for (int r = 0; r < psz; r++)
+        if (pool[r] == preg)
+            return true;
+    return false;
+}
+
+static bool color_conflicts(func_t *fn, int v, int preg) {
+    int nv = fn->nvregs;
+    for (int w = 0; w < VREG_WORDS; w++) {
+        uint64_t bits = fn->igraph[v][w];
+        while (bits) {
+            int nb = w * 64 + __builtin_ctzll(bits);
+            if (nb < nv && fn->vregs[nb].assigned != PREG_NONE &&
+                (fn->vregs[nb].assigned == preg ||
+                 pregs_alias(fn->vregs[nb].assigned, preg)))
+                return true;
+            bits &= bits - 1;
+        }
+    }
+    return false;
+}
+
+static int color_speed_score(func_t *fn, int v, int preg, int pool_index) {
+    int score = -pool_index;
+    if (fn->vregs[v].prefer == preg)
+        score += 10000;
+    return score;
+}
+
+static int choose_color(func_t *fn, int v, int *pool, int psz) {
+    int best = PREG_NONE;
+    int best_score = INT_MIN;
+    for (int r = 0; r < psz; r++) {
+        int preg = pool[r];
+        if (color_conflicts(fn, v, preg))
+            continue;
+        int score = color_speed_score(fn, v, preg, r);
+        if (score > best_score) {
+            best = preg;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
 /* Chaitin-Briggs register allocation using the interference graph.
  *
  * 1. Pre-color: assign vregs with preferences (params, propagated)
@@ -3438,51 +3484,19 @@ static void allocate_registers(func_t *fn, bool bp_available) {
             int preg = fn->vregs[v].prefer;
             if (!bp_available && preg == PREG_BP)
                 goto skip_preferred_color;
-            bool ok = true;
-            for (int w = 0; w < VREG_WORDS && ok; w++) {
-                uint64_t bits = fn->igraph[v][w];
-                while (bits) {
-                    int nb = w * 64 + __builtin_ctzll(bits);
-                    if (nb < nv && fn->vregs[nb].assigned != PREG_NONE &&
-                        (fn->vregs[nb].assigned == preg ||
-                         pregs_alias(fn->vregs[nb].assigned, preg)))
-                        ok = false;
-                    bits &= bits - 1;
-                }
-            }
-            if (ok) {
-                /* Verify it's in the pool */
-                for (int r = 0; r < psz; r++) {
-                    if (pool[r] == preg) {
-                        fn->vregs[v].assigned = preg;
-                        colored = true;
-                        break;
-                    }
-                }
+            if (preg_in_pool(preg, pool, psz) &&
+                !color_conflicts(fn, v, preg)) {
+                fn->vregs[v].assigned = preg;
+                colored = true;
             }
         }
 skip_preferred_color:
 
         if (!colored) {
-            for (int r = 0; r < psz; r++) {
-                int preg = pool[r];
-                bool conflict = false;
-                for (int w = 0; w < VREG_WORDS && !conflict; w++) {
-                    uint64_t bits = fn->igraph[v][w];
-                    while (bits) {
-                        int nb = w * 64 + __builtin_ctzll(bits);
-                        if (nb < nv && fn->vregs[nb].assigned != PREG_NONE &&
-                            (fn->vregs[nb].assigned == preg ||
-                             pregs_alias(fn->vregs[nb].assigned, preg)))
-                            { conflict = true; break; }
-                        bits &= bits - 1;
-                    }
-                }
-                if (!conflict) {
-                    fn->vregs[v].assigned = preg;
-                    colored = true;
-                    break;
-                }
+            int preg = choose_color(fn, v, pool, psz);
+            if (preg != PREG_NONE) {
+                fn->vregs[v].assigned = preg;
+                colored = true;
             }
         }
 
