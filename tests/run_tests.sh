@@ -1312,6 +1312,119 @@ else
     fail "mem-disp-fold" "$(./nibbind "$TEST_TMPDIR"/t_mem_disp_fold.nir -o "$TEST_TMPDIR"/t_mem_disp_fold.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_mem_disp_tail_pressure.nir <<'NIR'
+; Binder regression: folded dst+1 addressing in a shifted tail loop
+; should not let short byte temporaries grab the best word registers
+; before long-lived row/index values are colored.
+.fn mem_disp_tail_pressure
+.param %0, seg, "src_seg", register, pin=ES
+.param %1, u16, "start_src_row"
+.param %2, u16, "src_stride", stack
+.param %3, u8, "tail_bits", stack
+.param %4, u8, "height", stack
+.param %5, u16, "start_dst_row"
+    mov %6, %1
+    mov %7, %5
+    mov %8, %4
+.vreg %8, u8
+row_loop:
+    cmp.eq %9, %8, 0
+    jz %9, body
+    ret
+body:
+    mov %10, %6
+    mov %11, %7
+tail:
+    mov %13, 255
+.vreg %13, u8, const
+    mov %14, 8
+.vreg %14, u8, const
+    sub %15, %14, %3
+.vreg %15, u8
+    shl %16, %13, %15
+.vreg %16, u8
+    mov %12, %16
+.vreg %12, u8, const
+    shr %18, %12, 1
+.vreg %18, u8
+    mov %17, %18
+.vreg %17, u8, const
+    shl %20, %12, 7
+.vreg %20, u8
+    mov %19, %20
+.vreg %19, u8, const
+    loadmem %22, %10, ES
+.vreg %22, u8
+    and %23, %22, %12
+.vreg %23, u8
+    mov %21, %23
+.vreg %21, u8, const
+    shr %25, %21, 1
+.vreg %25, u8
+    mov %24, %25
+.vreg %24, u8, const
+    shl %27, %21, 7
+.vreg %27, u8
+    mov %26, %27
+.vreg %26, u8, const
+    loadmem %28, %11
+.vreg %28, u8
+    not %29, %17
+.vreg %29, u8
+    and %30, %28, %29
+.vreg %30, u8
+    or %31, %30, %24
+.vreg %31, u8
+    storemem %11, %31
+    add %33, %11, 1
+    loadmem %32, %33
+.vreg %32, u8
+    not %34, %19
+.vreg %34, u8
+    and %35, %32, %34
+.vreg %35, u8
+    or %36, %35, %26
+.vreg %36, u8
+    add %37, %11, 1
+    storemem %37, %36
+next_row:
+    add %38, %6, %2
+    mov %6, %38
+    add %39, %7, 64
+    mov %7, %39
+    sub %40, %8, 1
+.vreg %40, u8
+    mov %8, %40
+    jmp row_loop
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_mem_disp_tail_pressure.txt \
+       --pressure-fn mem_disp_tail_pressure \
+       "$TEST_TMPDIR"/t_mem_disp_tail_pressure.nir \
+       -o "$TEST_TMPDIR"/t_mem_disp_tail_pressure.asm >/dev/null 2>&1; then
+    tail_window=$(
+        sed -n '/mem_disp_tail_pressure_tail:/,/mem_disp_tail_pressure_next_row:/p' \
+            "$TEST_TMPDIR"/t_mem_disp_tail_pressure.asm
+    )
+    if ./nibasm "$TEST_TMPDIR"/t_mem_disp_tail_pressure.asm \
+           -o "$TEST_TMPDIR"/t_mem_disp_tail_pressure.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$tail_window" | grep -Eq '\[(BX|SI|DI)\+1\]' &&
+       grep -Eq 'summary: .*spills=[012]' \
+           "$TEST_TMPDIR"/t_mem_disp_tail_pressure.txt &&
+       ! grep -q 'sub sp, 10' "$TEST_TMPDIR"/t_mem_disp_tail_pressure.asm; then
+        pass "mem-disp-tail-pressure: folded tail keeps spill frame small"
+    else
+        fail "mem-disp-tail-pressure" "folded tail grew spill pressure"
+    fi
+else
+    fail "mem-disp-tail-pressure" "$(
+        ./nibbind --pressure-report "$TEST_TMPDIR"/t_mem_disp_tail_pressure.txt \
+            --pressure-fn mem_disp_tail_pressure \
+            "$TEST_TMPDIR"/t_mem_disp_tail_pressure.nir \
+            -o "$TEST_TMPDIR"/t_mem_disp_tail_pressure.asm 2>&1 | tail -1
+    )"
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)

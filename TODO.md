@@ -10,6 +10,8 @@
 - Binder allocator next pass:
   - Use the reports to target high-pressure Serif functions such as RTC
     read/write paths and framebuffer blits before changing heuristics.
+  - Replace use-count spill-cost proxies with V20 clock-cost estimates
+    for rematerialization, reload/store, push/pop, and scratch routes.
 
 ## Nice to have
 - Struct array type syntax (`struct Name[N]` in generic contexts)

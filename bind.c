@@ -4424,14 +4424,30 @@ static int byte_interference_count(func_t *fn, int v) {
     return count;
 }
 
+static bool vreg_has_mem_disp_use(func_t *fn, int v) {
+    if (!fn || v < 0)
+        return false;
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (!ins->has_mem_disp)
+            continue;
+        if (ins->op == IR_LOADMEM && ins->src1 == v)
+            return true;
+        if (ins->op == IR_STOREMEM && ins->dst == v)
+            return true;
+    }
+    return false;
+}
+
 static int color_speed_score(func_t *fn, int v, int preg, int pool_index) {
     int score = -pool_index;
     if (fn->vregs[v].prefer == preg)
         score += 10000;
     score += fn->vregs[v].affinity[preg] * 100;
     if (!fn->vregs[v].is_byte && !fn->vregs[v].is_seg &&
-        !fn->vregs[v].needs_addressable && !fn->vregs[v].needs_base &&
-        !fn->vregs[v].needs_index && !fn->vregs[v].needs_cl) {
+        (!fn->vregs[v].needs_addressable || vreg_has_mem_disp_use(fn, v)) &&
+        !fn->vregs[v].needs_base && !fn->vregs[v].needs_index &&
+        !fn->vregs[v].needs_cl) {
         int byte_edges = byte_interference_count(fn, v);
         if (byte_edges > 0) {
             if (preg >= PREG_AX && preg <= PREG_BX)
@@ -4467,7 +4483,8 @@ static int spill_cost(func_t *fn, int v) {
     int cost = uses * 100;
     if (fn->vregs[v].in_loop)
         cost *= 10;
-    if (fn->vregs[v].is_const)
+    if (fn->vregs[v].is_const &&
+        !(fn->vregs[v].is_byte && fn->vregs[v].in_loop))
         cost /= 4;
     if (fn->vregs[v].fixed)
         cost += 10000;
@@ -4573,7 +4590,12 @@ static void allocate_registers(func_t *fn, bool bp_available) {
     while (remaining > 0) {
         bool progress = false;
 
-        /* Find a node with effective degree < pool_size */
+        /* Find the cheapest node with effective degree < pool_size.
+         * The select phase pops this stack in reverse, so pushing cheap
+         * trivially colorable nodes first leaves expensive long-lived
+         * nodes to choose colors before short temporaries grab them. */
+        int best_simplify = -1;
+        int best_simplify_cost = INT_MAX;
         for (int i = 0; i < nv; i++) {
             if (removed[i]) continue;
             int pool[16]; int psz = get_vreg_pool(fn, i, bp_available, pool);
@@ -4597,11 +4619,19 @@ static void allocate_registers(func_t *fn, bool bp_available) {
             }
 
             if (active_deg < psz) {
-                stack[sp++] = i;
-                removed[i] = true;
-                remaining--;
-                progress = true;
+                int cost = spill_cost(fn, i);
+                if (cost < best_simplify_cost) {
+                    best_simplify = i;
+                    best_simplify_cost = cost;
+                }
             }
+        }
+
+        if (best_simplify >= 0) {
+            stack[sp++] = best_simplify;
+            removed[best_simplify] = true;
+            remaining--;
+            progress = true;
         }
 
         if (!progress) {
