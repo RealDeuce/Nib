@@ -3,6 +3,7 @@
 # Reports pass/fail for each stage
 
 cd "$(dirname "$0")/.."
+REPO_DIR=$(pwd)
 
 TEST_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/nib-tests.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_TMPDIR"' EXIT HUP INT TERM
@@ -200,6 +201,73 @@ if ./nibasm "$TEST_TMPDIR"/bad_mov_width.asm -o "$TEST_TMPDIR"/bad_mov_width.bin
     fail "mov-width-reject" "assembler accepted MOV with mismatched register widths"
 else
     pass "mov-width-reject: mismatched register widths rejected"
+fi
+echo ""
+
+echo "--- Growable table checks ---"
+{
+    echo 'fn many_symbols() -> u16 {'
+    i=0
+    while [ "$i" -lt 300 ]; do
+        printf '    const u16 c%s = %s;\n' "$i" "$i"
+        i=$((i + 1))
+    done
+    echo '    return c299;'
+    echo '}'
+} > "$TEST_TMPDIR"/t_many_symbols.nib
+if ./nib "$TEST_TMPDIR"/t_many_symbols.nib >/dev/null 2>&1; then
+    pass "many-symbols: compiler scope grows past old table size"
+else
+    fail "many-symbols" "$(
+        ./nib "$TEST_TMPDIR"/t_many_symbols.nib 2>&1 | head -1
+    )"
+fi
+
+many_labels_asm="$TEST_TMPDIR"/many_labels.asm
+{
+    echo '    org 0'
+    i=0
+    while [ "$i" -lt 4200 ]; do
+        printf 'label_%s:\n    nop\n' "$i"
+        i=$((i + 1))
+    done
+} > "$many_labels_asm"
+if ./nibasm "$many_labels_asm" \
+     -o "$TEST_TMPDIR"/many_labels.bin \
+     -m "$TEST_TMPDIR"/many_labels.map >/dev/null 2>&1; then
+    if grep -q '^1067 code label_4199$' \
+         "$TEST_TMPDIR"/many_labels.map; then
+        pass "many-labels: assembler label table grows"
+    else
+        fail "many-labels" "last generated label missing from map"
+    fi
+else
+    fail "many-labels" "$(
+        ./nibasm "$many_labels_asm" \
+          -o "$TEST_TMPDIR"/many_labels.bin \
+          -m "$TEST_TMPDIR"/many_labels.map 2>&1 | head -1
+    )"
+fi
+
+many_modules_dir="$TEST_TMPDIR"/many_modules
+mkdir "$many_modules_dir"
+i=0
+while [ "$i" -lt 135 ]; do
+    next=$((i + 1))
+    f="$many_modules_dir/m${i}.nib"
+    if [ "$i" -lt 134 ]; then
+        printf 'use "m%s.nif";\nfn f%s() {}\n' "$next" "$i" > "$f"
+    else
+        printf 'fn f%s() {}\n' "$i" > "$f"
+    fi
+    i=$next
+done
+if (cd "$many_modules_dir" &&
+    "$REPO_DIR"/nibbuild -f -o many_modules.bin m0.nib) \
+     > "$TEST_TMPDIR"/many_modules_build.log 2>&1; then
+    pass "many-modules: nibbuild module table grows"
+else
+    fail "many-modules" "$(tail -1 "$TEST_TMPDIR"/many_modules_build.log)"
 fi
 echo ""
 

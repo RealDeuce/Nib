@@ -9,10 +9,10 @@
 - Peephole optimizer: post-binder pass to eliminate self-moves, fold mov+op sequences
 - Better error messages with source context
 - Binder: emit at() functions last to avoid org/position issues with subsequent code
-- Replace fixed-size compiler/binder tables with a generic growable
-  table/vector helper so capacity failures are rare, explicit, and
-  handled consistently across functions, globals, data blocks, externs,
-  use directives, labels, and fixup lists.
+- Replace remaining binder per-function fixed arrays with dynamic
+  storage: vregs, instructions, basic blocks, labels, resolved
+  instructions, function constants, ABI operand lists, and liveness /
+  interference bitsets.
 - Binder allocator next pass:
   - Use the reports to target high-pressure Serif functions such as RTC
     read/write paths and framebuffer blits before changing heuristics.

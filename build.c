@@ -131,11 +131,17 @@ static int find_module(const char *nib_path) {
 static int add_module(const char *nib_path);
 
 static void scan_uses(int mod_idx) {
-    module_t *m = &modules.items[mod_idx];
+    char nib_path[256];
+    char dir[256];
 
-    FILE *fp = fopen(m->nib_path, "r");
+    strncpy(nib_path, modules.items[mod_idx].nib_path, sizeof(nib_path) - 1);
+    nib_path[sizeof(nib_path) - 1] = '\0';
+    strncpy(dir, modules.items[mod_idx].dir, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+
+    FILE *fp = fopen(nib_path, "r");
     if (!fp) {
-        fprintf(stderr, "error: cannot open '%s'\n", m->nib_path);
+        fprintf(stderr, "error: cannot open '%s'\n", nib_path);
         return;
     }
 
@@ -161,7 +167,7 @@ static void scan_uses(int mod_idx) {
         replace_ext(nif_path, ".nib", nib_dep, sizeof(nib_dep));
 
         char resolved[256];
-        resolve_path(m->dir, nib_dep, resolved, sizeof(resolved));
+        resolve_path(dir, nib_dep, resolved, sizeof(resolved));
 
         struct stat st;
         if (stat(resolved, &st) < 0) {
@@ -174,7 +180,8 @@ static void scan_uses(int mod_idx) {
 
         int dep = add_module(resolved);
         if (dep >= 0)
-            *NIB_VEC_PUSH(&m->deps, "module dependencies") = dep;
+            *NIB_VEC_PUSH(&modules.items[mod_idx].deps,
+                          "module dependencies") = dep;
     }
 
     fclose(fp);
