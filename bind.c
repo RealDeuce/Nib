@@ -223,6 +223,7 @@ typedef struct {
     int     local_offset;      /* positive offset within the local area */
     bool    is_stack_home;     /* true if this vreg lives at positive BP offset */
     int     stack_offset;      /* positive BP offset for stack ABI homes */
+    int     affinity[NUM_PREGS]; /* speed hints from machine constraints */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
     /* Liveness */
@@ -3190,6 +3191,13 @@ static bool vregs_interfere(func_t *fn, int a, int b) {
     return vset_test(fn->igraph[a], b);
 }
 
+static void add_vreg_affinity(func_t *fn, int v, int preg, int weight) {
+    if (!fn || v < 0 || v >= fn->nvregs ||
+        preg < 0 || preg >= NUM_PREGS || weight <= 0)
+        return;
+    fn->vregs[v].affinity[preg] += weight;
+}
+
 /* ================================================================
  * Register allocation — graph coloring
  * ================================================================ */
@@ -3207,6 +3215,7 @@ static void scan_addressing_constraints(func_t *fn) {
             int preg = mc.hard_reg[h];
             if (v < 0 || v >= MAX_VREGS)
                 continue;
+            add_vreg_affinity(fn, v, preg, 10);
 
             if (ins->op == IR_ALU && !ins->has_imm &&
                 (strcmp(ins->name, "shl") == 0 ||
@@ -3243,6 +3252,8 @@ static void scan_addressing_constraints(func_t *fn) {
                 fn->vregs[v].needs_ds_addr = true;
             if (mc.addr_prefer[a] != PREG_NONE)
                 fn->vregs[v].prefer = mc.addr_prefer[a];
+            if (mc.addr_prefer[a] != PREG_NONE)
+                add_vreg_affinity(fn, v, mc.addr_prefer[a], 10);
         }
     }
     /* Propagate is_cs_ref through mov chains */
@@ -3317,6 +3328,7 @@ static int color_speed_score(func_t *fn, int v, int preg, int pool_index) {
     int score = -pool_index;
     if (fn->vregs[v].prefer == preg)
         score += 10000;
+    score += fn->vregs[v].affinity[preg] * 100;
     return score;
 }
 
