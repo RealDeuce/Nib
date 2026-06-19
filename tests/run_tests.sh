@@ -1084,6 +1084,39 @@ else
     fail "high-vregs" "$(./nibbind "$TEST_TMPDIR"/t_high_vregs.nir -o "$TEST_TMPDIR"/t_high_vregs.asm 2>&1 | tail -1)"
 fi
 
+many_fn_nir="$TEST_TMPDIR"/t_many_functions.nir
+{
+    i=0
+    while [ "$i" -lt 140 ]; do
+        printf '.fn filler_%s\n    ret\n.endfn\n\n' "$i"
+        i=$((i + 1))
+    done
+    cat <<'NIR'
+.fn late_reset, bare, at(0xFFFF:0x0000)
+    setflag IF, 0
+.endfn
+NIR
+} > "$many_fn_nir"
+if ./nibbind "$many_fn_nir" \
+     -o "$TEST_TMPDIR"/t_many_functions.asm >/dev/null 2>&1; then
+    if ./nibasm "$TEST_TMPDIR"/t_many_functions.asm \
+         -o "$TEST_TMPDIR"/t_many_functions.bin >/dev/null 2>&1 &&
+       grep -q '_late_reset:$' "$TEST_TMPDIR"/t_many_functions.asm &&
+       grep -q 'org 0xFFFF0 ; FFFF:0000' \
+         "$TEST_TMPDIR"/t_many_functions.asm &&
+       [ "$(wc -c < "$TEST_TMPDIR"/t_many_functions.bin |
+            tr -d ' ')" -gt 1048560 ]; then
+        pass "many-functions: late placed function emitted"
+    else
+        fail "many-functions" "late placed function missing"
+    fi
+else
+    fail "many-functions" "$(
+        ./nibbind "$many_fn_nir" \
+          -o "$TEST_TMPDIR"/t_many_functions.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_pressure_report.nir <<'NIR'
 .fn pressure_probe
 .returns u16

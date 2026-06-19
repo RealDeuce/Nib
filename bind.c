@@ -139,7 +139,7 @@ static int abi_type_words(const char *type) {
 #define MAX_VREGS    1024
 #define MAX_INSNS    4096
 #define MAX_BLOCKS   256
-#define MAX_FNS      128
+#define MAX_FNS      192
 #define MAX_LABELS   512
 #define MAX_RETURNS  8
 #define MAX_ABI_PARAMS 64
@@ -760,6 +760,10 @@ static void record_emit(int kind, int index) {
         emit_order[nemit_order].index = index;
         strncpy(emit_order[nemit_order].module, _cur_parse_module, 63);
         nemit_order++;
+    } else {
+        fprintf(stderr, "bind: too many top-level items (max %d)\n",
+                MAX_EMIT_ORDER);
+        bind_errors++;
     }
 }
 
@@ -1834,7 +1838,12 @@ static void parse_nir(const char *path) {
         if (!*p || *p == ';') continue;
 
         if (strncmp(p, ".fn ", 4) == 0) {
-            if (nfunctions >= MAX_FNS) break;
+            if (nfunctions >= MAX_FNS) {
+                fprintf(stderr, "%s: too many functions (max %d)\n",
+                        path, MAX_FNS);
+                bind_errors++;
+                break;
+            }
             func_t *fn = &functions[nfunctions++];
             memset(fn, 0, sizeof(*fn));
             fn->ret_pin = PREG_NONE;
