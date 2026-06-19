@@ -1425,6 +1425,69 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_shift_pair_rmw.nir <<'NIR'
+; Binder regression: shifted byte fragments feeding adjacent destination
+; bytes should stay paired in DL/DH and update memory in place.
+.fn shift_pair_rmw
+.param %0, seg, "src_seg", register, pin=ES
+.param %1, u16, "src", register, pin=BX
+.param %2, u16, "dst", register, pin=SI
+    loadmem %3, %1, ES
+.vreg %3, u8
+    mov %4, %3
+.vreg %4, u8, const
+    shr %5, %4, 1
+.vreg %5, u8
+    mov %6, %5
+.vreg %6, u8, const
+    shl %7, %4, 7
+.vreg %7, u8
+    mov %8, %7
+.vreg %8, u8, const
+    loadmem %9, %2
+.vreg %9, u8
+    and %10, %9, 128
+.vreg %10, u8
+    or %11, %10, %6
+.vreg %11, u8
+    storemem %2, %11
+    add %13, %2, 1
+    loadmem %12, %13
+.vreg %12, u8
+    and %14, %12, 127
+.vreg %14, u8
+    or %15, %14, %8
+.vreg %15, u8
+    add %16, %2, 1
+    storemem %16, %15
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_shift_pair_rmw.nir \
+       -o "$TEST_TMPDIR"/t_shift_pair_rmw.asm >/dev/null 2>&1; then
+    shift_pair_window=$(sed -n '/shift_pair_rmw_shift_pair_rmw:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_shift_pair_rmw.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_shift_pair_rmw.asm \
+           -o "$TEST_TMPDIR"/t_shift_pair_rmw.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'mov DL, [ES:BX]' &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'mov DH, DL' &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'shr DL, 1' &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'shl DH, 7' &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'and byte [SI], 128' &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'or byte [SI], DL' &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'and byte [SI+1], 127' &&
+       printf "%s\n" "$shift_pair_window" | grep -Fq 'or byte [SI+1], DH' &&
+       ! printf "%s\n" "$shift_pair_window" | grep -q '\[BP-'; then
+        pass "shift-pair-rmw: adjacent byte fragments stay in DX"
+    else
+        fail "shift-pair-rmw" "shift fragments still spill or avoid RMW"
+    fi
+else
+    fail "shift-pair-rmw" "$(
+        ./nibbind "$TEST_TMPDIR"/t_shift_pair_rmw.nir \
+            -o "$TEST_TMPDIR"/t_shift_pair_rmw.asm 2>&1 | tail -1
+    )"
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)

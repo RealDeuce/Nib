@@ -7703,6 +7703,286 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
         fprintf(out_asm, "    pop AX\n");
 }
 
+static bool ir_mov_vv(ir_insn_t *ins, int dst, int src) {
+    return ins->op == IR_MOV && !ins->has_imm && !ins->name[0] &&
+           ins->dst == dst && ins->src1 == src;
+}
+
+static bool ir_alu_imm(ir_insn_t *ins, const char *op, int dst, int src,
+                       int imm) {
+    return ins->op == IR_ALU && strcmp(ins->name, op) == 0 &&
+           ins->has_imm && ins->dst == dst && ins->src1 == src &&
+           ins->imm == imm;
+}
+
+static bool ir_alu_vv(ir_insn_t *ins, const char *op, int dst, int src1,
+                      int src2) {
+    return ins->op == IR_ALU && strcmp(ins->name, op) == 0 &&
+           !ins->has_imm && ins->dst == dst && ins->src1 == src1 &&
+           ins->src2 == src2;
+}
+
+static bool simple_mem_expr(func_t *fn, ir_insn_t *ins, int addr_vreg,
+                            bool explicit_seg, char *buf, size_t bufsz) {
+    if (addr_vreg < 0 || addr_vreg >= fn->nvregs)
+        return false;
+    if (is_spilled(fn, addr_vreg) || fn->vregs[addr_vreg].is_stack_home ||
+        fn->vregs[addr_vreg].is_local_slot)
+        return false;
+
+    int preg = fn->vregs[addr_vreg].assigned;
+    if (preg != PREG_BX && preg != PREG_BP &&
+        preg != PREG_SI && preg != PREG_DI)
+        return false;
+
+    const char *base = preg_name[preg];
+    const char *seg = "";
+    if (explicit_seg) {
+        if (ins->src2 >= 0)
+            return false;
+        if (ins->mem_seg == PREG_NONE)
+            seg = "ES:";
+        else if (ins->mem_seg >= PREG_ES && ins->mem_seg <= PREG_DS) {
+            static char segbuf[8];
+            snprintf(segbuf, sizeof(segbuf), "%s:", preg_name[ins->mem_seg]);
+            seg = segbuf;
+        } else {
+            return false;
+        }
+    } else {
+        seg = near_data_seg_prefix(fn, addr_vreg);
+    }
+
+    if (ins->has_mem_disp && ins->mem_disp != 0)
+        snprintf(buf, bufsz, "[%s%s%+d]", seg, base, ins->mem_disp);
+    else
+        snprintf(buf, bufsz, "[%s%s]", seg, base);
+    return true;
+}
+
+static bool preg_overlaps_pattern_except(func_t *fn, int preg, int start,
+                                         int end, int *except,
+                                         int nexcept) {
+    for (int v = 0; v < fn->nvregs; v++) {
+        bool skip = false;
+        for (int e = 0; e < nexcept; e++) {
+            if (except[e] == v) {
+                skip = true;
+                break;
+            }
+        }
+        if (skip)
+            continue;
+        int assigned = fn->vregs[v].assigned;
+        if (assigned == PREG_NONE || !pregs_alias(assigned, preg))
+            continue;
+        if (fn->vregs[v].def_pos <= end && fn->vregs[v].last_use >= start)
+            return true;
+    }
+    return false;
+}
+
+static int next_effective_insn(func_t *fn, int i) {
+    while (i < fn->ninsns) {
+        if (fn->insns[i].op != IR_NOP && fn->insns[i].op != IR_PREFER)
+            return i;
+        i++;
+    }
+    return -1;
+}
+
+static bool emit_shift_pair_rmw_pattern(func_t *fn, int i, int *skip_to) {
+    if (i < 0 || i >= fn->ninsns)
+        return false;
+
+    int idx[16] = {0};
+    int p = i;
+    for (int n = 0; n < 14; n++) {
+        p = next_effective_insn(fn, p);
+        if (p < 0)
+            return false;
+        idx[n] = p++;
+    }
+
+    ir_insn_t *load_src = &fn->insns[idx[0]];
+    ir_insn_t *copy_src = &fn->insns[idx[1]];
+    ir_insn_t *low_shift = &fn->insns[idx[2]];
+    ir_insn_t *copy_low = &fn->insns[idx[3]];
+    ir_insn_t *high_shift = &fn->insns[idx[4]];
+    ir_insn_t *copy_high = &fn->insns[idx[5]];
+    ir_insn_t *load_dst0 = &fn->insns[idx[6]];
+    ir_insn_t *mask_dst0 = &fn->insns[idx[7]];
+    ir_insn_t *or_dst0 = &fn->insns[idx[8]];
+    ir_insn_t *store_dst0 = &fn->insns[idx[9]];
+
+    if (load_src->op != IR_LOADMEM || load_src->name[0] ||
+        load_src->src2 >= 0 || !vreg_is_byte_value(fn, load_src->dst))
+        return false;
+    int src_addr = load_src->src1;
+    int src_load_v = load_src->dst;
+    int src_byte_v = copy_src->dst;
+    if (!ir_mov_vv(copy_src, src_byte_v, src_load_v) ||
+        !vreg_is_byte_value(fn, src_byte_v))
+        return false;
+    if (low_shift->op != IR_ALU || strcmp(low_shift->name, "shr") != 0 ||
+        !low_shift->has_imm || low_shift->src1 != src_byte_v ||
+        !vreg_is_byte_value(fn, low_shift->dst))
+        return false;
+    int low_tmp_v = low_shift->dst;
+    int low_frag_v = copy_low->dst;
+    if (!ir_mov_vv(copy_low, low_frag_v, low_tmp_v) ||
+        !vreg_is_byte_value(fn, low_frag_v))
+        return false;
+    if (high_shift->op != IR_ALU || strcmp(high_shift->name, "shl") != 0 ||
+        !high_shift->has_imm || high_shift->src1 != src_byte_v ||
+        !vreg_is_byte_value(fn, high_shift->dst))
+        return false;
+    if (low_shift->imm <= 0 || high_shift->imm <= 0 ||
+        low_shift->imm + high_shift->imm != 8)
+        return false;
+    int high_tmp_v = high_shift->dst;
+    int high_frag_v = copy_high->dst;
+    if (!ir_mov_vv(copy_high, high_frag_v, high_tmp_v) ||
+        !vreg_is_byte_value(fn, high_frag_v))
+        return false;
+
+    if (load_dst0->op != IR_LOADMEM || load_dst0->name[0] ||
+        load_dst0->src2 >= 0 || load_dst0->mem_seg != PREG_NONE ||
+        !vreg_is_byte_value(fn, load_dst0->dst))
+        return false;
+    int dst_addr = load_dst0->src1;
+    int dst0_load_v = load_dst0->dst;
+    int dst0_masked_v = mask_dst0->dst;
+    if (!ir_alu_imm(mask_dst0, "and", dst0_masked_v, dst0_load_v,
+                    mask_dst0->imm) ||
+        !vreg_is_byte_value(fn, dst0_masked_v))
+        return false;
+    int dst0_out_v = or_dst0->dst;
+    if (!ir_alu_vv(or_dst0, "or", dst0_out_v, dst0_masked_v, low_frag_v) ||
+        !vreg_is_byte_value(fn, dst0_out_v))
+        return false;
+    if (store_dst0->op != IR_STOREMEM || store_dst0->name[0] ||
+        store_dst0->dst != dst_addr || store_dst0->src1 != dst0_out_v ||
+        store_dst0->src2 >= 0 || store_dst0->mem_seg != PREG_NONE)
+        return false;
+
+    ir_insn_t *load_dst1, *mask_dst1, *or_dst1, *store_dst1;
+    int dst_plus1a = -1, dst_plus1b = -1, pattern_end = -1;
+    bool folded_dst1 =
+        fn->insns[idx[10]].op == IR_LOADMEM &&
+        fn->insns[idx[10]].src1 == dst_addr &&
+        fn->insns[idx[10]].src2 < 0 &&
+        fn->insns[idx[10]].mem_seg == PREG_NONE &&
+        fn->insns[idx[10]].has_mem_disp &&
+        fn->insns[idx[10]].mem_disp == 1;
+    if (folded_dst1) {
+        load_dst1 = &fn->insns[idx[10]];
+        mask_dst1 = &fn->insns[idx[11]];
+        or_dst1 = &fn->insns[idx[12]];
+        store_dst1 = &fn->insns[idx[13]];
+        pattern_end = idx[13];
+    } else {
+        for (int n = 14; n < 16; n++) {
+            p = next_effective_insn(fn, p);
+            if (p < 0)
+                return false;
+            idx[n] = p++;
+        }
+
+        ir_insn_t *add_dst1a = &fn->insns[idx[10]];
+        load_dst1 = &fn->insns[idx[11]];
+        mask_dst1 = &fn->insns[idx[12]];
+        or_dst1 = &fn->insns[idx[13]];
+        ir_insn_t *add_dst1b = &fn->insns[idx[14]];
+        store_dst1 = &fn->insns[idx[15]];
+        pattern_end = idx[15];
+
+        dst_plus1a = add_dst1a->dst;
+        if (!ir_alu_imm(add_dst1a, "add", dst_plus1a, dst_addr, 1))
+            return false;
+        dst_plus1b = add_dst1b->dst;
+        if (!ir_alu_imm(add_dst1b, "add", dst_plus1b, dst_addr, 1))
+            return false;
+    }
+
+    if (load_dst1->op != IR_LOADMEM || load_dst1->name[0] ||
+        load_dst1->src2 >= 0 ||
+        load_dst1->mem_seg != PREG_NONE ||
+        !vreg_is_byte_value(fn, load_dst1->dst))
+        return false;
+    if (folded_dst1) {
+        if (load_dst1->src1 != dst_addr || !load_dst1->has_mem_disp ||
+            load_dst1->mem_disp != 1)
+            return false;
+    } else if (load_dst1->src1 != dst_plus1a) {
+        return false;
+    }
+    int dst1_load_v = load_dst1->dst;
+    int dst1_masked_v = mask_dst1->dst;
+    if (!ir_alu_imm(mask_dst1, "and", dst1_masked_v, dst1_load_v,
+                    mask_dst1->imm) ||
+        !vreg_is_byte_value(fn, dst1_masked_v))
+        return false;
+    int dst1_out_v = or_dst1->dst;
+    if (!ir_alu_vv(or_dst1, "or", dst1_out_v, dst1_masked_v, high_frag_v) ||
+        !vreg_is_byte_value(fn, dst1_out_v))
+        return false;
+    if (store_dst1->op != IR_STOREMEM || store_dst1->name[0] ||
+        store_dst1->src1 != dst1_out_v ||
+        store_dst1->src2 >= 0 || store_dst1->mem_seg != PREG_NONE)
+        return false;
+    if (folded_dst1) {
+        if (store_dst1->dst != dst_addr || !store_dst1->has_mem_disp ||
+            store_dst1->mem_disp != 1)
+            return false;
+    } else if (store_dst1->dst != dst_plus1b) {
+        return false;
+    }
+
+    if (block_of(fn, idx[0]) != block_of(fn, pattern_end))
+        return false;
+    if (flags_live_after_insn(fn, pattern_end))
+        return false;
+
+    int except[] = {
+        src_load_v, src_byte_v, low_tmp_v, low_frag_v, high_tmp_v,
+        high_frag_v, dst0_load_v, dst0_masked_v, dst0_out_v,
+        dst_plus1a, dst1_load_v, dst1_masked_v, dst1_out_v, dst_plus1b
+    };
+    if (preg_overlaps_pattern_except(fn, PREG_DX, idx[0], pattern_end, except,
+                                     (int)(sizeof(except) / sizeof(except[0]))))
+        return false;
+
+    char src_mem[64], dst0_mem[64], dst1_mem[64];
+    if (!simple_mem_expr(fn, load_src, src_addr, true,
+                         src_mem, sizeof(src_mem)))
+        return false;
+    if (!simple_mem_expr(fn, load_dst0, dst_addr, false,
+                         dst0_mem, sizeof(dst0_mem)))
+        return false;
+
+    ir_insn_t dst1_mem_ins = *load_dst1;
+    if (!folded_dst1) {
+        dst1_mem_ins.src1 = dst_addr;
+        dst1_mem_ins.has_mem_disp = true;
+        dst1_mem_ins.mem_disp += 1;
+    }
+    if (!simple_mem_expr(fn, &dst1_mem_ins, dst_addr, false,
+                         dst1_mem, sizeof(dst1_mem)))
+        return false;
+
+    fprintf(out_asm, "    mov DL, %s\n", src_mem);
+    fprintf(out_asm, "    mov DH, DL\n");
+    fprintf(out_asm, "    shr DL, %d\n", low_shift->imm);
+    fprintf(out_asm, "    shl DH, %d\n", high_shift->imm);
+    fprintf(out_asm, "    and byte %s, %d\n", dst0_mem, mask_dst0->imm);
+    fprintf(out_asm, "    or byte %s, DL\n", dst0_mem);
+    fprintf(out_asm, "    and byte %s, %d\n", dst1_mem, mask_dst1->imm);
+    fprintf(out_asm, "    or byte %s, DH\n", dst1_mem);
+    *skip_to = pattern_end;
+    return true;
+}
+
 static void emit_function(func_t *fn) {
     const char *asm_name = fn_asm_name(fn);
     fprintf(out_asm, "\n; === %s ===\n", asm_name);
@@ -7790,6 +8070,7 @@ static void emit_function(func_t *fn) {
 
     /* Body — iterate resolved instruction stream */
     int last_dbg_line = 0;
+    int skip_ir_until = -1;
     for (unsigned ri = 0; ri < (unsigned)fn->nresolved; ri++) {
         /* Pre-formatted assembly from move insertion pass */
         if (fn->resolved[ri].kind == RINS_ASM) {
@@ -7798,6 +8079,8 @@ static void emit_function(func_t *fn) {
         }
 
         int i = fn->resolved[ri].ir_idx;
+        if (i <= skip_ir_until)
+            continue;
         ir_insn_t *ins = &fn->insns[i];
 
         /* Emit debug line comment when source line changes */
@@ -7806,7 +8089,10 @@ static void emit_function(func_t *fn) {
             last_dbg_line = ins->line;
         }
 
-            switch (ins->op) {
+        if (emit_shift_pair_rmw_pattern(fn, i, &skip_ir_until))
+            continue;
+
+        switch (ins->op) {
         case IR_PREFER:
         case IR_NOP:
             break;

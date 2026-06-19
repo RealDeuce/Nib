@@ -17,13 +17,13 @@
     - require loop back edges to preserve stack state,
     - allow balanced call argument pushes above cached values,
     - fall back to frame spills when states cannot be proven identical.
-  - Fix Serif shifted full-copy blit byte fragments without unsafe byte
-    stack-cache restores. The current hot case has the shifted low/high
-    fragments, source byte, and destination byte competing for `DX`
-    halves while all other word parents are live. A safe fix needs either
-    byte-op scheduling that keeps the fragments in `DL`/`DH` through the
-    two destination stores, or enough word-pressure reduction to free a
-    second byte parent for the fragment span.
+  - Generalize sibling-byte lifetime coalescing. The shifted full-copy
+    blit hot loop now has a targeted emission combine that keeps low/high
+    byte fragments in `DL`/`DH`, but the allocator should learn the
+    general case: when two overlapping byte vregs can occupy sibling
+    halves of one parent word, extend and spill them as one word lifetime.
+    This should reduce pressure in any byte-heavy code that naturally
+    produces paired halves.
   - Add byte stack-cache eligibility only after the planner can prove the
     parent word is free at the restore point and the use-site instruction
     does not need the sibling byte at the same time.
