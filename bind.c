@@ -526,32 +526,76 @@ static void mark_vreg_clobber(func_t *fn, bool *clobbers, int vreg) {
     mark_preg_clobber(clobbers, fn->vregs[vreg].assigned);
 }
 
-static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
-                                  bool *clobbers) {
+typedef struct {
+    bool clobbers[NUM_PREGS];
+    int  hard_reg[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    int  hard_vreg[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    int  nhard;
+    int  addr_vreg[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    int  addr_prefer[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    bool needs_base[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    bool needs_index[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    bool needs_ds_addr[MAX_ABI_PARAMS + MAX_RETURNS + 4];
+    int  naddr;
+} machine_constraint_t;
+
+static void mc_add_hard(machine_constraint_t *mc, int vreg, int preg) {
+    if (!mc || vreg < 0 || preg == PREG_NONE)
+        return;
+    int cap = (int)(sizeof(mc->hard_vreg) / sizeof(mc->hard_vreg[0]));
+    if (mc->nhard >= cap)
+        return;
+    mc->hard_vreg[mc->nhard] = vreg;
+    mc->hard_reg[mc->nhard] = preg;
+    mc->nhard++;
+}
+
+static void mc_add_addr(machine_constraint_t *mc, int vreg, bool base,
+                        bool index, bool ds_addr, int prefer) {
+    if (!mc || vreg < 0)
+        return;
+    int cap = (int)(sizeof(mc->needs_base) / sizeof(mc->needs_base[0]));
+    if (mc->naddr >= cap)
+        return;
+    mc->addr_vreg[mc->naddr] = vreg;
+    mc->addr_prefer[mc->naddr] = prefer;
+    mc->needs_base[mc->naddr] = base;
+    mc->needs_index[mc->naddr] = index;
+    mc->needs_ds_addr[mc->naddr] = ds_addr;
+    mc->naddr++;
+}
+
+static void collect_machine_constraints(func_t *fn, ir_insn_t *ins,
+                                        machine_constraint_t *mc) {
+    memset(mc, 0, sizeof(*mc));
+    if (!fn || !ins)
+        return;
+
     if (insn_defines_dst(ins))
-        mark_vreg_clobber(fn, clobbers, ins->dst);
+        mark_vreg_clobber(fn, mc->clobbers, ins->dst);
 
     if (insn_clobbers_flags(fn, ins))
-        mark_preg_clobber(clobbers, PREG_FLAGS);
+        mark_preg_clobber(mc->clobbers, PREG_FLAGS);
 
-    collect_asm_clobbers(ins, clobbers);
+    collect_asm_clobbers(ins, mc->clobbers);
 
     if (ins->op == IR_MCALL) {
         for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++)
-            mark_vreg_clobber(fn, clobbers, ins->ret_vregs[j]);
+            mark_vreg_clobber(fn, mc->clobbers, ins->ret_vregs[j]);
     }
 
     if (ins->op == IR_ALU &&
         (strcmp(ins->name, "in") == 0 ||
          strcmp(ins->name, "inb") == 0)) {
-        mark_preg_clobber(clobbers,
+        mark_preg_clobber(mc->clobbers,
                           strcmp(ins->name, "inb") == 0 ? PREG_AL
                                                           : PREG_AX);
         if (!ins->has_imm) {
+            mc_add_hard(mc, ins->src1, PREG_DX);
             int port = (ins->src1 >= 0 && ins->src1 < fn->nvregs)
                 ? fn->vregs[ins->src1].assigned : PREG_NONE;
             if (port != PREG_DX)
-                mark_preg_clobber(clobbers, PREG_DX);
+                mark_preg_clobber(mc->clobbers, PREG_DX);
         }
     }
 
@@ -559,17 +603,61 @@ static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
         (strcmp(ins->name, "out") == 0 ||
          strcmp(ins->name, "outb") == 0)) {
         int acc = strcmp(ins->name, "outb") == 0 ? PREG_AL : PREG_AX;
+        mc_add_hard(mc, ins->src1, acc);
         int val = (ins->src1 >= 0 && ins->src1 < fn->nvregs)
             ? fn->vregs[ins->src1].assigned : PREG_NONE;
         if (val != acc)
-            mark_preg_clobber(clobbers, acc);
+            mark_preg_clobber(mc->clobbers, acc);
         if (!ins->has_imm) {
+            mc_add_hard(mc, ins->dst, PREG_DX);
             int port = (ins->dst >= 0 && ins->dst < fn->nvregs)
                 ? fn->vregs[ins->dst].assigned : PREG_NONE;
             if (port != PREG_DX)
-                mark_preg_clobber(clobbers, PREG_DX);
+                mark_preg_clobber(mc->clobbers, PREG_DX);
         }
     }
+
+    if (ins->op == IR_ALU && !ins->has_imm) {
+        const char *op = ins->name;
+        if (strcmp(op, "shl") == 0 || strcmp(op, "shr") == 0 ||
+            strcmp(op, "sar") == 0 || strcmp(op, "rol") == 0 ||
+            strcmp(op, "ror") == 0 || strcmp(op, "rcl") == 0 ||
+            strcmp(op, "rcr") == 0) {
+            mc_add_hard(mc, ins->src2, PREG_CL);
+        } else if (strcmp(op, "bext") == 0) {
+            mc_add_hard(mc, ins->dst, PREG_AX);
+            mc_add_addr(mc, ins->src1, false, true, false, PREG_SI);
+            mc_add_hard(mc, ins->src2, PREG_CL);
+            mc_add_hard(mc, ins->extra_args[0], PREG_DL);
+        } else if (strcmp(op, "bins") == 0) {
+            mc_add_addr(mc, ins->dst, false, true, false, PREG_DI);
+            mc_add_hard(mc, ins->src1, PREG_CL);
+            mc_add_hard(mc, ins->src2, PREG_DL);
+            mc_add_hard(mc, ins->extra_args[0], PREG_AX);
+        }
+    }
+
+    if (ins->op == IR_LOAD || ins->op == IR_STORE) {
+        mc_add_addr(mc, ins->src1, true, false, false, PREG_NONE);
+        if (ins->src2 >= 0)
+            mc_add_addr(mc, ins->src2, false, true, false, PREG_NONE);
+    }
+
+    if ((ins->op == IR_LOADMEM || ins->op == IR_STOREMEM) &&
+        ins->name[0] == '\0') {
+        int off_vreg = (ins->op == IR_LOADMEM) ? ins->src1 : ins->dst;
+        bool has_seg = (ins->src2 >= 0);
+        mc_add_addr(mc, off_vreg, false, false, !has_seg, PREG_NONE);
+    }
+}
+
+static void collect_insn_clobbers(func_t *fn, ir_insn_t *ins,
+                                  bool *clobbers) {
+    machine_constraint_t mc;
+    collect_machine_constraints(fn, ins, &mc);
+    for (int r = 0; r < NUM_PREGS; r++)
+        if (mc.clobbers[r])
+            clobbers[r] = true;
 }
 
 /* Resolved parameter register assignments per function */
@@ -3111,71 +3199,50 @@ static bool vregs_interfere(func_t *fn, int a, int b) {
 static void scan_addressing_constraints(func_t *fn) {
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
-        /* LOAD: %dst = %base[%idx] — base needs addressable reg */
-        /* Shift/rotate: count operand must be CL */
-        if (ins->op == IR_ALU && !ins->has_imm) {
-            const char *op = ins->name;
-            if (strcmp(op, "shl") == 0 || strcmp(op, "shr") == 0 ||
-                strcmp(op, "sar") == 0 || strcmp(op, "rol") == 0 ||
-                strcmp(op, "ror") == 0 || strcmp(op, "rcl") == 0 ||
-                strcmp(op, "rcr") == 0) {
-                if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
-                    fn->vregs[ins->src2].needs_cl = true;
-                    fn->vregs[ins->src2].is_byte = true;
-                }
-            } else if (strcmp(op, "bext") == 0) {
-                if (ins->dst >= 0 && ins->dst < MAX_VREGS)
-                    fn->vregs[ins->dst].prefer = PREG_AX;
-                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
-                    fn->vregs[ins->src1].needs_index = true;
-                    fn->vregs[ins->src1].prefer = PREG_SI;
-                }
-                if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
-                    fn->vregs[ins->src2].is_byte = true;
-                    fn->vregs[ins->src2].prefer = PREG_CL;
-                }
-                if (ins->extra_args[0] >= 0 && ins->extra_args[0] < MAX_VREGS) {
-                    fn->vregs[ins->extra_args[0]].is_byte = true;
-                    fn->vregs[ins->extra_args[0]].prefer = PREG_DL;
-                }
-            } else if (strcmp(op, "bins") == 0) {
-                if (ins->dst >= 0 && ins->dst < MAX_VREGS) {
-                    fn->vregs[ins->dst].needs_index = true;
-                    fn->vregs[ins->dst].prefer = PREG_DI;
-                }
-                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
-                    fn->vregs[ins->src1].is_byte = true;
-                    fn->vregs[ins->src1].prefer = PREG_CL;
-                }
-                if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
-                    fn->vregs[ins->src2].is_byte = true;
-                    fn->vregs[ins->src2].prefer = PREG_DL;
-                }
-                if (ins->extra_args[0] >= 0 && ins->extra_args[0] < MAX_VREGS)
-                    fn->vregs[ins->extra_args[0]].prefer = PREG_AX;
+        machine_constraint_t mc;
+        collect_machine_constraints(fn, ins, &mc);
+
+        for (int h = 0; h < mc.nhard; h++) {
+            int v = mc.hard_vreg[h];
+            int preg = mc.hard_reg[h];
+            if (v < 0 || v >= MAX_VREGS)
+                continue;
+
+            if (ins->op == IR_ALU && !ins->has_imm &&
+                (strcmp(ins->name, "shl") == 0 ||
+                 strcmp(ins->name, "shr") == 0 ||
+                 strcmp(ins->name, "sar") == 0 ||
+                 strcmp(ins->name, "rol") == 0 ||
+                 strcmp(ins->name, "ror") == 0 ||
+                 strcmp(ins->name, "rcl") == 0 ||
+                 strcmp(ins->name, "rcr") == 0) &&
+                v == ins->src2 && preg == PREG_CL) {
+                fn->vregs[v].needs_cl = true;
+                fn->vregs[v].is_byte = true;
+                continue;
+            }
+
+            if (strcmp(ins->name, "bext") == 0 ||
+                strcmp(ins->name, "bins") == 0) {
+                if (preg >= PREG_AL && preg <= PREG_BH)
+                    fn->vregs[v].is_byte = true;
+                fn->vregs[v].prefer = preg;
             }
         }
-        if (ins->op == IR_LOAD || ins->op == IR_STORE) {
-            if (ins->src1 >= 0 && ins->src1 < MAX_VREGS) {
-                fn->vregs[ins->src1].needs_addressable = true;
-                fn->vregs[ins->src1].needs_base = true;
-            }
-            if (ins->src2 >= 0 && ins->src2 < MAX_VREGS) {
-                fn->vregs[ins->src2].needs_addressable = true;
-                fn->vregs[ins->src2].needs_index = true;
-            }
-        }
-        /* Vreg-based loadmem/storemem: offset vreg needs addressable */
-        if ((ins->op == IR_LOADMEM || ins->op == IR_STOREMEM) &&
-            ins->name[0] == '\0') {
-            /* For loadmem: src1=off, src2=seg; for storemem: dst=off, src2=seg */
-            int off_vreg = (ins->op == IR_LOADMEM) ? ins->src1 : ins->dst;
-            bool has_seg = (ins->src2 >= 0);
-            if (off_vreg >= 0 && off_vreg < MAX_VREGS) {
-                fn->vregs[off_vreg].needs_addressable = true;
-                if (!has_seg)
-                    fn->vregs[off_vreg].needs_ds_addr = true;
-            }
+
+        for (int a = 0; a < mc.naddr; a++) {
+            int v = mc.addr_vreg[a];
+            if (v < 0 || v >= MAX_VREGS)
+                continue;
+            fn->vregs[v].needs_addressable = true;
+            if (mc.needs_base[a])
+                fn->vregs[v].needs_base = true;
+            if (mc.needs_index[a])
+                fn->vregs[v].needs_index = true;
+            if (mc.needs_ds_addr[a])
+                fn->vregs[v].needs_ds_addr = true;
+            if (mc.addr_prefer[a] != PREG_NONE)
+                fn->vregs[v].prefer = mc.addr_prefer[a];
         }
     }
     /* Propagate is_cs_ref through mov chains */
