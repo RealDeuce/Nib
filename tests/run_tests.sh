@@ -205,6 +205,45 @@ fi
 echo ""
 
 echo "--- Growable table checks ---"
+cat > "$TEST_TMPDIR"/t_many_defines.nib <<'NIB'
+when KEY_69 == "69" {
+    fn selected_define() -> u16 {
+        return 69;
+    }
+}
+when KEY_69 != "69" {
+    fn wrong_define() -> u16 {
+        return 0;
+    }
+}
+NIB
+if (
+    set --
+    i=0
+    while [ "$i" -lt 70 ]; do
+        set -- "$@" -D "KEY_${i}=${i}"
+        i=$((i + 1))
+    done
+    ./nib "$@" "$TEST_TMPDIR"/t_many_defines.nib
+) >/dev/null 2>&1; then
+    if grep -q '^\.fn selected_define' "$TEST_TMPDIR"/t_many_defines.nir &&
+       ! grep -q '^\.fn wrong_define' "$TEST_TMPDIR"/t_many_defines.nir; then
+        pass "many-defines: parser define table grows"
+    else
+        fail "many-defines" "wrong when branch selected"
+    fi
+else
+    fail "many-defines" "$(
+        set --
+        i=0
+        while [ "$i" -lt 70 ]; do
+            set -- "$@" -D "KEY_${i}=${i}"
+            i=$((i + 1))
+        done
+        ./nib "$@" "$TEST_TMPDIR"/t_many_defines.nib 2>&1 | head -1
+    )"
+fi
+
 {
     echo 'fn many_symbols() -> u16 {'
     i=0
@@ -337,6 +376,51 @@ else
         ./nibbind "$binder_grow_nir" \
           -o "$TEST_TMPDIR"/t_binder_grow.asm 2>&1 | tail -1
     )"
+fi
+
+printf '\220' > "$TEST_TMPDIR"/tiny.bin
+{
+    i=0
+    while [ "$i" -lt 5000 ]; do
+        printf '%05X equ E%s\n' "$i" "$i"
+        i=$((i + 1))
+    done
+} > "$TEST_TMPDIR"/many_map_entries.map
+if ./nibdis -m "$TEST_TMPDIR"/many_map_entries.map \
+     -b 1 "$TEST_TMPDIR"/tiny.bin \
+     > "$TEST_TMPDIR"/many_map_entries.dis 2>&1; then
+    if grep -q '^E4999.*01387h' "$TEST_TMPDIR"/many_map_entries.dis; then
+        pass "many-map-entries: disassembler map table grows"
+    else
+        fail "many-map-entries" "last EQU label missing from disassembly"
+    fi
+else
+    fail "many-map-entries" "$(head -1 "$TEST_TMPDIR"/many_map_entries.dis)"
+fi
+
+debug_bin="$TEST_TMPDIR"/many_debug.bin
+: > "$debug_bin"
+i=0
+while [ "$i" -lt 9000 ]; do
+    printf '\220' >> "$debug_bin"
+    i=$((i + 1))
+done
+{
+    i=0
+    while [ "$i" -lt 9000 ]; do
+        printf '%05X many.nib:%s\n' "$i" "$i"
+        i=$((i + 1))
+    done
+} > "$TEST_TMPDIR"/many_debug.dbg
+if ./nibdis -d "$TEST_TMPDIR"/many_debug.dbg -a 0x2134 -b 1 \
+     "$debug_bin" > "$TEST_TMPDIR"/many_debug.dis 2>&1; then
+    if grep -q 'many.nib:8500' "$TEST_TMPDIR"/many_debug.dis; then
+        pass "many-debug-entries: disassembler debug table grows"
+    else
+        fail "many-debug-entries" "late debug entry missing from disassembly"
+    fi
+else
+    fail "many-debug-entries" "$(head -1 "$TEST_TMPDIR"/many_debug.dis)"
 fi
 echo ""
 

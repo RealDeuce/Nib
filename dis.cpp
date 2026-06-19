@@ -9,13 +9,12 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include "table.h"
 
 /* Pull in the disassembler directly */
 #include "dis86.cpp"
 
 /* ---- Map file support ---- */
-
-#define MAX_MAP_ENTRIES 4096
 
 struct map_entry {
     uint32_t addr;
@@ -23,8 +22,23 @@ struct map_entry {
     char     name[64];
 };
 
-static map_entry map[MAX_MAP_ENTRIES];
-static int nmap = 0;
+typedef NIB_VEC(map_entry) map_entry_vec_t;
+static map_entry_vec_t map_vec;
+#define map (map_vec.items)
+#define nmap (map_vec.len)
+
+static map_entry *push_map_entry(void) {
+    if (map_vec.len >= map_vec.cap) {
+        size_t new_cap = nib_grow_capacity((size_t)map_vec.cap,
+                                           (size_t)map_vec.len + 1);
+        map_vec.items = static_cast<map_entry *>(
+            nib_xrealloc_array(map_vec.items, new_cap,
+                               sizeof(map_vec.items[0]),
+                               "disassembler map entries"));
+        map_vec.cap = (int)new_cap;
+    }
+    return &map_vec.items[map_vec.len++];
+}
 
 static void load_map(const char *path) {
     FILE *fp = fopen(path, "r");
@@ -32,12 +46,12 @@ static void load_map(const char *path) {
     char line[256];
     while (fgets(line, sizeof(line), fp)) {
         if (line[0] == '#' || line[0] == '\n') continue;
-        if (nmap >= MAX_MAP_ENTRIES) break;
-        map_entry *e = &map[nmap];
+        map_entry *e = push_map_entry();
         unsigned int addr;
         if (sscanf(line, "%x %7s %63s", &addr, e->type, e->name) >= 3) {
             e->addr = addr;
-            nmap++;
+        } else {
+            map_vec.len--;
         }
     }
     fclose(fp);
@@ -83,16 +97,29 @@ static bool in_data_region(uint32_t addr) {
 
 /* ---- Debug info support ---- */
 
-#define MAX_DBG_ENTRIES 8192
-
 struct dbg_entry {
     uint32_t addr;
     char     file[64];
     int      line;
 };
 
-static dbg_entry dbg[MAX_DBG_ENTRIES];
-static int ndbg = 0;
+typedef NIB_VEC(dbg_entry) dbg_entry_vec_t;
+static dbg_entry_vec_t dbg_vec;
+#define dbg (dbg_vec.items)
+#define ndbg (dbg_vec.len)
+
+static dbg_entry *push_dbg_entry(void) {
+    if (dbg_vec.len >= dbg_vec.cap) {
+        size_t new_cap = nib_grow_capacity((size_t)dbg_vec.cap,
+                                           (size_t)dbg_vec.len + 1);
+        dbg_vec.items = static_cast<dbg_entry *>(
+            nib_xrealloc_array(dbg_vec.items, new_cap,
+                               sizeof(dbg_vec.items[0]),
+                               "disassembler debug entries"));
+        dbg_vec.cap = (int)new_cap;
+    }
+    return &dbg_vec.items[dbg_vec.len++];
+}
 
 static void load_dbg(const char *path) {
     FILE *fp = fopen(path, "r");
@@ -100,12 +127,12 @@ static void load_dbg(const char *path) {
     char line[256];
     while (fgets(line, sizeof(line), fp)) {
         if (line[0] == '#' || line[0] == '\n') continue;
-        if (ndbg >= MAX_DBG_ENTRIES) break;
-        dbg_entry *e = &dbg[ndbg];
+        dbg_entry *e = push_dbg_entry();
         unsigned int addr;
         if (sscanf(line, "%x %63[^:]:%d", &addr, e->file, &e->line) >= 3) {
             e->addr = addr;
-            ndbg++;
+        } else {
+            dbg_vec.len--;
         }
     }
     fclose(fp);

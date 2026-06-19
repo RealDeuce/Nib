@@ -5,6 +5,7 @@
 #include <string.h>
 #include "ast.h"
 #include "compile.h"
+#include "table.h"
 
 extern int yylex(void);
 extern int yyline;
@@ -91,26 +92,29 @@ static void set_ds_policy_literal_expr(expr_t *seg) {
 }
 
 /* ---- Compile-time defines for `when` conditional compilation ---- */
-#define MAX_DEFINES 64
-static struct {
+typedef struct {
     char name[64];
     char value[256];
-} defines[MAX_DEFINES];
-static int ndefines = 0;
+} define_entry_t;
+
+typedef NIB_VEC(define_entry_t) define_vec_t;
+static define_vec_t defines_vec;
+#define defines (defines_vec.items)
+#define ndefines (defines_vec.len)
 
 static void add_define(const char *spec) {
-    if (ndefines >= MAX_DEFINES) return;
     const char *eq = strchr(spec, '=');
     if (!eq) {
         fprintf(stderr, "error: -D requires NAME=VALUE (got '%s')\n", spec);
         return;
     }
+    define_entry_t *d = NIB_VEC_PUSH(&defines_vec, "compile-time defines");
     int nlen = (int)(eq - spec);
     if (nlen > 63) nlen = 63;
-    memcpy(defines[ndefines].name, spec, nlen);
-    defines[ndefines].name[nlen] = '\0';
-    strncpy(defines[ndefines].value, eq + 1, 255);
-    ndefines++;
+    memcpy(d->name, spec, nlen);
+    d->name[nlen] = '\0';
+    strncpy(d->value, eq + 1, 255);
+    d->value[255] = '\0';
 }
 
 static bool when_eq(const char *name, const char *value) {
