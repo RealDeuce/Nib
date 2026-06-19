@@ -198,6 +198,7 @@ typedef struct {
     int     label_id;       /* resolved label index for jumps */
     int     line;           /* source line */
     char    src_file[64];   /* source filename for debug */
+    int     mem_seg;        /* explicit segment register for loadmem/storemem */
 } ir_insn_t;
 
 /* Virtual register info */
@@ -625,6 +626,7 @@ static ir_insn_t *fn_push_insn(func_t *fn) {
     ir_insn_t *ins = &fn->insns[fn->ninsns++];
     memset(ins, 0, sizeof(*ins));
     ins->dst = ins->src1 = ins->src2 = -1;
+    ins->mem_seg = PREG_NONE;
     return ins;
 }
 
@@ -1068,7 +1070,7 @@ static void collect_machine_constraints(func_t *fn, ir_insn_t *ins,
     if ((ins->op == IR_LOADMEM || ins->op == IR_STOREMEM) &&
         ins->name[0] == '\0') {
         int off_vreg = (ins->op == IR_LOADMEM) ? ins->src1 : ins->dst;
-        bool has_seg = (ins->src2 >= 0);
+        bool has_seg = (ins->src2 >= 0 || ins->mem_seg != PREG_NONE);
         mc_add_addr(mc, off_vreg, false, false, !has_seg, PREG_NONE);
     }
 }
@@ -1903,12 +1905,19 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             skip_comma(&p);
             p = skip_ws(p);
             if (*p == '%') {
-                /* Vreg-based form: loadmem %dst, %off [, %seg] */
+                /* Vreg-based form: loadmem %dst, %off [, %seg|SEG] */
                 ins->src1 = parse_vreg(p, &p);
                 skip_comma(&p);
                 p = skip_ws(p);
-                if (*p == '%')
+                if (*p == '%') {
                     ins->src2 = parse_vreg(p, &p);
+                } else if (isalpha((unsigned char)*p)) {
+                    char reg[16];
+                    p = read_word(p, reg, sizeof(reg));
+                    int preg = parse_preg(reg);
+                    if (preg >= PREG_ES && preg <= PREG_DS)
+                        ins->mem_seg = preg;
+                }
                 ins->name[0] = '\0'; /* no address text */
             } else {
                 /* Label/address form: loadmem %dst, [addr] */
@@ -1923,7 +1932,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 ins->dst = parse_vreg(p, &p);
                 skip_comma(&p);
                 p = skip_ws(p);
-                if (*p == '%') {
+                if (isalpha((unsigned char)*p)) {
+                    char reg[16];
+                    p = read_word(p, reg, sizeof(reg));
+                    int preg = parse_preg(reg);
+                    if (preg >= PREG_ES && preg <= PREG_DS)
+                        ins->mem_seg = preg;
+                    skip_comma(&p);
+                    ins->src1 = parse_vreg(p, &p); /* val */
+                } else if (*p == '%') {
                     int v1 = parse_vreg(p, &p);
                     skip_comma(&p);
                     p = skip_ws(p);
@@ -4084,7 +4101,7 @@ static void validate_ds_none(func_t *fn) {
                     free(local_addr);
                     return;
                 }
-            } else if (ins->src2 < 0 &&
+            } else if (ins->src2 < 0 && ins->mem_seg == PREG_NONE &&
                        !vreg_is_non_ds_addr(fn, ins->src1, local_addr)) {
                 fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
                         fn->name);
@@ -4102,7 +4119,7 @@ static void validate_ds_none(func_t *fn) {
                     free(local_addr);
                     return;
                 }
-            } else if (ins->src2 < 0 &&
+            } else if (ins->src2 < 0 && ins->mem_seg == PREG_NONE &&
                        !vreg_is_non_ds_addr(fn, ins->dst, local_addr)) {
                 fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
                         fn->name);
@@ -6404,6 +6421,12 @@ static const char *acc_name_for_width(bool is_byte) {
     return is_byte ? "AL" : "AX";
 }
 
+static const char *mem_seg_prefix_from_preg(int preg) {
+    if (preg >= PREG_ES && preg <= PREG_DS)
+        return preg_name[preg];
+    return "ES";
+}
+
 static int acc_preg_for_width(bool is_byte) {
     return is_byte ? PREG_AL : PREG_AX;
 }
@@ -7786,7 +7809,11 @@ static void emit_function(func_t *fn) {
                     }
                 } else {
                     /* Vreg-based: loadmem %dst, %off [, %seg] */
-                    bool has_seg = (ins->src2 >= 0);
+                    bool has_seg_vreg = (ins->src2 >= 0);
+                    bool has_lit_seg = (ins->mem_seg != PREG_NONE);
+                    bool has_seg = has_seg_vreg || has_lit_seg;
+                    const char *mem_seg = has_lit_seg
+                        ? mem_seg_prefix_from_preg(ins->mem_seg) : "ES";
                     const char *d = vreg_asm(fn, ins->dst);
                     const char *acc = acc_name_for_width(dst_byte);
                     /* Resolve offset register — if spilled, load into BX scratch */
@@ -7796,8 +7823,10 @@ static void emit_function(func_t *fn) {
                                                          PREG_BX,
                                                          &off_spilled);
                     if (has_seg) {
-                        /* Far: set up ES from seg vreg, then mov dst, [ES:off] */
-                        if (is_spilled(fn, ins->src2)) {
+                        /* Segment value vregs are materialized through ES.
+                         * Literal segment-register syntax uses that segment
+                         * directly. */
+                        if (has_seg_vreg && is_spilled(fn, ins->src2)) {
                             emit_push_scratch(fn, PREG_AX);
                             emit_spill_load_to_reg(fn, PREG_AX, ins->src2);
                             fprintf(out_asm, "    mov ES, AX\n");
@@ -7806,11 +7835,13 @@ static void emit_function(func_t *fn) {
                         if (is_spilled(fn, ins->dst)) {
                             bool preserve_acc =
                                 emit_push_acc_if_live(fn, i, dst_byte);
-                            fprintf(out_asm, "    mov %s, [ES:%s]\n", acc, off_reg);
+                            fprintf(out_asm, "    mov %s, [%s:%s]\n",
+                                    acc, mem_seg, off_reg);
                             emit_spill_store_from_reg(fn, ins->dst, acc);
                             emit_pop_acc_if_pushed_for_func(fn, preserve_acc);
                         } else {
-                            fprintf(out_asm, "    mov %s, [ES:%s]\n", d, off_reg);
+                            fprintf(out_asm, "    mov %s, [%s:%s]\n",
+                                    d, mem_seg, off_reg);
                         }
                     } else {
                         /* Near: mov dst, [off] or [CS:off] */
@@ -7847,7 +7878,11 @@ static void emit_function(func_t *fn) {
                     }
                 } else {
                     /* Vreg-based: storemem %off [, %seg], %val */
-                    bool has_seg = (ins->src2 >= 0);
+                    bool has_seg_vreg = (ins->src2 >= 0);
+                    bool has_lit_seg = (ins->mem_seg != PREG_NONE);
+                    bool has_seg = has_seg_vreg || has_lit_seg;
+                    const char *mem_seg = has_lit_seg
+                        ? mem_seg_prefix_from_preg(ins->mem_seg) : "ES";
                     bool val_byte = vreg_is_byte_value(fn, ins->src1);
                     /* Resolve offset register — if spilled, load into BX scratch */
                     const char *off_reg;
@@ -7870,13 +7905,14 @@ static void emit_function(func_t *fn) {
                         val_reg = vreg_asm(fn, ins->src1);
                     }
                     if (has_seg) {
-                        if (is_spilled(fn, ins->src2)) {
+                        if (has_seg_vreg && is_spilled(fn, ins->src2)) {
                             emit_push_scratch(fn, PREG_AX);
                             emit_spill_load_to_reg(fn, PREG_AX, ins->src2);
                             fprintf(out_asm, "    mov ES, AX\n");
                             emit_pop_scratch(fn, PREG_AX);
                         }
-                        fprintf(out_asm, "    mov [ES:%s], %s\n", off_reg, val_reg);
+                        fprintf(out_asm, "    mov [%s:%s], %s\n",
+                                mem_seg, off_reg, val_reg);
                     } else {
                         /* Near store, check CS: override */
                         bool use_es = emit_es_data_prefix(fn, ins->dst);

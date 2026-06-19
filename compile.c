@@ -1012,13 +1012,14 @@ static void format_direct_addr(expr_t *e, reg_id_t seg, char *buf, size_t bufsz)
         snprintf(buf, bufsz, "[%s]", inner);
 }
 
-static int emit_segment_value(reg_id_t seg_id) {
-    int tmp = alloc_vreg();
-    int seg = alloc_vreg();
-    fprintf(C.nir, "    mov %%%d, %s\n", tmp, sreg_name(seg_id));
-    fprintf(C.nir, ".vreg %%%d, seg\n", seg);
-    fprintf(C.nir, "    mov %%%d, %%%d\n", seg, tmp);
-    return seg;
+static void emit_loadmem_with_segment(int dst, int off, reg_id_t seg_id) {
+    fprintf(C.nir, "    loadmem %%%d, %%%d, %s\n",
+            dst, off, sreg_name(seg_id));
+}
+
+static void emit_storemem_with_segment(int off, reg_id_t seg_id, int val) {
+    fprintf(C.nir, "    storemem %%%d, %s, %%%d\n",
+            off, sreg_name(seg_id), val);
 }
 
 static bool is_contextual_mem_load_type(type_t *type);
@@ -1037,9 +1038,7 @@ static typed_vreg_t emit_deref_load(expr_t *e, type_t *target) {
     typed_vreg_t ptr = emit_expr_typed(e->u.deref.expr);
     if (ptr.type && ptr.type->kind == TYPE_FAR) {
         if (e->u.deref.seg != REG_NONE) {
-            int seg = emit_segment_value(e->u.deref.seg);
-            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
-                    dst, ptr.vreg, seg);
+            emit_loadmem_with_segment(dst, ptr.vreg, e->u.deref.seg);
         } else if (ptr.vreg_seg >= 0) {
             fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
                     dst, ptr.vreg, ptr.vreg_seg);
@@ -1060,9 +1059,7 @@ static typed_vreg_t emit_deref_load(expr_t *e, type_t *target) {
             fprintf(C.nir, ".vreg %%%d, u16, csref\n", ptr.vreg);
             fprintf(C.nir, "    loadmem %%%d, %%%d\n", dst, ptr.vreg);
         } else {
-            int seg = emit_segment_value(e->u.deref.seg);
-            fprintf(C.nir, "    loadmem %%%d, %%%d, %%%d\n",
-                    dst, ptr.vreg, seg);
+            emit_loadmem_with_segment(dst, ptr.vreg, e->u.deref.seg);
         }
     } else {
         cerr(e->line, "pointer dereference requires u16 or far32, got %s",
@@ -1123,9 +1120,7 @@ static void emit_deref_store(expr_t *e, typed_vreg_t val) {
     typed_vreg_t ptr = emit_expr_typed(e->u.deref.expr);
     if (ptr.type && ptr.type->kind == TYPE_FAR) {
         if (e->u.deref.seg != REG_NONE) {
-            int seg = emit_segment_value(e->u.deref.seg);
-            fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
-                    ptr.vreg, seg, val.vreg);
+            emit_storemem_with_segment(ptr.vreg, e->u.deref.seg, val.vreg);
         } else if (ptr.vreg_seg >= 0) {
             fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
                     ptr.vreg, ptr.vreg_seg, val.vreg);
@@ -1147,9 +1142,7 @@ static void emit_deref_store(expr_t *e, typed_vreg_t val) {
             fprintf(C.nir, ".vreg %%%d, u16, csref\n", ptr.vreg);
             fprintf(C.nir, "    storemem %%%d, %%%d\n", ptr.vreg, val.vreg);
         } else {
-            int seg = emit_segment_value(e->u.deref.seg);
-            fprintf(C.nir, "    storemem %%%d, %%%d, %%%d\n",
-                    ptr.vreg, seg, val.vreg);
+            emit_storemem_with_segment(ptr.vreg, e->u.deref.seg, val.vreg);
         }
     } else {
         cerr(e->line, "pointer dereference requires u16 or far32, got %s",

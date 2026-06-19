@@ -1590,9 +1590,7 @@ if [ -f "$TEST_TMPDIR"/t_expr_sites.asm ]; then
        printf "%s\n" "$expr_read_hw" | grep -q 'mov AL, \[BX+0x0003\]' &&
        printf "%s\n" "$expr_read_ptr" | grep -q 'add SI, BX' &&
        printf "%s\n" "$expr_read_ptr" | grep -q 'mov AL, \[SI\]' &&
-       printf "%s\n" "$expr_write_ss" | grep -q 'mov AX, SS' &&
-       printf "%s\n" "$expr_write_ss" | grep -q 'mov ES, AX' &&
-       printf "%s\n" "$expr_write_ss" | grep -q 'mov \[ES:SI\], CL' &&
+       printf "%s\n" "$expr_write_ss" | grep -q 'mov \[SS:.*\], CL' &&
        printf "%s\n" "$expr_loop" | grep -q 'loop t_expr_sites_loop_count_.L0'; then
         pass "expr-sites: static const expressions and pointer expressions"
     else
@@ -1615,13 +1613,18 @@ if [ -f "$TEST_TMPDIR"/t_mem_width.asm ]; then
 fi
 
 if [ -f tests/t_seg_param.nir ] && [ -f "$TEST_TMPDIR"/t_seg_param.asm ]; then
+    seg_param_read=$(sed -n '/t_seg_param_read_es:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_seg_param.asm)
     seg_param_call=$(sed -n '/t_seg_param_call_read_es:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_seg_param.asm)
     if grep -q '^\.param %[0-9][0-9]*, seg, "src_seg", register, pin=ES' tests/t_seg_param.nir &&
+       grep -q 'loadmem %[0-9][0-9]*, %[0-9][0-9]*, ES' tests/t_seg_param.nir &&
+       ! grep -q '^    mov %[0-9][0-9]*, ES$' tests/t_seg_param.nir &&
+       printf "%s\n" "$seg_param_read" | grep -q 'mov AL, \[ES:SI\]' &&
+       ! printf "%s\n" "$seg_param_read" | grep -q 'mov \[BP-' &&
        printf "%s\n" "$seg_param_call" | grep -q 'mov ES, AX' &&
        printf "%s\n" "$seg_param_call" | grep -q 'mov SI, 4'; then
-        pass "seg-param: seg in ES pins ABI segment parameter"
+        pass "seg-param: seg in ES pins ABI segment parameter without spills"
     else
-        fail "seg-param" "seg in ES did not pin/pass ES"
+        fail "seg-param" "seg in ES lowered through a spill or was not passed"
     fi
 fi
 
