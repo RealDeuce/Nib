@@ -138,11 +138,7 @@ static int abi_type_words(const char *type) {
  * IR representation
  * ================================================================ */
 
-#define MAX_VREGS    1024
-#define MAX_INSNS    4096
-#define MAX_BLOCKS   256
 #define MAX_FNS      192
-#define MAX_LABELS   512
 #define MAX_RETURNS  8
 #define MAX_ABI_PARAMS 64
 
@@ -234,46 +230,55 @@ typedef struct {
     bool    live;           /* currently live in analysis */
 } vreg_info_t;
 
-/* Basic block — CFG node for dataflow liveness */
-#define VREG_WORDS ((MAX_VREGS + 63) / 64)
-
 typedef struct {
     int      start, end;            /* insn index range [start, end) */
     int      succs[4];              /* successor block indices */
     int      nsuccs;
     int      preds[16];             /* predecessor block indices */
     int      npreds;
-    uint64_t live_in[VREG_WORDS];   /* vregs live at block entry */
-    uint64_t live_out[VREG_WORDS];  /* vregs live at block exit */
-    uint64_t defs[VREG_WORDS];     /* vregs defined in this block */
-    uint64_t uses[VREG_WORDS];     /* vregs used before def in this block */
+    uint64_t *live_in;              /* vregs live at block entry */
+    uint64_t *live_out;             /* vregs live at block exit */
+    uint64_t *defs;                 /* vregs defined in this block */
+    uint64_t *uses;                 /* vregs used before def in this block */
 } bblock_t;
 
 /* Bitset helpers for vreg sets */
 static inline void vset_set(uint64_t *s, int v)   { s[v >> 6] |= (1ULL << (v & 63)); }
 static inline void vset_clear(uint64_t *s, int v) { s[v >> 6] &= ~(1ULL << (v & 63)); }
 static inline bool vset_test(const uint64_t *s, int v) { return (s[v >> 6] >> (v & 63)) & 1; }
-static inline void vset_zero(uint64_t *s) { memset(s, 0, VREG_WORDS * sizeof(uint64_t)); }
-static inline void vset_or(uint64_t *dst, const uint64_t *src) {
-    for (int i = 0; i < VREG_WORDS; i++) dst[i] |= src[i];
+static inline void vset_zero(uint64_t *s, int nwords) { memset(s, 0, (size_t)nwords * sizeof(uint64_t)); }
+static inline void vset_or(uint64_t *dst, const uint64_t *src, int nwords) {
+    for (int i = 0; i < nwords; i++) dst[i] |= src[i];
 }
-static inline void vset_diff(uint64_t *dst, const uint64_t *a, const uint64_t *b) {
+static inline void vset_diff(uint64_t *dst, const uint64_t *a, const uint64_t *b, int nwords) {
     /* dst = a & ~b */
-    for (int i = 0; i < VREG_WORDS; i++) dst[i] = a[i] & ~b[i];
+    for (int i = 0; i < nwords; i++) dst[i] = a[i] & ~b[i];
 }
-static inline bool vset_equal(const uint64_t *a, const uint64_t *b) {
-    for (int i = 0; i < VREG_WORDS; i++) if (a[i] != b[i]) return false;
+static inline bool vset_equal(const uint64_t *a, const uint64_t *b, int nwords) {
+    for (int i = 0; i < nwords; i++) if (a[i] != b[i]) return false;
     return true;
 }
 
 /* Per-function constant pool entry */
-#define MAX_FN_CONSTS 64
 typedef struct {
     char label[32];
     char data[256];
     bool is_far_ref;
     char ref_name[64];
 } fn_const_t;
+
+typedef struct {
+    enum { RINS_IR, RINS_ASM } kind;
+    union {
+        int  ir_idx;        /* index into insns[] */
+        char asm_text[128]; /* pre-formatted assembly line */
+    };
+} resolved_insn_t;
+
+typedef struct {
+    char name[64];
+    int insn_idx;
+} fn_label_t;
 
 typedef enum {
     FIXUP_CALL_ARG,
@@ -329,11 +334,13 @@ typedef struct {
     char        ds_symbol[64];
     int         ds_literal;
 
-    ir_insn_t   insns[MAX_INSNS];
+    ir_insn_t  *insns;
     int         ninsns;
+    int         cap_insns;
 
-    vreg_info_t vregs[MAX_VREGS];
+    vreg_info_t *vregs;
     int         nvregs;
+    int         cap_vregs;
 
     int         nparams;
     char        param_names[MAX_ABI_PARAMS][64];
@@ -350,27 +357,24 @@ typedef struct {
     int         ret_pins[MAX_RETURNS];
     abi_place_t ret_places[MAX_RETURNS];
 
-    bblock_t    blocks[MAX_BLOCKS];
+    bblock_t   *blocks;
     int         nblocks;
+    int         cap_blocks;
+    int         vset_words;
 
     /* Interference graph: adj[v] is bitset of vregs that interfere with v */
-    uint64_t    igraph[MAX_VREGS][VREG_WORDS];
-    int         degree[MAX_VREGS]; /* number of neighbors */
+    uint64_t   *igraph;
+    int        *degree; /* number of neighbors */
 
     /* Resolved instruction stream (post-allocation, pre-emission) */
-#define MAX_RESOLVED 8192
-    struct {
-        enum { RINS_IR, RINS_ASM } kind;
-        union {
-            int  ir_idx;        /* index into insns[] */
-            char asm_text[128]; /* pre-formatted assembly line */
-        };
-    } resolved[MAX_RESOLVED];
+    resolved_insn_t *resolved;
     int nresolved;
+    int cap_resolved;
 
     /* Labels: name -> insn index */
-    struct { char name[64]; int insn_idx; } labels[MAX_LABELS];
+    fn_label_t *labels;
     int         nlabels;
+    int         cap_labels;
 
     /* Allocation state */
     bool        needs_frame;    /* BP reserved for frame pointer */
@@ -388,8 +392,9 @@ typedef struct {
     int         nfn_preserves;
 
     /* Per-function constant pool */
-    fn_const_t consts[MAX_FN_CONSTS];
+    fn_const_t *consts;
     int nconsts;
+    int cap_consts;
 } func_t;
 
 /* Extern function declarations */
@@ -446,6 +451,133 @@ static char *xstrdup_checked(const char *s) {
     char *p = nib_xmalloc(len, "string");
     memcpy(p, s, len);
     return p;
+}
+
+static void init_vreg_info(vreg_info_t *vr) {
+    memset(vr, 0, sizeof(*vr));
+    vr->prefer = PREG_NONE;
+    vr->assigned = PREG_NONE;
+    vr->spill_slot = -1;
+    vr->def_pos = -1;
+    vr->last_use = -1;
+}
+
+static void fn_ensure_vreg(func_t *fn, int v) {
+    if (!fn || v < 0)
+        return;
+    if (v >= fn->cap_vregs) {
+        int old_cap = fn->cap_vregs;
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_vregs,
+                                             (size_t)v + 1);
+        fn->vregs = nib_xrealloc_array(fn->vregs, (size_t)new_cap,
+                                       sizeof(fn->vregs[0]),
+                                       "function vregs");
+        fn->cap_vregs = new_cap;
+        for (int i = old_cap; i < new_cap; i++)
+            init_vreg_info(&fn->vregs[i]);
+    }
+    if (v >= fn->nvregs)
+        fn->nvregs = v + 1;
+}
+
+static ir_insn_t *fn_push_insn(func_t *fn) {
+    if (fn->ninsns >= fn->cap_insns) {
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_insns,
+                                             (size_t)fn->ninsns + 1);
+        fn->insns = nib_xrealloc_array(fn->insns, (size_t)new_cap,
+                                       sizeof(fn->insns[0]),
+                                       "function instructions");
+        fn->cap_insns = new_cap;
+    }
+    ir_insn_t *ins = &fn->insns[fn->ninsns++];
+    memset(ins, 0, sizeof(*ins));
+    ins->dst = ins->src1 = ins->src2 = -1;
+    for (int i = 0; i < MAX_ABI_PARAMS - 2; i++)
+        ins->extra_args[i] = -1;
+    for (int i = 0; i < MAX_RETURNS; i++)
+        ins->ret_vregs[i] = -1;
+    return ins;
+}
+
+static bblock_t *fn_push_block(func_t *fn) {
+    if (fn->nblocks >= fn->cap_blocks) {
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_blocks,
+                                             (size_t)fn->nblocks + 1);
+        fn->blocks = nib_xrealloc_array(fn->blocks, (size_t)new_cap,
+                                        sizeof(fn->blocks[0]),
+                                        "function blocks");
+        fn->cap_blocks = new_cap;
+    }
+    bblock_t *bb = &fn->blocks[fn->nblocks++];
+    memset(bb, 0, sizeof(*bb));
+    if (fn->vset_words > 0) {
+        bb->live_in = nib_xcalloc((size_t)fn->vset_words, sizeof(uint64_t),
+                                  "block live-in set");
+        bb->live_out = nib_xcalloc((size_t)fn->vset_words, sizeof(uint64_t),
+                                   "block live-out set");
+        bb->defs = nib_xcalloc((size_t)fn->vset_words, sizeof(uint64_t),
+                               "block def set");
+        bb->uses = nib_xcalloc((size_t)fn->vset_words, sizeof(uint64_t),
+                               "block use set");
+    }
+    return bb;
+}
+
+static void fn_prepare_vsets(func_t *fn) {
+    fn->vset_words = (fn->nvregs + 63) / 64;
+    if (fn->vset_words <= 0)
+        fn->vset_words = 1;
+    fn->igraph = nib_xcalloc((size_t)fn->nvregs * (size_t)fn->vset_words,
+                             sizeof(uint64_t), "interference graph");
+    fn->degree = nib_xcalloc((size_t)fn->nvregs, sizeof(int),
+                             "interference degrees");
+}
+
+static uint64_t *igraph_row(func_t *fn, int v) {
+    return fn->igraph + (size_t)v * (size_t)fn->vset_words;
+}
+
+static fn_const_t *fn_push_const(func_t *fn) {
+    if (fn->nconsts >= fn->cap_consts) {
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_consts,
+                                             (size_t)fn->nconsts + 1);
+        fn->consts = nib_xrealloc_array(fn->consts, (size_t)new_cap,
+                                        sizeof(fn->consts[0]),
+                                        "function constants");
+        fn->cap_consts = new_cap;
+    }
+    fn_const_t *c = &fn->consts[fn->nconsts++];
+    memset(c, 0, sizeof(*c));
+    return c;
+}
+
+static void fn_push_label(func_t *fn, const char *name, int insn_idx) {
+    if (fn->nlabels >= fn->cap_labels) {
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_labels,
+                                             (size_t)fn->nlabels + 1);
+        fn->labels = nib_xrealloc_array(fn->labels, (size_t)new_cap,
+                                        sizeof(fn->labels[0]),
+                                        "function labels");
+        fn->cap_labels = new_cap;
+    }
+    fn_label_t *label = &fn->labels[fn->nlabels++];
+    memset(label, 0, sizeof(*label));
+    strncpy(label->name, name, sizeof(label->name) - 1);
+    label->insn_idx = insn_idx;
+}
+
+static resolved_insn_t *fn_push_resolved(func_t *fn) {
+    if (fn->nresolved >= fn->cap_resolved) {
+        int new_cap = (int)nib_grow_capacity((size_t)fn->cap_resolved,
+                                             (size_t)fn->nresolved + 1);
+        fn->resolved = nib_xrealloc_array(fn->resolved, (size_t)new_cap,
+                                          sizeof(fn->resolved[0]),
+                                          "resolved instructions");
+        fn->cap_resolved = new_cap;
+    }
+    resolved_insn_t *r = &fn->resolved[fn->nresolved++];
+    memset(r, 0, sizeof(*r));
+    return r;
 }
 
 static bool insn_defines_dst(const ir_insn_t *ins) {
@@ -770,13 +902,13 @@ static void data_block_add_entry(data_block_t *db, const char *fmt, ...) {
 }
 
 static const char *vreg_data_label(func_t *fn, int v) {
-    if (v < 0 || v >= MAX_VREGS || fn->vregs[v].data_label[0] == '\0')
+    if (v < 0 || v >= fn->nvregs || fn->vregs[v].data_label[0] == '\0')
         return NULL;
     return fn->vregs[v].data_label;
 }
 
 static void set_vreg_data_label(func_t *fn, int v, const char *label) {
-    if (v < 0 || v >= MAX_VREGS || !label || !label[0])
+    if (v < 0 || v >= fn->nvregs || !label || !label[0])
         return;
     strncpy(fn->vregs[v].data_label, label, sizeof(fn->vregs[v].data_label) - 1);
     fn->vregs[v].data_label[sizeof(fn->vregs[v].data_label) - 1] = '\0';
@@ -1005,19 +1137,21 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 read_word(pin_ptr + 4, reg, sizeof(reg));
                 fn->param_pins[pidx].preg = parse_preg(reg);
                 fn->param_places[pidx] = ABI_PLACE_REGISTER;
-                if (v < MAX_VREGS && fn->param_pins[pidx].preg != PREG_NONE)
+                fn_ensure_vreg(fn, v);
+                if (fn->param_pins[pidx].preg != PREG_NONE)
                     fn->vregs[v].prefer = fn->param_pins[pidx].preg;
             } else if (in_ptr && pidx < MAX_ABI_PARAMS) {
                 char reg[16];
                 read_word(in_ptr + 4, reg, sizeof(reg));
                 fn->param_pins[pidx].preg = parse_preg(reg);
                 fn->param_places[pidx] = ABI_PLACE_REGISTER;
-                if (v < MAX_VREGS && fn->param_pins[pidx].preg != PREG_NONE)
+                fn_ensure_vreg(fn, v);
+                if (fn->param_pins[pidx].preg != PREG_NONE)
                     fn->vregs[v].prefer = fn->param_pins[pidx].preg;
             }
-            if (v >= fn->nvregs) fn->nvregs = v + 1;
+            fn_ensure_vreg(fn, v);
             /* Set type info */
-            if (v < MAX_VREGS) {
+            if (v >= 0) {
                 fn->vregs[v].is_byte = (strcmp(type, "u8") == 0);
                 fn->vregs[v].is_seg = (strcmp(type, "seg") == 0);
             }
@@ -1059,9 +1193,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (strncmp(p, ".const ", 7) == 0) {
             /* .const _C0, "Hello" or .const _C1, far 0xF000:0x0100 */
             p += 7;
-            if (fn->nconsts < MAX_FN_CONSTS) {
-                fn_const_t *c = &fn->consts[fn->nconsts++];
-                memset(c, 0, sizeof(*c));
+            {
+                fn_const_t *c = fn_push_const(fn);
                 char raw_label[32];
                 p = read_word(p, raw_label, sizeof(raw_label));
                 /* Prefix with function's asm name to avoid cross-module collisions */
@@ -1127,16 +1260,15 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             char reg[16];
             read_word(p, reg, sizeof(reg));
             int preg = parse_preg(reg);
-            if (v >= 0 && v < MAX_VREGS) {
+            fn_ensure_vreg(fn, v);
+            if (v >= 0) {
                 fn->vregs[v].prefer = preg;
                 /* Mark segment register vregs */
                 if (preg >= PREG_ES && preg <= PREG_DS)
                     fn->vregs[v].is_seg = true;
             }
-            if (v >= fn->nvregs) fn->nvregs = v + 1;
             /* Also add as IR_PREFER so we track it */
-            ir_insn_t *ins = &fn->insns[fn->ninsns++];
-            memset(ins, 0, sizeof(*ins));
+            ir_insn_t *ins = fn_push_insn(fn);
             ins->op = IR_PREFER;
             ins->dst = v;
             ins->src1 = ins->src2 = -1;
@@ -1147,8 +1279,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (strncmp(p, ".vreg", 5) == 0) {
             p += 5;
             int v = parse_vreg(p, &p);
-            if (v >= fn->nvregs) fn->nvregs = v + 1;
-            if (v >= 0 && v < MAX_VREGS) {
+            fn_ensure_vreg(fn, v);
+            if (v >= 0) {
                 /* Parse type and flags: .vreg %N, type [, flag...] */
                 skip_comma(&p);
                 char tok[16];
@@ -1187,8 +1319,8 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             skip_comma(&p);
             p = skip_ws(p);
             int sz = (int)strtol(p, (char **)&p, 0);
-            if (v >= fn->nvregs) fn->nvregs = v + 1;
-            if (v >= 0 && v < MAX_VREGS) {
+            fn_ensure_vreg(fn, v);
+            if (v >= 0) {
                 sz = (sz + 1) & ~1; /* keep SP word-aligned */
                 fn->local_size += sz;
                 fn->vregs[v].is_local_slot = true;
@@ -1202,27 +1334,27 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         if (strncmp(p, ".byte", 5) == 0) {
             p += 5;
             int v = parse_vreg(p, &p);
-            if (v >= 0 && v < MAX_VREGS)
+            fn_ensure_vreg(fn, v);
+            if (v >= 0)
                 fn->vregs[v].is_byte = true;
-            if (v >= fn->nvregs) fn->nvregs = v + 1;
             continue;
         }
 
         if (strncmp(p, ".immutable", 10) == 0) {
             p += 10;
             int v = parse_vreg(p, &p);
-            if (v >= 0 && v < MAX_VREGS)
+            fn_ensure_vreg(fn, v);
+            if (v >= 0)
                 fn->vregs[v].is_const = true;
-            if (v >= fn->nvregs) fn->nvregs = v + 1;
             continue;
         }
 
         if (strncmp(p, ".csref", 6) == 0) {
             p += 6;
             int v = parse_vreg(p, &p);
-            if (v >= 0 && v < MAX_VREGS)
+            fn_ensure_vreg(fn, v);
+            if (v >= 0)
                 fn->vregs[v].is_cs_ref = true;
-            if (v >= fn->nvregs) fn->nvregs = v + 1;
             continue;
         }
 
@@ -1252,18 +1384,13 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             if (colon && colon[1] == '\0') {
                 /* It's a label */
                 *colon = '\0';
-                ir_insn_t *ins = &fn->insns[fn->ninsns];
-                memset(ins, 0, sizeof(*ins));
+                int insn_idx = fn->ninsns;
+                ir_insn_t *ins = fn_push_insn(fn);
                 ins->op = IR_LABEL;
                 ins->dst = ins->src1 = ins->src2 = -1;
                 strncpy(ins->name, p, 63);
                 /* Record label position */
-                if (fn->nlabels < MAX_LABELS) {
-                    strncpy(fn->labels[fn->nlabels].name, p, 63);
-                    fn->labels[fn->nlabels].insn_idx = fn->ninsns;
-                    fn->nlabels++;
-                }
-                fn->ninsns++;
+                fn_push_label(fn, p, insn_idx);
                 continue;
             }
         }
@@ -1273,27 +1400,18 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             char *colon = strchr(p, ':');
             if (colon && colon[1] == '\0' && isalpha(*p)) {
                 *colon = '\0';
-                ir_insn_t *ins = &fn->insns[fn->ninsns];
-                memset(ins, 0, sizeof(*ins));
+                int insn_idx = fn->ninsns;
+                ir_insn_t *ins = fn_push_insn(fn);
                 ins->op = IR_LABEL;
                 ins->dst = ins->src1 = ins->src2 = -1;
                 strncpy(ins->name, p, 63);
-                if (fn->nlabels < MAX_LABELS) {
-                    strncpy(fn->labels[fn->nlabels].name, p, 63);
-                    fn->labels[fn->nlabels].insn_idx = fn->ninsns;
-                    fn->nlabels++;
-                }
-                fn->ninsns++;
+                fn_push_label(fn, p, insn_idx);
                 continue;
             }
         }
 
         /* Instructions */
-        ir_insn_t *ins = &fn->insns[fn->ninsns];
-        memset(ins, 0, sizeof(*ins));
-        ins->dst = ins->src1 = ins->src2 = -1;
-        for (int i = 0; i < MAX_ABI_PARAMS - 2; i++) ins->extra_args[i] = -1;
-        for (int i = 0; i < MAX_RETURNS; i++) ins->ret_vregs[i] = -1;
+        ir_insn_t *ins = fn_push_insn(fn);
 
         char opname[64];
         p = read_word(p, opname, sizeof(opname));
@@ -1321,8 +1439,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                     p = read_word(p, ins->name, sizeof(ins->name));
                     /* Constant pool refs live in CS (code segment) */
                     if (ins->name[0] == '_' && ins->name[1] == 'C' &&
-                        ins->dst >= 0 && ins->dst < MAX_VREGS)
+                        ins->dst >= 0) {
+                        fn_ensure_vreg(fn, ins->dst);
                         fn->vregs[ins->dst].is_cs_ref = true;
+                    }
                 }
             } else {
                 ins->has_imm = true;
@@ -1420,8 +1540,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             p = read_word(p, ins->name, sizeof(ins->name)); /* extern name */
             /* Mark addr vreg as needing an addressable register
              * (only for pointer-based form, not register pair) */
-            if (ins->src2 < 0 && ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+            if (ins->src2 < 0 && ins->src1 >= 0) {
+                fn_ensure_vreg(fn, ins->src1);
                 fn->vregs[ins->src1].needs_addressable = true;
+            }
             /* Parse args */
             ins->nargs = 0;
             while (*p) {
@@ -1459,8 +1581,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->src1 = parse_vreg(p, &p); /* array */
             p = skip_ws(p);
             if (*p == '[') { p++; ins->src2 = parse_vreg(p, &p); } /* index */
-            if (strcmp(opname, "loadb") == 0 && ins->dst >= 0 && ins->dst < MAX_VREGS)
+            if (strcmp(opname, "loadb") == 0 && ins->dst >= 0) {
+                fn_ensure_vreg(fn, ins->dst);
                 fn->vregs[ins->dst].is_byte = true;
+            }
         }
         else if (strcmp(opname, "store") == 0 || strcmp(opname, "storeb") == 0) {
             ins->op = IR_STORE;
@@ -1473,8 +1597,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             if (*p == ']') p++;
             skip_comma(&p);
             ins->dst = parse_vreg(p, &p); /* value — stored as "dst" but really src */
-            if (strcmp(opname, "storeb") == 0 && ins->dst >= 0 && ins->dst < MAX_VREGS)
+            if (strcmp(opname, "storeb") == 0 && ins->dst >= 0) {
+                fn_ensure_vreg(fn, ins->dst);
                 fn->vregs[ins->dst].is_byte = true;
+            }
         }
         else if (strcmp(opname, "loadmem") == 0) {
             ins->op = IR_LOADMEM;
@@ -1611,8 +1737,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 ins->op = IR_ALU;
                 ins->src1 = parse_vreg(p, &p);
                 /* Mark src1 as needing addressable register */
-                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+                if (ins->src1 >= 0) {
+                    fn_ensure_vreg(fn, ins->src1);
                     fn->vregs[ins->src1].needs_addressable = true;
+                }
             }
         }
         else if (strcmp(opname, "hlt") == 0 || strcmp(opname, "nop") == 0 ||
@@ -1657,8 +1785,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             ins->op = IR_ALU;
             strncpy(ins->name, opname, 63);
             ins->dst = parse_vreg(p, &p);
-            if (strcmp(opname, "inb") == 0 && ins->dst >= 0 && ins->dst < MAX_VREGS)
+            if (strcmp(opname, "inb") == 0 && ins->dst >= 0) {
+                fn_ensure_vreg(fn, ins->dst);
                 fn->vregs[ins->dst].is_byte = true;
+            }
             skip_comma(&p);
             p = skip_ws(p);
             if (*p == '%') {
@@ -1682,8 +1812,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 skip_comma(&p);
                 ins->src1 = parse_vreg(p, &p);
             }
-            if (strcmp(opname, "outb") == 0 && ins->src1 >= 0 && ins->src1 < MAX_VREGS)
+            if (strcmp(opname, "outb") == 0 && ins->src1 >= 0) {
+                fn_ensure_vreg(fn, ins->src1);
                 fn->vregs[ins->src1].is_byte = true;
+            }
         }
         else if (strcmp(opname, "cbw") == 0) {
             ins->op = IR_UNARY;
@@ -1850,15 +1982,13 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         }
 
         /* Track max vreg */
-        if (ins->dst >= fn->nvregs) fn->nvregs = ins->dst + 1;
-        if (ins->src1 >= fn->nvregs) fn->nvregs = ins->src1 + 1;
-        if (ins->src2 >= fn->nvregs) fn->nvregs = ins->src2 + 1;
+        fn_ensure_vreg(fn, ins->dst);
+        fn_ensure_vreg(fn, ins->src1);
+        fn_ensure_vreg(fn, ins->src2);
         for (int i = 0; i < MAX_ABI_PARAMS - 2; i++)
-            if (ins->extra_args[i] >= fn->nvregs)
-                fn->nvregs = ins->extra_args[i] + 1;
+            fn_ensure_vreg(fn, ins->extra_args[i]);
         for (int i = 0; i < MAX_RETURNS; i++)
-            if (ins->ret_vregs[i] >= fn->nvregs)
-                fn->nvregs = ins->ret_vregs[i] + 1;
+            fn_ensure_vreg(fn, ins->ret_vregs[i]);
 
         /* Attach debug info from last ; @ comment */
         if (cur_dbg_line > 0) {
@@ -1866,19 +1996,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             strncpy(ins->src_file, cur_dbg_file, 63);
         }
 
-        fn->ninsns++;
-        if (fn->ninsns >= MAX_INSNS) break;
     }
-}
-
-static void validate_vreg_capacity(const char *path, func_t *fn) {
-    if (fn->nvregs <= MAX_VREGS)
-        return;
-
-    fprintf(stderr,
-            "%s: function '%s' uses %d virtual registers; binder limit is %d\n",
-            path, fn->name, fn->nvregs, MAX_VREGS);
-    exit(1);
 }
 
 static void parse_nir(const char *path) {
@@ -1912,13 +2030,7 @@ static void parse_nir(const char *path) {
                 fn->param_pins[i].preg = PREG_NONE;
             for (int i = 0; i < MAX_RETURNS; i++)
                 fn->ret_pins[i] = PREG_NONE;
-            for (int i = 0; i < MAX_VREGS; i++) {
-                fn->vregs[i].prefer = PREG_NONE;
-                fn->vregs[i].assigned = PREG_NONE;
-                fn->vregs[i].spill_slot = -1;
-            }
             parse_function(fp, fn, p);
-            validate_vreg_capacity(path, fn);
             record_emit(EMIT_FN, nfunctions - 1);
         }
         if (strncmp(p, ".extern ", 8) == 0) {
@@ -2324,7 +2436,8 @@ typedef struct {
 
 static int vset_count_live(const uint64_t *s, int nvregs) {
     int n = 0;
-    for (int w = 0; w < VREG_WORDS; w++) {
+    int nwords = (nvregs + 63) / 64;
+    for (int w = 0; w < nwords; w++) {
         uint64_t bits = s[w];
         if ((w + 1) * 64 > nvregs) {
             int valid = nvregs - w * 64;
@@ -2377,14 +2490,20 @@ static void collect_insn_uses_defs(ir_insn_t *ins, int nvregs,
     }
 }
 
-static void compute_live_before_sets(func_t *fn, uint64_t (*before)[VREG_WORDS]) {
+static uint64_t *live_before_row(func_t *fn, uint64_t *before, int idx) {
+    return before + (size_t)idx * (size_t)fn->vset_words;
+}
+
+static void compute_live_before_sets(func_t *fn, uint64_t *before) {
     for (int i = 0; i < fn->ninsns; i++)
-        vset_zero(before[i]);
+        vset_zero(live_before_row(fn, before, i), fn->vset_words);
 
     for (int b = 0; b < fn->nblocks; b++) {
         bblock_t *bb = &fn->blocks[b];
-        uint64_t live[VREG_WORDS];
-        memcpy(live, bb->live_out, sizeof(live));
+        uint64_t *live = nib_xmalloc((size_t)fn->vset_words *
+                                     sizeof(uint64_t), "live set");
+        memcpy(live, bb->live_out,
+               (size_t)fn->vset_words * sizeof(uint64_t));
 
         for (int i = bb->end - 1; i >= bb->start; i--) {
             int uses[MAX_ABI_PARAMS + MAX_RETURNS + 4];
@@ -2400,8 +2519,10 @@ static void compute_live_before_sets(func_t *fn, uint64_t (*before)[VREG_WORDS])
                 vset_clear(live, defs[d]);
             for (int u = 0; u < nuses; u++)
                 vset_set(live, uses[u]);
-            memcpy(before[i], live, VREG_WORDS * sizeof(uint64_t));
+            memcpy(live_before_row(fn, before, i), live,
+                   (size_t)fn->vset_words * sizeof(uint64_t));
         }
+        free(live);
     }
 }
 
@@ -2574,8 +2695,8 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     if (fn->ninsns <= 0)
         return;
 
-    uint64_t (*before)[VREG_WORDS] = calloc((size_t)fn->ninsns,
-                                            sizeof(*before));
+    uint64_t *before = calloc((size_t)fn->ninsns *
+                              (size_t)fn->vset_words, sizeof(uint64_t));
     if (!before)
         return;
     compute_live_before_sets(fn, before);
@@ -2583,7 +2704,8 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     int peak_idx = 0;
     pressure_counts_t peak = {0};
     for (int i = 0; i < fn->ninsns; i++) {
-        pressure_counts_t c = pressure_counts(fn, before[i]);
+        pressure_counts_t c =
+            pressure_counts(fn, live_before_row(fn, before, i));
         if (c.live > peak.live) {
             peak = c;
             peak_idx = i;
@@ -2595,7 +2717,8 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     int span_end_line = peak_line;
     int threshold = peak.live > 1 ? (peak.live * 8 + 9) / 10 : peak.live;
     for (int i = peak_idx; i >= 0; i--) {
-        pressure_counts_t c = pressure_counts(fn, before[i]);
+        pressure_counts_t c =
+            pressure_counts(fn, live_before_row(fn, before, i));
         if (c.live < threshold)
             break;
         int line = insn_source_line(fn, i);
@@ -2603,7 +2726,8 @@ static void report_pressure_function(FILE *out, func_t *fn) {
             span_start_line = line;
     }
     for (int i = peak_idx; i < fn->ninsns; i++) {
-        pressure_counts_t c = pressure_counts(fn, before[i]);
+        pressure_counts_t c =
+            pressure_counts(fn, live_before_row(fn, before, i));
         if (c.live < threshold)
             break;
         int line = insn_source_line(fn, i);
@@ -2618,7 +2742,7 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     for (int v = 0; v < fn->nvregs; v++) {
         if (fn->vregs[v].spill_slot >= 0)
             total_spilled++;
-        if (!vset_test(before[peak_idx], v))
+        if (!vset_test(live_before_row(fn, before, peak_idx), v))
             continue;
         if (fn->vregs[v].fixed)
             peak_fixed++;
@@ -2659,7 +2783,8 @@ static void report_pressure_function(FILE *out, func_t *fn) {
         int line = insn_source_line(fn, i);
         if (line <= 0)
             continue;
-        pressure_counts_t c = pressure_counts(fn, before[i]);
+        pressure_counts_t c =
+            pressure_counts(fn, live_before_row(fn, before, i));
         fprintf(out, "  ");
         print_source_loc(out, fn, i);
         fprintf(out, " live=%d u8=%d u16=%d seg=%d far32=%d i=%d",
@@ -2675,10 +2800,11 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     fprintf(out, "  span: %s:%d-%d (%d%% peak threshold)\n",
             insn_source_file(fn, peak_idx), span_start_line, span_end_line, 80);
     fprintf(out, "  live across peak:\n");
-    int live_vregs[MAX_VREGS];
+    int *live_vregs = nib_xmalloc((size_t)fn->nvregs * sizeof(int),
+                                  "peak live vregs");
     int nlive = 0;
     for (int v = 0; v < fn->nvregs; v++)
-        if (vset_test(before[peak_idx], v) && nlive < MAX_VREGS)
+        if (vset_test(live_before_row(fn, before, peak_idx), v))
             live_vregs[nlive++] = v;
     sort_vregs_by_lifetime(fn, live_vregs, nlive);
     int nprint = nlive < 16 ? nlive : 16;
@@ -2738,7 +2864,7 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     fprintf(out, "\ncall-split advisor:\n");
     int local_drop = 0;
     for (int v = 0; v < fn->nvregs; v++) {
-        if (!vset_test(before[peak_idx], v))
+        if (!vset_test(live_before_row(fn, before, peak_idx), v))
             continue;
         int def_line = insn_source_line(fn, fn->vregs[v].def_pos);
         int last_line = insn_source_line(fn, fn->vregs[v].last_use);
@@ -2747,7 +2873,7 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     }
     int crossing = 0;
     for (int v = 0; v < fn->nvregs; v++)
-        if (vset_test(before[peak_idx], v) &&
+        if (vset_test(live_before_row(fn, before, peak_idx), v) &&
             vreg_crosses_line_span(fn, v, span_start_line, span_end_line))
             crossing++;
     fprintf(out,
@@ -2761,6 +2887,7 @@ static void report_pressure_function(FILE *out, func_t *fn) {
             "  starts near 3 bytes for a near call plus ABI moves/saves.\n");
 
     free(before);
+    free(live_vregs);
 }
 
 static void write_pressure_report(const char *path) {
@@ -3177,6 +3304,7 @@ static int compare_pressure_reports(const char *old_path,
 
 static void build_cfg(func_t *fn) {
     fn->nblocks = 0;
+    fn_prepare_vsets(fn);
     if (fn->ninsns == 0) return;
 
     /* Pass 1: identify block boundaries.
@@ -3184,8 +3312,8 @@ static void build_cfg(func_t *fn) {
      *   - instruction 0
      *   - any label target
      *   - the instruction after any jump/branch/ret */
-    bool is_leader[MAX_INSNS];
-    memset(is_leader, 0, sizeof(is_leader));
+    bool *is_leader = nib_xcalloc((size_t)fn->ninsns, sizeof(*is_leader),
+                                  "CFG leader set");
     is_leader[0] = true;
 
     for (int i = 0; i < fn->ninsns; i++) {
@@ -3205,9 +3333,7 @@ static void build_cfg(func_t *fn) {
     /* Pass 2: create blocks from leaders */
     for (int i = 0; i < fn->ninsns; i++) {
         if (!is_leader[i]) continue;
-        if (fn->nblocks >= MAX_BLOCKS) break;
-        bblock_t *bb = &fn->blocks[fn->nblocks++];
-        memset(bb, 0, sizeof(*bb));
+        bblock_t *bb = fn_push_block(fn);
         bb->start = i;
         /* Block extends until the next leader */
         int end = i + 1;
@@ -3269,6 +3395,7 @@ static void build_cfg(func_t *fn) {
                 succ->preds[succ->npreds++] = b;
         }
     }
+    free(is_leader);
 }
 
 /* ================================================================
@@ -3277,8 +3404,8 @@ static void build_cfg(func_t *fn) {
 
 /* Collect def and use sets for a basic block */
 static void compute_block_def_use(func_t *fn, bblock_t *bb) {
-    vset_zero(bb->defs);
-    vset_zero(bb->uses);
+    vset_zero(bb->defs, fn->vset_words);
+    vset_zero(bb->uses, fn->vset_words);
 
     for (int i = bb->start; i < bb->end; i++) {
         ir_insn_t *ins = &fn->insns[i];
@@ -3332,8 +3459,8 @@ static void compute_cfg_liveness(func_t *fn) {
 
     /* Initialize live_in and live_out to empty */
     for (int b = 0; b < fn->nblocks; b++) {
-        vset_zero(fn->blocks[b].live_in);
-        vset_zero(fn->blocks[b].live_out);
+        vset_zero(fn->blocks[b].live_in, fn->vset_words);
+        vset_zero(fn->blocks[b].live_out, fn->vset_words);
     }
 
     /* Parameters are live-in at entry block */
@@ -3353,20 +3480,28 @@ static void compute_cfg_liveness(func_t *fn) {
         /* Process blocks in reverse order (approximate reverse postorder) */
         for (int b = fn->nblocks - 1; b >= 0; b--) {
             bblock_t *bb = &fn->blocks[b];
-            uint64_t old_in[VREG_WORDS], old_out[VREG_WORDS];
-            memcpy(old_in, bb->live_in, sizeof(old_in));
-            memcpy(old_out, bb->live_out, sizeof(old_out));
+            uint64_t *old_in = nib_xmalloc((size_t)fn->vset_words *
+                                           sizeof(uint64_t), "old live-in");
+            uint64_t *old_out = nib_xmalloc((size_t)fn->vset_words *
+                                            sizeof(uint64_t), "old live-out");
+            memcpy(old_in, bb->live_in,
+                   (size_t)fn->vset_words * sizeof(uint64_t));
+            memcpy(old_out, bb->live_out,
+                   (size_t)fn->vset_words * sizeof(uint64_t));
 
             /* live_out = union of live_in of all successors */
-            vset_zero(bb->live_out);
+            vset_zero(bb->live_out, fn->vset_words);
             for (int s = 0; s < bb->nsuccs; s++)
-                vset_or(bb->live_out, fn->blocks[bb->succs[s]].live_in);
+                vset_or(bb->live_out, fn->blocks[bb->succs[s]].live_in,
+                         fn->vset_words);
 
             /* live_in = uses | (live_out - defs) */
-            uint64_t diff[VREG_WORDS];
-            vset_diff(diff, bb->live_out, bb->defs);
-            memcpy(bb->live_in, bb->uses, VREG_WORDS * sizeof(uint64_t));
-            vset_or(bb->live_in, diff);
+            uint64_t *diff = nib_xmalloc((size_t)fn->vset_words *
+                                         sizeof(uint64_t), "live diff");
+            vset_diff(diff, bb->live_out, bb->defs, fn->vset_words);
+            memcpy(bb->live_in, bb->uses,
+                   (size_t)fn->vset_words * sizeof(uint64_t));
+            vset_or(bb->live_in, diff, fn->vset_words);
 
             /* Preserve parameter liveness at entry */
             if (b == 0) {
@@ -3377,9 +3512,12 @@ static void compute_cfg_liveness(func_t *fn) {
                 }
             }
 
-            if (!vset_equal(bb->live_in, old_in) ||
-                !vset_equal(bb->live_out, old_out))
+            if (!vset_equal(bb->live_in, old_in, fn->vset_words) ||
+                !vset_equal(bb->live_out, old_out, fn->vset_words))
                 changed = true;
+            free(diff);
+            free(old_in);
+            free(old_out);
         }
     }
 }
@@ -3391,9 +3529,11 @@ static void compute_cfg_liveness(func_t *fn) {
 static void add_interference(func_t *fn, int a, int b) {
     if (a == b || a < 0 || b < 0 || a >= fn->nvregs || b >= fn->nvregs)
         return;
-    if (!vset_test(fn->igraph[a], b)) {
-        vset_set(fn->igraph[a], b);
-        vset_set(fn->igraph[b], a);
+    uint64_t *arow = igraph_row(fn, a);
+    uint64_t *brow = igraph_row(fn, b);
+    if (!vset_test(arow, b)) {
+        vset_set(arow, b);
+        vset_set(brow, a);
         fn->degree[a]++;
         fn->degree[b]++;
     }
@@ -3402,7 +3542,7 @@ static void add_interference(func_t *fn, int a, int b) {
 static void build_igraph(func_t *fn) {
     /* Clear */
     for (int v = 0; v < fn->nvregs; v++) {
-        vset_zero(fn->igraph[v]);
+        vset_zero(igraph_row(fn, v), fn->vset_words);
         fn->degree[v] = 0;
     }
 
@@ -3411,8 +3551,10 @@ static void build_igraph(func_t *fn) {
      * and everything else currently live. */
     for (int b = 0; b < fn->nblocks; b++) {
         bblock_t *bb = &fn->blocks[b];
-        uint64_t live[VREG_WORDS];
-        memcpy(live, bb->live_out, sizeof(live));
+        uint64_t *live = nib_xmalloc((size_t)fn->vset_words *
+                                     sizeof(uint64_t), "live set");
+        memcpy(live, bb->live_out,
+               (size_t)fn->vset_words * sizeof(uint64_t));
 
         for (int i = bb->end - 1; i >= (int)bb->start; i--) {
             ir_insn_t *ins = &fn->insns[i];
@@ -3451,7 +3593,7 @@ static void build_igraph(func_t *fn) {
                 def = ins->dst;
 
             if (def >= 0 && def < fn->nvregs) {
-                for (int w = 0; w < VREG_WORDS; w++) {
+                for (int w = 0; w < fn->vset_words; w++) {
                     uint64_t bits = live[w];
                     while (bits) {
                         int bit = __builtin_ctzll(bits);
@@ -3467,7 +3609,7 @@ static void build_igraph(func_t *fn) {
                 for (int j = 0; j < ins->nrets - 1 && j < MAX_RETURNS; j++) {
                     int rdef = ins->ret_vregs[j];
                     if (rdef < 0 || rdef >= fn->nvregs) continue;
-                    for (int w = 0; w < VREG_WORDS; w++) {
+                    for (int w = 0; w < fn->vset_words; w++) {
                         uint64_t bits = live[w];
                         while (bits) {
                             int bit = __builtin_ctzll(bits);
@@ -3490,12 +3632,12 @@ static void build_igraph(func_t *fn) {
         /* After walking to block top, add interference between all
          * remaining live vregs. This catches parameters and other
          * vregs that are live_in but not defined in this block. */
-        for (int w1 = 0; w1 < VREG_WORDS; w1++) {
+        for (int w1 = 0; w1 < fn->vset_words; w1++) {
             uint64_t bits1 = live[w1];
             while (bits1) {
                 int b1 = w1 * 64 + __builtin_ctzll(bits1);
                 /* Add edges with all other live vregs */
-                for (int w2 = w1; w2 < VREG_WORDS; w2++) {
+                for (int w2 = w1; w2 < fn->vset_words; w2++) {
                     uint64_t bits2 = (w2 == w1) ?
                         (live[w2] & ~(1ULL << (b1 & 63))) : live[w2];
                     /* Only process pairs where b2 > b1 to avoid double-counting */
@@ -3510,6 +3652,7 @@ static void build_igraph(func_t *fn) {
                 bits1 &= bits1 - 1;
             }
         }
+        free(live);
     }
 }
 
@@ -3563,7 +3706,7 @@ static bool mem_text_has_explicit_segment(const char *name) {
 }
 
 static bool vreg_is_non_ds_addr(func_t *fn, int v, bool *local_addr) {
-    if (v < 0 || v >= MAX_VREGS)
+    if (v < 0 || v >= fn->nvregs)
         return false;
     if (fn->vregs[v].is_local_slot || local_addr[v])
         return true;
@@ -3573,7 +3716,8 @@ static bool vreg_is_non_ds_addr(func_t *fn, int v, bool *local_addr) {
 }
 
 static void validate_ds_none(func_t *fn) {
-    bool local_addr[MAX_VREGS] = {0};
+    bool *local_addr = nib_xcalloc((size_t)fn->nvregs, sizeof(bool),
+                                   "local address marks");
     bool changed;
 
     do {
@@ -3590,7 +3734,7 @@ static void validate_ds_none(func_t *fn) {
                 mark = (ins->src1 >= 0 && local_addr[ins->src1]) ||
                        (ins->src2 >= 0 && local_addr[ins->src2]);
             }
-            if (mark && ins->dst >= 0 && ins->dst < MAX_VREGS &&
+            if (mark && ins->dst >= 0 && ins->dst < fn->nvregs &&
                 !local_addr[ins->dst]) {
                 local_addr[ins->dst] = true;
                 changed = true;
@@ -3615,6 +3759,7 @@ static void validate_ds_none(func_t *fn) {
                 fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
                         fn->name);
                 bind_errors++;
+                free(local_addr);
                 return;
             }
         } else if (ins->op == IR_LOADMEM) {
@@ -3624,6 +3769,7 @@ static void validate_ds_none(func_t *fn) {
                             "%s: ds(none) body uses DS-default memory\n",
                             fn->name);
                     bind_errors++;
+                    free(local_addr);
                     return;
                 }
             } else if (ins->src2 < 0 &&
@@ -3631,6 +3777,7 @@ static void validate_ds_none(func_t *fn) {
                 fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
                         fn->name);
                 bind_errors++;
+                free(local_addr);
                 return;
             }
         } else if (ins->op == IR_STOREMEM) {
@@ -3640,6 +3787,7 @@ static void validate_ds_none(func_t *fn) {
                             "%s: ds(none) body uses DS-default memory\n",
                             fn->name);
                     bind_errors++;
+                    free(local_addr);
                     return;
                 }
             } else if (ins->src2 < 0 &&
@@ -3647,6 +3795,7 @@ static void validate_ds_none(func_t *fn) {
                 fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
                         fn->name);
                 bind_errors++;
+                free(local_addr);
                 return;
             }
         } else if (ins->op == IR_ALU &&
@@ -3655,14 +3804,17 @@ static void validate_ds_none(func_t *fn) {
             fprintf(stderr, "%s: ds(none) body uses DS-default memory\n",
                     fn->name);
             bind_errors++;
+            free(local_addr);
             return;
         } else if (ins->op == IR_ASM && ins->asm_body[0]) {
             fprintf(stderr, "%s: ds(none) body contains opaque asm\n",
                     fn->name);
             bind_errors++;
+            free(local_addr);
             return;
         }
     }
+    free(local_addr);
 }
 
 static void validate_ds_policies(void) {
@@ -3699,7 +3851,7 @@ static void validate_ds_policies(void) {
 static bool vregs_interfere(func_t *fn, int a, int b) {
     if (a < 0 || b < 0 || a >= fn->nvregs || b >= fn->nvregs)
         return false;
-    return vset_test(fn->igraph[a], b);
+    return vset_test(igraph_row(fn, a), b);
 }
 
 static void add_vreg_affinity(func_t *fn, int v, int preg, int weight) {
@@ -3724,7 +3876,7 @@ static void scan_addressing_constraints(func_t *fn) {
         for (int h = 0; h < mc.nhard; h++) {
             int v = mc.hard_vreg[h];
             int preg = mc.hard_reg[h];
-            if (v < 0 || v >= MAX_VREGS)
+            if (v < 0 || v >= fn->nvregs)
                 continue;
             add_vreg_affinity(fn, v, preg, 10);
 
@@ -3752,7 +3904,7 @@ static void scan_addressing_constraints(func_t *fn) {
 
         for (int a = 0; a < mc.naddr; a++) {
             int v = mc.addr_vreg[a];
-            if (v < 0 || v >= MAX_VREGS)
+            if (v < 0 || v >= fn->nvregs)
                 continue;
             fn->vregs[v].needs_addressable = true;
             if (mc.needs_base[a])
@@ -3771,8 +3923,8 @@ static void scan_addressing_constraints(func_t *fn) {
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
         if (ins->op == IR_MOV && !ins->has_imm &&
-            ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
-            ins->dst >= 0 && ins->dst < MAX_VREGS &&
+            ins->src1 >= 0 && ins->src1 < fn->nvregs &&
+            ins->dst >= 0 && ins->dst < fn->nvregs &&
             fn->vregs[ins->src1].is_cs_ref)
             fn->vregs[ins->dst].is_cs_ref = true;
     }
@@ -3821,8 +3973,9 @@ static bool preg_in_pool(int preg, int *pool, int psz) {
 
 static bool color_conflicts(func_t *fn, int v, int preg) {
     int nv = fn->nvregs;
-    for (int w = 0; w < VREG_WORDS; w++) {
-        uint64_t bits = fn->igraph[v][w];
+    uint64_t *row = igraph_row(fn, v);
+    for (int w = 0; w < fn->vset_words; w++) {
+        uint64_t bits = row[w];
         while (bits) {
             int nb = w * 64 + __builtin_ctzll(bits);
             if (nb < nv && fn->vregs[nb].assigned != PREG_NONE &&
@@ -3950,13 +4103,12 @@ static void allocate_registers(func_t *fn, bool bp_available) {
      * node with lowest spill cost as a potential spill. Then pop
      * and assign colors. */
 
-    int stack[MAX_VREGS];
-    bool potential_spill[MAX_VREGS];
-    bool removed[MAX_VREGS];
+    int *stack = nib_xmalloc((size_t)nv * sizeof(int), "allocator stack");
+    bool *potential_spill = nib_xcalloc((size_t)nv, sizeof(bool),
+                                        "potential spill set");
+    bool *removed = nib_xcalloc((size_t)nv, sizeof(bool),
+                                "allocator removed set");
     int sp = 0;
-
-    memset(potential_spill, 0, sizeof(potential_spill));
-    memset(removed, 0, sizeof(removed));
 
     /* Mark already-handled vregs */
     for (int i = 0; i < nv; i++) {
@@ -3981,8 +4133,9 @@ static void allocate_registers(func_t *fn, bool bp_available) {
 
             /* Count active (non-removed) interfering neighbors */
             int active_deg = 0;
-            for (int w = 0; w < VREG_WORDS; w++) {
-                uint64_t bits = fn->igraph[i][w];
+            uint64_t *row = igraph_row(fn, i);
+            for (int w = 0; w < fn->vset_words; w++) {
+                uint64_t bits = row[w];
                 while (bits) {
                     int nb = w * 64 + __builtin_ctzll(bits);
                     if (nb < nv && !removed[nb]) active_deg++;
@@ -4049,6 +4202,9 @@ skip_preferred_color:
             fn->vregs[v].spill_slot = fn->nspill_slots++;
         }
     }
+    free(stack);
+    free(potential_spill);
+    free(removed);
 }
 
 /* ================================================================
@@ -4059,8 +4215,10 @@ skip_preferred_color:
  * within block `b`. Returns a bitmask of free PREG_* values. */
 static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
     bblock_t *bb = &fn->blocks[b_idx];
-    uint64_t live[VREG_WORDS];
-    memcpy(live, bb->live_out, sizeof(live));
+    uint64_t *live = nib_xmalloc((size_t)fn->vset_words * sizeof(uint64_t),
+                                 "live set");
+    memcpy(live, bb->live_out,
+           (size_t)fn->vset_words * sizeof(uint64_t));
 
     /* Walk backward from block end to pos, maintaining live set */
     for (int i = bb->end - 1; i >= pos; i--) {
@@ -4119,6 +4277,7 @@ static uint32_t free_regs_at(func_t *fn, int b_idx, int pos) {
     occupied |= (1u << PREG_SP);
     if (fn->needs_frame) occupied |= (1u << PREG_BP);
 
+    free(live);
     return ~occupied;  /* free = complement of occupied */
 }
 
@@ -4170,14 +4329,18 @@ static bool vreg_live_after_insn(func_t *fn, int insn_idx, int vreg) {
     if (!bb)
         return false;
 
-    uint64_t live[VREG_WORDS];
-    memcpy(live, bb->live_out, sizeof(live));
+    uint64_t *live = nib_xmalloc((size_t)fn->vset_words * sizeof(uint64_t),
+                                 "live set");
+    memcpy(live, bb->live_out,
+           (size_t)fn->vset_words * sizeof(uint64_t));
     for (int i = (int)bb->end - 1; i > insn_idx; i--) {
         ir_insn_t *ins = &fn->insns[i];
         remove_insn_defs_from_live(fn, ins, live);
         add_insn_uses_to_live(fn, ins, live);
     }
-    return vset_test(live, vreg);
+    bool live_after = vset_test(live, vreg);
+    free(live);
+    return live_after;
 }
 
 static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg) {
@@ -4192,8 +4355,10 @@ static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg) {
     if (!bb)
         return false;
 
-    uint64_t live[VREG_WORDS];
-    memcpy(live, bb->live_out, sizeof(live));
+    uint64_t *live = nib_xmalloc((size_t)fn->vset_words * sizeof(uint64_t),
+                                 "live set");
+    memcpy(live, bb->live_out,
+           (size_t)fn->vset_words * sizeof(uint64_t));
     for (int i = (int)bb->end - 1; i > insn_idx; i--) {
         ir_insn_t *ins = &fn->insns[i];
         remove_insn_defs_from_live(fn, ins, live);
@@ -4204,9 +4369,12 @@ static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg) {
         if (!vset_test(live, v))
             continue;
         int preg = fn->vregs[v].assigned;
-        if (preg_write_clobbers(written_preg, preg))
+        if (preg_write_clobbers(written_preg, preg)) {
+            free(live);
             return true;
+        }
     }
+    free(live);
     return false;
 }
 
@@ -4238,22 +4406,19 @@ static int block_of(func_t *fn, int pos) {
 
 /* Add a resolved IR instruction */
 static void rins_ir(func_t *fn, int ir_idx) {
-    if (fn->nresolved >= MAX_RESOLVED) return;
-    fn->resolved[fn->nresolved].kind = RINS_IR;
-    fn->resolved[fn->nresolved].ir_idx = ir_idx;
-    fn->nresolved++;
+    resolved_insn_t *r = fn_push_resolved(fn);
+    r->kind = RINS_IR;
+    r->ir_idx = ir_idx;
 }
 
 /* Add a resolved pre-formatted assembly line */
 static void rins_asm(func_t *fn, const char *fmt, ...) {
-    if (fn->nresolved >= MAX_RESOLVED) return;
-    fn->resolved[fn->nresolved].kind = RINS_ASM;
+    resolved_insn_t *r = fn_push_resolved(fn);
+    r->kind = RINS_ASM;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(fn->resolved[fn->nresolved].asm_text,
-              sizeof(fn->resolved[fn->nresolved].asm_text), fmt, ap);
+    vsnprintf(r->asm_text, sizeof(r->asm_text), fmt, ap);
     va_end(ap);
-    fn->nresolved++;
 }
 
 static void note_fixup(func_t *fn, fixup_reason_t reason) {
@@ -4266,27 +4431,23 @@ static void note_spill_action(func_t *fn, spill_action_t action);
 
 static void rins_asm_fixup(func_t *fn, fixup_reason_t reason,
                            const char *fmt, ...) {
-    if (fn->nresolved >= MAX_RESOLVED) return;
-    fn->resolved[fn->nresolved].kind = RINS_ASM;
+    resolved_insn_t *r = fn_push_resolved(fn);
+    r->kind = RINS_ASM;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(fn->resolved[fn->nresolved].asm_text,
-              sizeof(fn->resolved[fn->nresolved].asm_text), fmt, ap);
+    vsnprintf(r->asm_text, sizeof(r->asm_text), fmt, ap);
     va_end(ap);
-    fn->nresolved++;
     note_fixup(fn, reason);
 }
 
 static void rins_asm_spill(func_t *fn, spill_action_t action,
                            const char *fmt, ...) {
-    if (fn->nresolved >= MAX_RESOLVED) return;
-    fn->resolved[fn->nresolved].kind = RINS_ASM;
+    resolved_insn_t *r = fn_push_resolved(fn);
+    r->kind = RINS_ASM;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(fn->resolved[fn->nresolved].asm_text,
-              sizeof(fn->resolved[fn->nresolved].asm_text), fmt, ap);
+    vsnprintf(r->asm_text, sizeof(r->asm_text), fmt, ap);
     va_end(ap);
-    fn->nresolved++;
     note_spill_action(fn, action);
 }
 
@@ -5677,7 +5838,7 @@ static const char *scoped_label(func_t *fn, const char *label) {
 
 /* Check if a vreg is spilled to memory */
 static bool is_spilled(func_t *fn, int v) {
-    if (v < 0 || v >= MAX_VREGS) return false;
+    if (v < 0 || v >= fn->nvregs) return false;
     return fn->vregs[v].spill_slot >= 0 || fn->vregs[v].is_stack_home;
 }
 
@@ -5745,13 +5906,13 @@ static void emit_mov(func_t *fn, int dst, int src) {
     if (strcmp(d, s) == 0) return; /* skip self-moves */
     operand_plan_t dplan = plan_vreg_operand(fn, dst);
     operand_plan_t splan = plan_vreg_operand(fn, src);
-    int dst_preg = (dst >= 0 && dst < MAX_VREGS) ?
+    int dst_preg = (dst >= 0 && dst < fn->nvregs) ?
                    fn->vregs[dst].assigned : PREG_NONE;
-    int src_preg = (src >= 0 && src < MAX_VREGS) ?
+    int src_preg = (src >= 0 && src < fn->nvregs) ?
                    fn->vregs[src].assigned : PREG_NONE;
-    bool dst_byte = (dst >= 0 && dst < MAX_VREGS &&
+    bool dst_byte = (dst >= 0 && dst < fn->nvregs &&
                      (fn->vregs[dst].is_byte || preg_is_byte(dst_preg)));
-    bool src_byte = (src >= 0 && src < MAX_VREGS &&
+    bool src_byte = (src >= 0 && src < fn->nvregs &&
                      (fn->vregs[src].is_byte || preg_is_byte(src_preg)));
     if (operand_plan_is_memory(&dplan) && operand_plan_is_memory(&splan)) {
         if (dst_byte || src_byte) {
@@ -6016,7 +6177,7 @@ static const char *near_data_seg_prefix(func_t *fn, int addr_vreg) {
             return "CS:";
         return "";
     }
-    if (addr_vreg >= 0 && addr_vreg < MAX_VREGS &&
+    if (addr_vreg >= 0 && addr_vreg < fn->nvregs &&
         fn->vregs[addr_vreg].is_cs_ref)
         return "CS:";
     return "";
@@ -6181,7 +6342,7 @@ static void emit_param_entry_moves(func_t *fn, int fn_idx) {
     for (int p = 0; p < fn->nparams; p++) {
         int v = fn->param_vregs[p];
         int expected = fa->param_regs[p];
-        if (v < 0 || v >= MAX_VREGS || expected == PREG_NONE)
+        if (v < 0 || v >= fn->nvregs || expected == PREG_NONE)
             continue;
         if (fn->vregs[v].is_local_slot)
             continue;
@@ -6382,9 +6543,9 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         bool use_es = emit_es_data_prefix(fn, ins->src1);
         const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
         const char *d = vreg_asm(fn, ins->dst);
-        bool dst_seg = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+        bool dst_seg = (ins->dst >= 0 && ins->dst < fn->nvregs &&
                         fn->vregs[ins->dst].is_seg);
-        bool dst_is_es = (use_es && ins->dst >= 0 && ins->dst < MAX_VREGS &&
+        bool dst_is_es = (use_es && ins->dst >= 0 && ins->dst < fn->nvregs &&
                           fn->vregs[ins->dst].assigned == PREG_ES &&
                           !is_spilled(fn, ins->dst));
         if (dst_is_es) {
@@ -6459,12 +6620,12 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     }
     if (strcmp(op, "stos") == 0) { fprintf(out_asm, "    stosb\n"); return; }
     if (strcmp(op, "bext") == 0) {
-        bool dst_is_ax = (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+        bool dst_is_ax = (ins->dst >= 0 && ins->dst < fn->nvregs &&
                           fn->vregs[ins->dst].assigned == PREG_AX);
         if (!dst_is_ax)
             fprintf(out_asm, "    push AX\n");
         fprintf(out_asm, "    push SI\n");
-        if (!(ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+        if (!(ins->src1 >= 0 && ins->src1 < fn->nvregs &&
               fn->vregs[ins->src1].assigned == PREG_SI))
             fprintf(out_asm, "    mov SI, %s\n", vreg_asm(fn, ins->src1));
         fprintf(out_asm, "    bext %s, %s\n",
@@ -6480,10 +6641,10 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
     if (strcmp(op, "bins") == 0) {
         fprintf(out_asm, "    push AX\n");
         fprintf(out_asm, "    push DI\n");
-        if (!(ins->extra_args[0] >= 0 && ins->extra_args[0] < MAX_VREGS &&
+        if (!(ins->extra_args[0] >= 0 && ins->extra_args[0] < fn->nvregs &&
               fn->vregs[ins->extra_args[0]].assigned == PREG_AX))
             fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->extra_args[0]));
-        if (!(ins->dst >= 0 && ins->dst < MAX_VREGS &&
+        if (!(ins->dst >= 0 && ins->dst < fn->nvregs &&
               fn->vregs[ins->dst].assigned == PREG_DI))
             fprintf(out_asm, "    mov DI, %s\n", vreg_asm(fn, ins->dst));
         fprintf(out_asm, "    bins %s, %s\n",
@@ -6499,8 +6660,8 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
      * since dst already contains src2 and the op is commutative.
      * For non-commutative ops (sub), swap operands and use reverse. */
     bool dst_is_src2 = (!ins->has_imm && ins->src2 >= 0 &&
-                        ins->dst >= 0 && ins->src2 < MAX_VREGS &&
-                        ins->dst < MAX_VREGS &&
+                        ins->dst >= 0 && ins->src2 < fn->nvregs &&
+                        ins->dst < fn->nvregs &&
                         !is_spilled(fn, ins->dst) &&
                         !is_spilled(fn, ins->src2) &&
                         fn->vregs[ins->dst].assigned ==
@@ -6801,7 +6962,7 @@ static void emit_function(func_t *fn) {
             if (ins->has_imm) {
                 const char *d = vreg_asm(fn, ins->dst);
                 /* Segment registers can't take immediates directly */
-                if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                if (ins->dst >= 0 && ins->dst < fn->nvregs &&
                     fn->vregs[ins->dst].is_seg) {
                     /* The compiler emits an intermediate word vreg +
                      * a mov to the seg vreg, so this path shouldn't
@@ -6827,7 +6988,7 @@ static void emit_function(func_t *fn) {
                     resolved = clbl ? clbl : resolve_fn_name(ins->name);
                 }
                 /* Segment registers can't take label refs — use AX */
-                if (ins->dst >= 0 && ins->dst < MAX_VREGS &&
+                if (ins->dst >= 0 && ins->dst < fn->nvregs &&
                     fn->vregs[ins->dst].is_seg) {
                     /* Same fallback — compiler should route through word vreg */
                     fprintf(out_asm, "    mov AX, %s\n", resolved);
@@ -7132,10 +7293,10 @@ static void emit_function(func_t *fn) {
             /* Indirect far call. src1 = offset vreg, src2 = seg vreg (if pair).
              * If src2 is a seg vreg, build a far pointer on the stack and call
              * through it. Otherwise src1 points to a memory-resident far32. */
-            bool has_seg = (ins->src2 >= 0 && ins->src2 < MAX_VREGS &&
+            bool has_seg = (ins->src2 >= 0 && ins->src2 < fn->nvregs &&
                             fn->vregs[ins->src2].is_seg);
             if (has_seg) {
-                if (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                if (ins->src1 >= 0 && ins->src1 < fn->nvregs &&
                     fn->vregs[ins->src1].is_stack_home &&
                     fn->vregs[ins->src2].is_stack_home &&
                     fn->vregs[ins->src2].stack_offset ==
@@ -7146,7 +7307,7 @@ static void emit_function(func_t *fn) {
                 if (fn->needs_call_temp && flags_live_after_insn(fn, i)) {
                     int off = fn->call_temp_off;
                     fprintf(out_asm, "    push AX\n");
-                    if (ins->src1 >= 0 && ins->src1 < MAX_VREGS &&
+                    if (ins->src1 >= 0 && ins->src1 < fn->nvregs &&
                         fn->vregs[ins->src1].assigned == PREG_AX) {
                         fprintf(out_asm, "    mov [BP%+d], AX\n", off);
                     } else {
@@ -7746,7 +7907,7 @@ static void propagate_preferences(void) {
             int off = base + stack_slot * 2;
             fa->param_stack_offsets[p] = off;
             fn->param_stack_offsets[p] = off;
-            if (v >= 0 && v < MAX_VREGS) {
+            if (v >= 0 && v < fn->nvregs) {
                 fn->vregs[v].is_stack_home = true;
                 fn->vregs[v].stack_offset = off;
             }
@@ -7898,7 +8059,9 @@ static void propagate_preferences(void) {
                     caller->vregs[caller_vreg].prefer = callee_reg;
                 }
                 /* Propagate is_seg from callee parameter */
-                if (a < MAX_VREGS && fn->vregs[a].is_seg) {
+                int param_vreg = fn->param_vregs[a];
+                if (param_vreg >= 0 && param_vreg < fn->nvregs &&
+                    fn->vregs[param_vreg].is_seg) {
                     caller->vregs[caller_vreg].is_seg = true;
                 }
             }
@@ -8292,7 +8455,7 @@ int main(int argc, char **argv) {
             if (!flags_live_after_insn(fn, ii))
                 continue;
             if (ins->op == IR_ICALL &&
-                ins->src2 >= 0 && ins->src2 < MAX_VREGS &&
+                ins->src2 >= 0 && ins->src2 < fn->nvregs &&
                 fn->vregs[ins->src2].is_seg) {
                 fn->needs_call_temp = true;
                 bp_available = false;
