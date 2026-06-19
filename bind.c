@@ -4301,6 +4301,14 @@ static bool preg_in_pool(int preg, int *pool, int psz) {
     return false;
 }
 
+static bool pools_may_alias(int *a, int na, int *b, int nb) {
+    for (int ai = 0; ai < na; ai++)
+        for (int bi = 0; bi < nb; bi++)
+            if (pregs_alias(a[ai], b[bi]))
+                return true;
+    return false;
+}
+
 static bool color_conflicts(func_t *fn, int v, int preg) {
     int nv = fn->nvregs;
     uint64_t *row = igraph_row(fn, v);
@@ -4318,11 +4326,38 @@ static bool color_conflicts(func_t *fn, int v, int preg) {
     return false;
 }
 
+static int byte_interference_count(func_t *fn, int v) {
+    int count = 0;
+    int nv = fn->nvregs;
+    uint64_t *row = igraph_row(fn, v);
+    for (int w = 0; w < fn->vset_words; w++) {
+        uint64_t bits = row[w];
+        while (bits) {
+            int nb = w * 64 + __builtin_ctzll(bits);
+            if (nb < nv && fn->vregs[nb].is_byte)
+                count++;
+            bits &= bits - 1;
+        }
+    }
+    return count;
+}
+
 static int color_speed_score(func_t *fn, int v, int preg, int pool_index) {
     int score = -pool_index;
     if (fn->vregs[v].prefer == preg)
         score += 10000;
     score += fn->vregs[v].affinity[preg] * 100;
+    if (!fn->vregs[v].is_byte && !fn->vregs[v].is_seg &&
+        !fn->vregs[v].needs_addressable && !fn->vregs[v].needs_base &&
+        !fn->vregs[v].needs_index && !fn->vregs[v].needs_cl) {
+        int byte_edges = byte_interference_count(fn, v);
+        if (byte_edges > 0) {
+            if (preg >= PREG_AX && preg <= PREG_BX)
+                score -= byte_edges * 250;
+            else if (preg == PREG_SI || preg == PREG_DI)
+                score += byte_edges * 50;
+        }
+    }
     return score;
 }
 
@@ -4468,7 +4503,13 @@ static void allocate_registers(func_t *fn, bool bp_available) {
                 uint64_t bits = row[w];
                 while (bits) {
                     int nb = w * 64 + __builtin_ctzll(bits);
-                    if (nb < nv && !removed[nb]) active_deg++;
+                    if (nb < nv && !removed[nb]) {
+                        int nb_pool[16];
+                        int nb_psz = get_vreg_pool(fn, nb, bp_available,
+                                                    nb_pool);
+                        if (pools_may_alias(pool, psz, nb_pool, nb_psz))
+                            active_deg++;
+                    }
                     bits &= bits - 1;
                 }
             }

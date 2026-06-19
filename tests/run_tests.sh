@@ -655,10 +655,17 @@ fi
 if [ -f "$TEST_TMPDIR"/t_multi_return.asm ]; then
     split_window=$(sed -n '/^split_pair:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_multi_return.asm)
     call_window=$(sed -n '/t_multi_return_use_pair:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_multi_return.asm)
-    after_dx=$(printf "%s\n" "$split_window" | sed -n '/mov DX, AX/,$p')
-    if printf "%s\n" "$after_dx" | grep -q 'mov AL, CL' &&
+    if printf "%s\n" "$split_window" | awk '
+           /mov DX, AX/ { dx_ax = NR }
+           /mov DX, [A-Z][A-Z]*/ { dx = NR }
+           /mov AL, [A-Z][A-Z]*/ { al = NR }
+           END {
+               if (dx_ax) exit (al && dx_ax < al) ? 0 : 1
+               exit (al && dx) ? 0 : 1
+           }
+       ' &&
        printf "%s\n" "$call_window" | grep -q 'call split_pair' &&
-       printf "%s\n" "$call_window" | grep -q 'mov CX, DX'; then
+       printf "%s\n" "$call_window" | grep -q 'mov \(CX\|DI\), DX'; then
         pass "multi-return: return slots materialized and captured"
     else
         fail "multi-return" "missing ordered return materialization or capture"
@@ -856,7 +863,7 @@ if [ -f "$TEST_TMPDIR"/t_icall_save.asm ]; then
        echo "$call_window" | grep -q 'call far \[SS:BX\]' &&
        echo "$call_window" | grep -q 'pop DI' &&
        ! echo "$call_window" | grep -q 'push AX\|pop AX' &&
-       sed -n '/call far \[SS:BX\]/,/ret/p' "$TEST_TMPDIR"/t_icall_save.asm | grep -q 'mov BL, AL'; then
+       sed -n '/call far \[SS:BX\]/,/ret/p' "$TEST_TMPDIR"/t_icall_save.asm | grep -q 'and .*0x00FF'; then
         pass "icall-save: live DI saved without clobbering AL return"
     else
         fail "icall-save" "indirect call save/return handling is wrong"
@@ -1233,6 +1240,49 @@ else
     fail "storemem-live-accum" "$(./nibbind "$TEST_TMPDIR"/t_storemem_live_accum.nir -o "$TEST_TMPDIR"/t_storemem_live_accum.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_byte_pressure_copy.nir <<'NIR'
+; Binder regression: a one-use byte load/store in a loop should keep the
+; byte in a byte register instead of spilling it through the frame because
+; an unrelated word loop value grabbed AX.
+.fn byte_pressure_copy
+.param %0, seg, "src_seg", register, pin=ES
+.param %1, u16, "src"
+.param %2, u16, "dst"
+.param %3, u16, "count"
+    mov %4, %1
+    mov %5, %2
+    mov %6, %3
+loop:
+    cmp.eq %7, %6, 0
+    jz %7, done
+    loadmem %8, %4, ES
+.vreg %8, u8
+    storemem %5, %8
+    add %9, %4, 1
+    mov %4, %9
+    add %10, %5, 1
+    mov %5, %10
+    sub %11, %6, 1
+    mov %6, %11
+    jmp loop
+done:
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_byte_pressure_copy.nir -o "$TEST_TMPDIR"/t_byte_pressure_copy.asm >/dev/null 2>&1; then
+    byte_copy_window=$(sed -n '/byte_pressure_copy_loop:/,/add .*1/p' "$TEST_TMPDIR"/t_byte_pressure_copy.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_byte_pressure_copy.asm -o "$TEST_TMPDIR"/t_byte_pressure_copy.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$byte_copy_window" | grep -q 'mov [A-D][HL], \[ES:' &&
+       printf "%s\n" "$byte_copy_window" | grep -q 'mov \[.*\], [A-D][HL]' &&
+       ! printf "%s\n" "$byte_copy_window" | grep -q 'push AX\|pop AX\|\[BP-'; then
+        pass "byte-pressure-copy: loop byte load/store avoids spills"
+    else
+        fail "byte-pressure-copy" "byte load/store still spilled through frame"
+    fi
+else
+    fail "byte-pressure-copy" "$(./nibbind "$TEST_TMPDIR"/t_byte_pressure_copy.nir -o "$TEST_TMPDIR"/t_byte_pressure_copy.asm 2>&1 | tail -1)"
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
@@ -1530,7 +1580,7 @@ fi
 
 # Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)
 if [ -f "$TEST_TMPDIR"/t_byte_vreg.asm ]; then
-    if grep -q 'mov [A-D]L, [A-D]L\|xor [A-D]H, [A-D]H\|xor [A-D]X, [A-D]X' "$TEST_TMPDIR"/t_byte_vreg.asm; then
+    if grep -Eq 'mov [A-D]L, [A-D]L|xor [A-D]H, [A-D]H|xor [A-D]X, [A-D]X|and (AX|BX|CX|DX|SI|DI), 0x00FF' "$TEST_TMPDIR"/t_byte_vreg.asm; then
         pass "byte-vreg: zero_extend uses byte-safe operation"
     else
         fail "byte-vreg" "zero_extend uses invalid word-from-byte move"
