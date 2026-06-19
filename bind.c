@@ -6263,12 +6263,7 @@ static void emit_function(func_t *fn) {
         case IR_TAILCALL: {
             if (ds_explicit_save)
                 fprintf(out_asm, "    pop DS\n");
-            for (int j = nsave - 1; j >= 0; j--) {
-                if (save_regs[j] == PREG_FLAGS)
-                    fprintf(out_asm, "    popf\n");
-                else
-                    fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
-            }
+            emit_asm_restore_set(save_regs, nsave, false);
             if (fn->needs_frame) {
                 fprintf(out_asm, "    mov sp, bp\n");
                 fprintf(out_asm, "    pop bp\n");
