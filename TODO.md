@@ -14,11 +14,6 @@
   handled consistently across functions, globals, data blocks, externs,
   use directives, labels, and fixup lists.
 - Binder allocator next pass:
-  - Runtime-regress the current allocator baseline in Serif before
-    changing allocation behavior again.
-  - Finish moving low-frequency spill routes, such as parameter entry
-    homes and call-return temporaries, onto the shared operand-planning
-    helpers where it improves reporting clarity.
   - Teach pressure reports to compare before/after allocator decisions
     across revisions: selected colors, actual spills, fixed-register
     pressure, inserted fixups, and spill actions.

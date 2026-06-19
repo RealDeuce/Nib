@@ -54,8 +54,8 @@ counts, live ranges with their final allocation, dead/early-load warnings,
 and call-split advice. Fixup reasons include call argument routing,
 caller-save save/restore, CL routing for variable shifts, address-register
 routing, and return-value capture/reload around calls. Spill actions
-include spill loads/stores, scratch save/restore, and memory-to-memory
-routes.
+include spill loads/stores, scratch save/restore, stack call-argument
+routes, call-temp return saves/reloads, and memory-to-memory routes.
 
 ### Examples
 

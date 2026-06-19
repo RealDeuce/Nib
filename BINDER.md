@@ -158,8 +158,9 @@ and lowering IR instructions (RINS_IR) to V20 assembly:
   - `emit_mov()`: byte/word conversion, seg-to-seg, spill-to-spill
 - Operand planning classifies each vreg as register, spill slot, stack
   home, or local slot. Spill loads, spill stores, scratch save/restore,
-  and memory-to-memory routes go through shared helpers so pressure
-  reports can account for them.
+  call-temp saves/reloads, stack call-argument routes, and
+  memory-to-memory routes go through shared helpers so pressure reports
+  can account for them.
 - CMP+Jcc: finds preceding CMP and emits correct conditional jump
 - Calls: `call label` (near) or `call far seg:off` (extern)
 - Inline asm: spliced through verbatim

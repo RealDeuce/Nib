@@ -3861,6 +3861,8 @@ static void note_fixup(func_t *fn, fixup_reason_t reason) {
     fn->fixup_counts[reason]++;
 }
 
+static void note_spill_action(func_t *fn, spill_action_t action);
+
 static void rins_asm_fixup(func_t *fn, fixup_reason_t reason,
                            const char *fmt, ...) {
     if (fn->nresolved >= MAX_RESOLVED) return;
@@ -3872,6 +3874,19 @@ static void rins_asm_fixup(func_t *fn, fixup_reason_t reason,
     va_end(ap);
     fn->nresolved++;
     note_fixup(fn, reason);
+}
+
+static void rins_asm_spill(func_t *fn, spill_action_t action,
+                           const char *fmt, ...) {
+    if (fn->nresolved >= MAX_RESOLVED) return;
+    fn->resolved[fn->nresolved].kind = RINS_ASM;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(fn->resolved[fn->nresolved].asm_text,
+              sizeof(fn->resolved[fn->nresolved].asm_text), fmt, ap);
+    va_end(ap);
+    fn->nresolved++;
+    note_spill_action(fn, action);
 }
 
 static bool preg_covered_by_pusha(int preg) {
@@ -4141,9 +4156,44 @@ static void call_area_operand(char *buf, size_t bufsz, int disp) {
         snprintf(buf, bufsz, "[SS:BX+%d]", disp);
 }
 
+static void rins_spill_load_to_reg(func_t *fn, int dst_preg, int src_vreg) {
+    rins_asm_spill(fn, SPILL_LOAD, "    mov %s, %s",
+                   preg_name[dst_preg], vreg_asm(fn, src_vreg));
+}
+
+static void rins_spill_store_from_reg(func_t *fn, int dst_vreg,
+                                      const char *src_reg) {
+    rins_asm_spill(fn, SPILL_STORE, "    mov %s, %s",
+                   vreg_asm(fn, dst_vreg), src_reg);
+}
+
+static void rins_spill_route_move(func_t *fn, const char *dst,
+                                  const char *src) {
+    rins_asm_spill(fn, SPILL_MEM_ROUTE, "    mov %s, %s", dst, src);
+}
+
+static void rins_spill_route_push(func_t *fn, const char *src) {
+    rins_asm_spill(fn, SPILL_MEM_ROUTE, "    push %s", src);
+}
+
+static void rins_spill_route_pop(func_t *fn, const char *dst) {
+    rins_asm_spill(fn, SPILL_MEM_ROUTE, "    pop %s", dst);
+}
+
+static void rins_push_scratch(func_t *fn, int preg) {
+    rins_asm_spill(fn, SPILL_SCRATCH_SAVE, "    push %s", preg_name[preg]);
+}
+
+static void rins_pop_scratch(func_t *fn, int preg) {
+    rins_asm_spill(fn, SPILL_SCRATCH_RESTORE, "    pop %s", preg_name[preg]);
+}
+
 static void rins_push_byte_vreg(func_t *fn, int src_vreg) {
     rins_asm(fn, "    push AX");
-    rins_asm(fn, "    mov AL, %s", vreg_asm(fn, src_vreg));
+    if (is_spilled(fn, src_vreg))
+        rins_spill_load_to_reg(fn, PREG_AL, src_vreg);
+    else
+        rins_asm(fn, "    mov AL, %s", vreg_asm(fn, src_vreg));
     rins_asm(fn, "    push BP");
     rins_asm(fn, "    mov BP, SP");
     rins_asm(fn, "    xchg AX, [BP+2]");
@@ -4155,6 +4205,8 @@ static void rins_push_vreg_temp(func_t *fn, int src_vreg) {
         return;
     if (fn->vregs[src_vreg].is_byte) {
         rins_push_byte_vreg(fn, src_vreg);
+    } else if (is_spilled(fn, src_vreg)) {
+        rins_spill_route_push(fn, vreg_asm(fn, src_vreg));
     } else {
         rins_asm(fn, "    push %s", vreg_asm(fn, src_vreg));
     }
@@ -4168,16 +4220,16 @@ static void rins_load_call_slot(func_t *fn, int ret_vreg, int disp) {
     bool is_byte = fn->vregs[ret_vreg].is_byte;
     bool is_seg = fn->vregs[ret_vreg].is_seg;
     if (is_seg) {
-        rins_asm(fn, "    push AX");
-        rins_asm(fn, "    mov AX, %s", src);
+        rins_push_scratch(fn, PREG_AX);
+        rins_spill_route_move(fn, "AX", src);
         rins_asm(fn, "    mov %s, AX", vreg_asm(fn, ret_vreg));
-        rins_asm(fn, "    pop AX");
+        rins_pop_scratch(fn, PREG_AX);
     } else if (is_spilled(fn, ret_vreg)) {
         const char *acc = is_byte ? "AL" : "AX";
-        rins_asm(fn, "    mov %s, %s", acc, src);
-        rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), acc);
+        rins_spill_route_move(fn, acc, src);
+        rins_spill_store_from_reg(fn, ret_vreg, acc);
     } else {
-        rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), src);
+        rins_spill_route_move(fn, vreg_asm(fn, ret_vreg), src);
     }
 }
 
@@ -4190,6 +4242,8 @@ static void rins_push_ret_src(func_t *fn, int src_vreg) {
         return;
     if (fn->vregs[src_vreg].is_byte) {
         rins_push_byte_vreg(fn, src_vreg);
+    } else if (is_spilled(fn, src_vreg)) {
+        rins_spill_route_push(fn, vreg_asm(fn, src_vreg));
     } else {
         rins_asm(fn, "    push %s", vreg_asm(fn, src_vreg));
     }
@@ -4214,7 +4268,7 @@ static void rins_pop_bp_slot(func_t *fn, int bp_off, bool is_byte) {
         rins_asm(fn, "    pop AX");
         rins_asm(fn, "    mov %s, AL", dst);
     } else {
-        rins_asm(fn, "    pop %s", dst);
+        rins_spill_route_pop(fn, dst);
     }
 }
 
@@ -4271,10 +4325,13 @@ static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
     if (expected >= PREG_ES && expected <= PREG_DS) {
         if (actual == expected)
             return;
-        rins_asm(fn, "    push AX");
-        rins_asm(fn, "    mov AX, %s", src);
+        rins_push_scratch(fn, PREG_AX);
+        if (is_spilled(fn, src_vreg))
+            rins_spill_load_to_reg(fn, PREG_AX, src_vreg);
+        else
+            rins_asm(fn, "    mov AX, %s", src);
         rins_asm(fn, "    mov %s, AX", dst);
-        rins_asm(fn, "    pop AX");
+        rins_pop_scratch(fn, PREG_AX);
         return;
     }
 
@@ -4288,13 +4345,16 @@ static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
             if (expected == PREG_AL) {
                 rins_asm(fn, "    mov AX, %s", preg_name[actual]);
             } else {
-                rins_asm(fn, "    push AX");
+                rins_push_scratch(fn, PREG_AX);
                 rins_asm(fn, "    mov AX, %s", preg_name[actual]);
                 rins_asm(fn, "    mov %s, AL", dst);
-                rins_asm(fn, "    pop AX");
+                rins_pop_scratch(fn, PREG_AX);
             }
         } else {
-            rins_asm(fn, "    mov %s, %s", dst, src);
+            if (is_spilled(fn, src_vreg))
+                rins_asm_spill(fn, SPILL_LOAD, "    mov %s, %s", dst, src);
+            else
+                rins_asm(fn, "    mov %s, %s", dst, src);
         }
         return;
     }
@@ -4302,19 +4362,29 @@ static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
     if (!dst_byte && (src_byte || preg_is_byte(actual)) &&
         preg_is_word(expected)) {
         if (expected >= PREG_AX && expected <= PREG_BX) {
-            rins_asm(fn, "    mov %s, %s",
-                     preg_name[preg_alias_lo[expected]], src);
+            if (is_spilled(fn, src_vreg))
+                rins_asm_spill(fn, SPILL_LOAD, "    mov %s, %s",
+                               preg_name[preg_alias_lo[expected]], src);
+            else
+                rins_asm(fn, "    mov %s, %s",
+                         preg_name[preg_alias_lo[expected]], src);
         } else {
-            rins_asm(fn, "    push AX");
+            rins_push_scratch(fn, PREG_AX);
             rins_asm(fn, "    xor AX, AX");
-            rins_asm(fn, "    mov AL, %s", src);
+            if (is_spilled(fn, src_vreg))
+                rins_spill_load_to_reg(fn, PREG_AL, src_vreg);
+            else
+                rins_asm(fn, "    mov AL, %s", src);
             rins_asm(fn, "    mov %s, AX", dst);
-            rins_asm(fn, "    pop AX");
+            rins_pop_scratch(fn, PREG_AX);
         }
         return;
     }
 
-    rins_asm(fn, "    mov %s, %s", dst, src);
+    if (is_spilled(fn, src_vreg))
+        rins_spill_load_to_reg(fn, expected, src_vreg);
+    else
+        rins_asm(fn, "    mov %s, %s", dst, src);
 }
 
 typedef struct {
@@ -4498,6 +4568,7 @@ static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
 static void insert_fixup_moves(func_t *fn, int fn_idx) {
     fn->nresolved = 0;
     memset(fn->fixup_counts, 0, sizeof(fn->fixup_counts));
+    memset(fn->spill_action_counts, 0, sizeof(fn->spill_action_counts));
 
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
@@ -5373,9 +5444,9 @@ static void rins_store_call_temp_return(func_t *fn, int expected,
     char dst[32];
     call_temp_operand(fn, dst, sizeof(dst));
     if (is_byte)
-        rins_asm(fn, "    mov %s, %s", dst, preg_name[expected]);
+        rins_spill_route_move(fn, dst, preg_name[expected]);
     else
-        rins_asm(fn, "    mov %s, %s", dst, preg_name[expected]);
+        rins_spill_route_move(fn, dst, preg_name[expected]);
 }
 
 static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
@@ -5386,20 +5457,20 @@ static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
         return;
     if (is_spilled(fn, ret_vreg)) {
         const char *acc = is_byte ? "AL" : "AX";
-        rins_asm(fn, "    push AX");
-        rins_asm(fn, "    mov %s, %s", acc, src);
-        rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), acc);
-        rins_asm(fn, "    pop AX");
+        rins_push_scratch(fn, PREG_AX);
+        rins_spill_route_move(fn, acc, src);
+        rins_spill_store_from_reg(fn, ret_vreg, acc);
+        rins_pop_scratch(fn, PREG_AX);
     } else {
         int actual = vreg_preg(fn, ret_vreg);
         if (actual == PREG_AX || actual == PREG_AL || actual == PREG_AH) {
-            rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), src);
+            rins_spill_route_move(fn, vreg_asm(fn, ret_vreg), src);
         } else {
             const char *acc = is_byte ? "AL" : "AX";
-            rins_asm(fn, "    push AX");
-            rins_asm(fn, "    mov %s, %s", acc, src);
+            rins_push_scratch(fn, PREG_AX);
+            rins_spill_route_move(fn, acc, src);
             rins_asm(fn, "    mov %s, %s", vreg_asm(fn, ret_vreg), acc);
-            rins_asm(fn, "    pop AX");
+            rins_pop_scratch(fn, PREG_AX);
         }
     }
 }
@@ -5716,18 +5787,16 @@ static void emit_param_entry_moves(func_t *fn, int fn_idx) {
 
         if (is_spilled(fn, v)) {
             if (expected == PREG_BP && fn->needs_frame) {
-                fprintf(out_asm, "    push AX\n");
+                emit_push_scratch(fn, PREG_AX);
                 fprintf(out_asm, "    mov AX, [BP]\n");
-                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, v));
-                fprintf(out_asm, "    pop AX\n");
+                emit_spill_store_from_reg(fn, v, "AX");
+                emit_pop_scratch(fn, PREG_AX);
                 continue;
             }
             if (fn->vregs[v].is_byte)
-                fprintf(out_asm, "    mov %s, %s\n",
-                        vreg_asm_sized(fn, v), preg_name[expected]);
+                emit_spill_store_from_reg(fn, v, preg_name[expected]);
             else
-                fprintf(out_asm, "    mov %s, %s\n",
-                        vreg_asm(fn, v), preg_name[expected]);
+                emit_spill_store_from_reg(fn, v, preg_name[expected]);
             continue;
         }
 

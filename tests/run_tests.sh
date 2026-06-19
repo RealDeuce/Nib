@@ -718,7 +718,9 @@ cat > "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir <<'NIR'
     ret
 .endfn
 NIR
-if ./nibbind "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm >/dev/null 2>&1; then
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_icall_ret_alias_temp_pressure.txt \
+     "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir \
+     -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm >/dev/null 2>&1; then
     ret_alias_window=$(sed -n '/icall_ret_alias_temp_icall_ret_alias_temp:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm)
     if ./nibasm "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.bin >/dev/null 2>&1 &&
        printf "%s\n" "$ret_alias_window" | grep -q 'call far \[SS:BX\]' &&
@@ -738,7 +740,20 @@ if ./nibbind "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir -o "$TEST_TMPDIR"/t_icall
         fail "icall-ret-alias-temp" "AL return temp was missing or used BP+0"
     fi
 else
-    fail "icall-ret-alias-temp" "$(./nibbind "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm 2>&1 | tail -1)"
+    fail "icall-ret-alias-temp" "$(
+        ./nibbind --pressure-report \
+          "$TEST_TMPDIR"/t_icall_ret_alias_temp_pressure.txt \
+          "$TEST_TMPDIR"/t_icall_ret_alias_temp.nir \
+          -o "$TEST_TMPDIR"/t_icall_ret_alias_temp.asm 2>&1 | tail -1
+    )"
+fi
+if grep -q '^fixups: .*ret-capture=[1-9].*ret-reload=[1-9]' \
+     "$TEST_TMPDIR"/t_icall_ret_alias_temp_pressure.txt &&
+   grep -q '^spill-actions: .*mem-route=[1-9]' \
+     "$TEST_TMPDIR"/t_icall_ret_alias_temp_pressure.txt; then
+    pass "pressure-report: return temp routes counted"
+else
+    fail "pressure-report-ret-temp" "return temp spill-route counts missing"
 fi
 
 cat > "$TEST_TMPDIR"/t_icall_bl_arg_scratch.nir <<'NIR'
@@ -806,6 +821,23 @@ if [ -f "$TEST_TMPDIR"/t_icall_far_param.asm ]; then
     else
         fail "icall-far-param" "far32 stack target was repacked"
     fi
+fi
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_icall_far_param_pressure.txt \
+     --pressure-fn caller tests/t_icall_far_param.nir \
+     -o "$TEST_TMPDIR"/t_icall_far_param_pressure.asm >/dev/null 2>&1; then
+    if grep -q '^spill-actions: .*mem-route=[1-9]' \
+         "$TEST_TMPDIR"/t_icall_far_param_pressure.txt; then
+        pass "pressure-report: stack call arg routes counted"
+    else
+        fail "pressure-report-stack-args" "stack argument route count missing"
+    fi
+else
+    fail "pressure-report-stack-args" "$(
+        ./nibbind --pressure-report \
+          "$TEST_TMPDIR"/t_icall_far_param_pressure.txt \
+          --pressure-fn caller tests/t_icall_far_param.nir \
+          -o "$TEST_TMPDIR"/t_icall_far_param_pressure.asm 2>&1 | tail -1
+    )"
 fi
 
 if [ -f "$TEST_TMPDIR"/t_icall_multi.asm ]; then
