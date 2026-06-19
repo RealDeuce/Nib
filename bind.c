@@ -435,6 +435,8 @@ static void rins_load_call_temp_return(func_t *fn, int ret_vreg,
 
 static const char *pressure_report_path = NULL;
 static const char *pressure_fn_filter = NULL;
+static const char *pressure_compare_old_path = NULL;
+static const char *pressure_compare_new_path = NULL;
 
 static bool insn_defines_dst(const ir_insn_t *ins) {
     if (!ins || ins->dst < 0)
@@ -2768,6 +2770,392 @@ static void write_pressure_report(const char *path) {
 
     if (out != stdout)
         fclose(out);
+}
+
+#define MAX_PRESSURE_COMPARE_FUNCS 512
+#define MAX_PRESSURE_COMPARE_ALLOCS 1024
+
+typedef struct {
+    int vreg;
+    char alloc[32];
+} pressure_compare_alloc_t;
+
+typedef struct {
+    char name[64];
+    int ordinal;
+    bool has_summary;
+    bool has_allocation;
+    bool has_fixups;
+    bool has_spill_actions;
+    int vregs;
+    int spills;
+    int peak_live;
+    int alloc_spilled;
+    int peak_fixed;
+    int peak_preferred;
+    int peak_spilled;
+    int fixups[FIXUP_NUM];
+    int fixup_total;
+    int spill_actions[SPILL_NUM];
+    int spill_action_total;
+    pressure_compare_alloc_t allocs[MAX_PRESSURE_COMPARE_ALLOCS];
+    int nallocs;
+} pressure_compare_func_t;
+
+typedef struct {
+    pressure_compare_func_t funcs[MAX_PRESSURE_COMPARE_FUNCS];
+    int nfuncs;
+} pressure_compare_report_t;
+
+static bool line_starts(const char *line, const char *prefix) {
+    return strncmp(line, prefix, strlen(prefix)) == 0;
+}
+
+static bool parse_report_metric(const char *line, const char *key,
+                                int *out) {
+    const char *p = strstr(line, key);
+    size_t klen = strlen(key);
+    if (!p || p[klen] != '=')
+        return false;
+    p += klen + 1;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p)
+        return false;
+    *out = (int)v;
+    return true;
+}
+
+static int count_compare_funcs(pressure_compare_report_t *report,
+                               const char *name) {
+    int count = 0;
+    for (int i = 0; i < report->nfuncs; i++)
+        if (strcmp(report->funcs[i].name, name) == 0)
+            count++;
+    return count;
+}
+
+static pressure_compare_func_t *
+find_compare_func_occurrence(pressure_compare_report_t *report,
+                             const char *name, int ordinal) {
+    for (int i = 0; i < report->nfuncs; i++)
+        if (strcmp(report->funcs[i].name, name) == 0 &&
+            report->funcs[i].ordinal == ordinal)
+            return &report->funcs[i];
+    return NULL;
+}
+
+static void print_compare_func_label(FILE *out,
+                                     pressure_compare_func_t *fn) {
+    fprintf(out, "%s", fn->name);
+    if (fn->ordinal > 1)
+        fprintf(out, "#%d", fn->ordinal);
+}
+
+static const char *find_compare_alloc(pressure_compare_func_t *fn, int vreg) {
+    if (!fn)
+        return NULL;
+    for (int i = 0; i < fn->nallocs; i++)
+        if (fn->allocs[i].vreg == vreg)
+            return fn->allocs[i].alloc;
+    return NULL;
+}
+
+static bool parse_compare_function_header(const char *line, char *name,
+                                          size_t namesz) {
+    if (!line_starts(line, "== "))
+        return false;
+    const char *start = line + 3;
+    const char *end = strstr(start, " ==");
+    if (!end || end == start)
+        return false;
+    size_t n = (size_t)(end - start);
+    if (n >= namesz)
+        n = namesz - 1;
+    memcpy(name, start, n);
+    name[n] = '\0';
+    return true;
+}
+
+static void parse_compare_alloc_line(pressure_compare_func_t *fn,
+                                     const char *line) {
+    if (!fn || fn->nallocs >= MAX_PRESSURE_COMPARE_ALLOCS)
+        return;
+    const char *p = line;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (*p != '%')
+        return;
+    p++;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p || v < 0)
+        return;
+    const char *alloc = strstr(end, " alloc=");
+    if (!alloc)
+        return;
+    alloc += 7;
+    const char *aend = alloc;
+    while (*aend && !isspace((unsigned char)*aend))
+        aend++;
+    size_t n = (size_t)(aend - alloc);
+    if (n == 0)
+        return;
+    if (n >= sizeof(fn->allocs[fn->nallocs].alloc))
+        n = sizeof(fn->allocs[fn->nallocs].alloc) - 1;
+    fn->allocs[fn->nallocs].vreg = (int)v;
+    memcpy(fn->allocs[fn->nallocs].alloc, alloc, n);
+    fn->allocs[fn->nallocs].alloc[n] = '\0';
+    fn->nallocs++;
+}
+
+static int parse_pressure_compare_report(const char *path,
+                                         pressure_compare_report_t *report) {
+    memset(report, 0, sizeof(*report));
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        perror(path);
+        return 1;
+    }
+
+    char line[1024];
+    bool saw_header = false;
+    bool in_live_ranges = false;
+    pressure_compare_func_t *cur = NULL;
+    int lineno = 0;
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strcmp(line, "# Nib pressure report") == 0) {
+            saw_header = true;
+            continue;
+        }
+
+        char name[64];
+        if (parse_compare_function_header(line, name, sizeof(name))) {
+            in_live_ranges = false;
+            if (report->nfuncs >= MAX_PRESSURE_COMPARE_FUNCS) {
+                fprintf(stderr, "%s:%d: too many functions in report\n",
+                        path, lineno);
+                fclose(f);
+                return 1;
+            }
+            cur = &report->funcs[report->nfuncs++];
+            strncpy(cur->name, name, sizeof(cur->name) - 1);
+            cur->ordinal = count_compare_funcs(report, name);
+            continue;
+        }
+
+        if (!cur)
+            continue;
+
+        if (line[0] == '\0') {
+            in_live_ranges = false;
+            continue;
+        }
+        if (strcmp(line, "live ranges:") == 0) {
+            in_live_ranges = true;
+            continue;
+        }
+        if (in_live_ranges) {
+            parse_compare_alloc_line(cur, line);
+            continue;
+        }
+
+        if (line_starts(line, "summary:")) {
+            cur->has_summary =
+                parse_report_metric(line, "vregs", &cur->vregs) &&
+                parse_report_metric(line, "spills", &cur->spills) &&
+                parse_report_metric(line, "peak_live", &cur->peak_live);
+        } else if (line_starts(line, "allocation:")) {
+            cur->has_allocation =
+                parse_report_metric(line, "spilled", &cur->alloc_spilled) &&
+                parse_report_metric(line, "peak_fixed", &cur->peak_fixed) &&
+                parse_report_metric(line, "peak_preferred",
+                                    &cur->peak_preferred) &&
+                parse_report_metric(line, "peak_spilled",
+                                    &cur->peak_spilled);
+        } else if (line_starts(line, "fixups:")) {
+            bool ok = true;
+            for (int i = 0; i < FIXUP_NUM; i++)
+                ok = parse_report_metric(line, fixup_reason_name[i],
+                                         &cur->fixups[i]) && ok;
+            ok = parse_report_metric(line, "total", &cur->fixup_total) && ok;
+            cur->has_fixups = ok;
+        } else if (line_starts(line, "spill-actions:")) {
+            bool ok = true;
+            for (int i = 0; i < SPILL_NUM; i++)
+                ok = parse_report_metric(line, spill_action_name[i],
+                                         &cur->spill_actions[i]) && ok;
+            ok = parse_report_metric(line, "total",
+                                     &cur->spill_action_total) && ok;
+            cur->has_spill_actions = ok;
+        }
+    }
+    fclose(f);
+
+    if (!saw_header || report->nfuncs == 0) {
+        fprintf(stderr, "%s: not a pressure report\n", path);
+        return 1;
+    }
+    for (int i = 0; i < report->nfuncs; i++) {
+        pressure_compare_func_t *fn = &report->funcs[i];
+        if (!fn->has_summary || !fn->has_allocation ||
+            !fn->has_fixups || !fn->has_spill_actions) {
+            fprintf(stderr, "%s: incomplete pressure section for '%s'\n",
+                    path, fn->name);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void print_metric_delta(FILE *out, const char *name,
+                               int oldv, int newv, int *changes) {
+    int delta = newv - oldv;
+    if (delta == 0)
+        return;
+    fprintf(out, "  %s: %d -> %d (%+d)\n", name, oldv, newv, delta);
+    (*changes)++;
+}
+
+static void print_count_delta(FILE *out, const char *section,
+                              const char **names, int count,
+                              int *oldv, int *newv, int old_total,
+                              int new_total, int *changes) {
+    bool any = old_total != new_total;
+    for (int i = 0; i < count; i++)
+        if (oldv[i] != newv[i])
+            any = true;
+    if (!any)
+        return;
+
+    fprintf(out, "  %s:", section);
+    for (int i = 0; i < count; i++)
+        if (oldv[i] != newv[i])
+            fprintf(out, " %s=%d->%d(%+d)", names[i], oldv[i], newv[i],
+                    newv[i] - oldv[i]);
+    if (old_total != new_total)
+        fprintf(out, " total=%d->%d(%+d)", old_total, new_total,
+                new_total - old_total);
+    fputc('\n', out);
+    (*changes)++;
+}
+
+static void compare_alloc_changes(FILE *out, pressure_compare_func_t *old_fn,
+                                  pressure_compare_func_t *new_fn,
+                                  int *changes) {
+    int printed = 0;
+    for (int i = 0; i < old_fn->nallocs; i++) {
+        int v = old_fn->allocs[i].vreg;
+        const char *new_alloc = find_compare_alloc(new_fn, v);
+        if (!new_alloc || strcmp(old_fn->allocs[i].alloc, new_alloc) == 0)
+            continue;
+        if (printed == 0)
+            fprintf(out, "  allocations:\n");
+        if (printed < 16) {
+            fprintf(out, "    %%%d: %s -> %s\n", v,
+                    old_fn->allocs[i].alloc, new_alloc);
+        }
+        printed++;
+    }
+    if (printed > 16)
+        fprintf(out, "    ... %d more allocation changes\n", printed - 16);
+    if (printed > 0)
+        (*changes)++;
+}
+
+static int compare_pressure_reports(const char *old_path,
+                                    const char *new_path) {
+    pressure_compare_report_t old_report;
+    pressure_compare_report_t new_report;
+    if (parse_pressure_compare_report(old_path, &old_report) != 0)
+        return 1;
+    if (parse_pressure_compare_report(new_path, &new_report) != 0)
+        return 1;
+
+    int changes = 0;
+    printf("# Nib pressure comparison\n");
+    printf("old: %s\n", old_path);
+    printf("new: %s\n", new_path);
+
+    for (int i = 0; i < old_report.nfuncs; i++) {
+        pressure_compare_func_t *old_fn = &old_report.funcs[i];
+        if (pressure_fn_filter && strcmp(pressure_fn_filter,
+                                         old_fn->name) != 0)
+            continue;
+        pressure_compare_func_t *new_fn =
+            find_compare_func_occurrence(&new_report, old_fn->name,
+                                         old_fn->ordinal);
+        if (!new_fn) {
+            printf("\n== ");
+            print_compare_func_label(stdout, old_fn);
+            printf(" ==\n  removed function\n");
+            changes++;
+            continue;
+        }
+
+        int fn_changes = 0;
+        char body[8192];
+        FILE *mem = fmemopen(body, sizeof(body), "w");
+        if (!mem) {
+            fprintf(stderr, "pressure compare: fmemopen failed\n");
+            return 1;
+        }
+
+        print_metric_delta(mem, "vregs", old_fn->vregs, new_fn->vregs,
+                           &fn_changes);
+        print_metric_delta(mem, "spills", old_fn->spills, new_fn->spills,
+                           &fn_changes);
+        print_metric_delta(mem, "peak_live", old_fn->peak_live,
+                           new_fn->peak_live, &fn_changes);
+        print_metric_delta(mem, "allocation.spilled", old_fn->alloc_spilled,
+                           new_fn->alloc_spilled, &fn_changes);
+        print_metric_delta(mem, "allocation.peak_fixed",
+                           old_fn->peak_fixed, new_fn->peak_fixed,
+                           &fn_changes);
+        print_metric_delta(mem, "allocation.peak_preferred",
+                           old_fn->peak_preferred,
+                           new_fn->peak_preferred, &fn_changes);
+        print_metric_delta(mem, "allocation.peak_spilled",
+                           old_fn->peak_spilled, new_fn->peak_spilled,
+                           &fn_changes);
+        print_count_delta(mem, "fixups", fixup_reason_name, FIXUP_NUM,
+                          old_fn->fixups, new_fn->fixups,
+                          old_fn->fixup_total, new_fn->fixup_total,
+                          &fn_changes);
+        print_count_delta(mem, "spill-actions", spill_action_name, SPILL_NUM,
+                          old_fn->spill_actions, new_fn->spill_actions,
+                          old_fn->spill_action_total,
+                          new_fn->spill_action_total, &fn_changes);
+        compare_alloc_changes(mem, old_fn, new_fn, &fn_changes);
+        fclose(mem);
+
+        if (fn_changes > 0) {
+            printf("\n== ");
+            print_compare_func_label(stdout, old_fn);
+            printf(" ==\n%s", body);
+            changes += fn_changes;
+        }
+    }
+
+    for (int i = 0; i < new_report.nfuncs; i++) {
+        pressure_compare_func_t *new_fn = &new_report.funcs[i];
+        if (pressure_fn_filter && strcmp(pressure_fn_filter,
+                                         new_fn->name) != 0)
+            continue;
+        if (!find_compare_func_occurrence(&old_report, new_fn->name,
+                                          new_fn->ordinal)) {
+            printf("\n== ");
+            print_compare_func_label(stdout, new_fn);
+            printf(" ==\n  added function\n");
+            changes++;
+        }
+    }
+
+    if (changes == 0)
+        printf("\nNo pressure changes.\n");
+    return 0;
 }
 
 /* ================================================================
@@ -7775,15 +8163,33 @@ int main(int argc, char **argv) {
             pressure_report_path = argv[++i];
         } else if (strcmp(argv[i], "--pressure-fn") == 0 && i + 1 < argc) {
             pressure_fn_filter = argv[++i];
+        } else if (strcmp(argv[i], "--pressure-compare") == 0 &&
+                   i + 2 < argc) {
+            pressure_compare_old_path = argv[++i];
+            pressure_compare_new_path = argv[++i];
         } else {
             inputs[ninputs++] = argv[i];
         }
     }
 
+    if (pressure_compare_old_path || pressure_compare_new_path) {
+        if (!pressure_compare_old_path || !pressure_compare_new_path ||
+            ninputs != 0) {
+            fprintf(stderr,
+                    "usage: nibbind --pressure-compare old new "
+                    "[--pressure-fn name]\n");
+            return 1;
+        }
+        return compare_pressure_reports(pressure_compare_old_path,
+                                        pressure_compare_new_path);
+    }
+
     if (ninputs == 0) {
         fprintf(stderr,
                 "usage: nibbind [-o out.asm] [--pressure-report file]\n"
-                "               [--pressure-fn name] file.nir ...\n");
+                "               [--pressure-fn name] file.nir ...\n"
+                "       nibbind --pressure-compare old new "
+                "[--pressure-fn name]\n");
         return 1;
     }
 

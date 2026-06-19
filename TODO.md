@@ -14,9 +14,6 @@
   handled consistently across functions, globals, data blocks, externs,
   use directives, labels, and fixup lists.
 - Binder allocator next pass:
-  - Teach pressure reports to compare before/after allocator decisions
-    across revisions: selected colors, actual spills, fixed-register
-    pressure, inserted fixups, and spill actions.
   - Use the reports to target high-pressure Serif functions such as RTC
     read/write paths and framebuffer blits before changing heuristics.
 

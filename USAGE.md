@@ -35,6 +35,7 @@ Reads `.nir` files and outputs fully-resolved V20 assembly.
 ```
 nibbind [-o output.asm] [--pressure-report file]
         [--pressure-fn name] file1.nir [file2.nir ...]
+nibbind --pressure-compare old.txt new.txt [--pressure-fn name]
 ```
 
 | Flag | Description |
@@ -42,6 +43,7 @@ nibbind [-o output.asm] [--pressure-report file]
 | `-o file` | Output assembly file (default: `out.asm`) |
 | `--pressure-report file` | Write pressure, allocation, and fixup diagnostics |
 | `--pressure-fn name` | Limit the pressure report to one function |
+| `--pressure-compare old new` | Compare two existing pressure reports |
 
 Accepts multiple `.nir` files. Builds the call graph, propagates
 register preferences bottom-up from leaf functions, allocates physical
@@ -57,6 +59,11 @@ routing, and return-value capture/reload around calls. Spill actions
 include spill loads/stores, scratch save/restore, stack call-argument
 routes, call-temp return saves/reloads, and memory-to-memory routes.
 
+`--pressure-compare` is a compare-only mode. It reads two existing
+pressure reports and prints per-function deltas for live pressure, spill
+counts, allocation pressure, fixups, spill actions, and selected vreg
+allocation changes.
+
 ### Examples
 
 ```sh
@@ -64,6 +71,8 @@ routes, call-temp return saves/reloads, and memory-to-memory routes.
 ./nibbind module.nir -o module.asm
 ./nibbind app.nir lib.nir -o program.asm \
   --pressure-report pressure.txt --pressure-fn boot
+./nibbind --pressure-compare pressure-before.txt pressure-after.txt \
+  --pressure-fn boot
 ```
 
 ---

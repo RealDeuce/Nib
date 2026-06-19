@@ -172,6 +172,14 @@ After all functions:
 - Constant pool (string literals, far references with SEG operator)
 - Data blocks (initialized globals with `seg`/`org` placement)
 
+## Pressure report comparison
+
+`nibbind --pressure-compare old.txt new.txt` compares two existing
+pressure reports. It reports per-function deltas for live pressure,
+spill counts, allocation pressure, fixups, spill actions, and selected
+vreg allocation changes. `--pressure-fn name` filters the comparison to
+one function, matching pressure-report filtering.
+
 ## Stack frame layout
 
 ```

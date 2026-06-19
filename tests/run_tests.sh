@@ -1225,6 +1225,88 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/pressure_old.txt <<'REPORT'
+# Nib pressure report
+
+== foo ==
+summary: vregs=3 spills=0 peak_live=2 at a.nib:10 u8=0 u16=2 seg=0 far32=0
+allocation: spilled=0 peak_fixed=1 peak_preferred=0 peak_spilled=0
+fixups: call-arg=0 call-save=1 call-restore=1 cl-route=0 addr-route=0 ret-capture=0 ret-reload=0 total=2
+spill-actions: spill-load=0 spill-store=0 scratch-save=0 scratch-restore=0 mem-route=0 total=0
+
+live ranges:
+  %0 u16   def a.nib:1 first a.nib:2 last a.nib:3 uses=1 alloc=AX
+  %1 u16   def a.nib:1 first a.nib:2 last a.nib:3 uses=1 alloc=BX
+
+== removed ==
+summary: vregs=1 spills=0 peak_live=1 at a.nib:1 u8=0 u16=1 seg=0 far32=0
+allocation: spilled=0 peak_fixed=0 peak_preferred=0 peak_spilled=0
+fixups: call-arg=0 call-save=0 call-restore=0 cl-route=0 addr-route=0 ret-capture=0 ret-reload=0 total=0
+spill-actions: spill-load=0 spill-store=0 scratch-save=0 scratch-restore=0 mem-route=0 total=0
+REPORT
+cat > "$TEST_TMPDIR"/pressure_new.txt <<'REPORT'
+# Nib pressure report
+
+== foo ==
+summary: vregs=4 spills=1 peak_live=3 at a.nib:10 u8=0 u16=3 seg=0 far32=0
+allocation: spilled=1 peak_fixed=1 peak_preferred=1 peak_spilled=1
+fixups: call-arg=1 call-save=1 call-restore=1 cl-route=0 addr-route=0 ret-capture=0 ret-reload=0 total=3
+spill-actions: spill-load=2 spill-store=1 scratch-save=0 scratch-restore=0 mem-route=1 total=4
+
+live ranges:
+  %0 u16   def a.nib:1 first a.nib:2 last a.nib:3 uses=1 alloc=spill0
+  %1 u16   def a.nib:1 first a.nib:2 last a.nib:3 uses=1 alloc=BX
+
+== added ==
+summary: vregs=1 spills=0 peak_live=1 at a.nib:1 u8=0 u16=1 seg=0 far32=0
+allocation: spilled=0 peak_fixed=0 peak_preferred=0 peak_spilled=0
+fixups: call-arg=0 call-save=0 call-restore=0 cl-route=0 addr-route=0 ret-capture=0 ret-reload=0 total=0
+spill-actions: spill-load=0 spill-store=0 scratch-save=0 scratch-restore=0 mem-route=0 total=0
+REPORT
+if ./nibbind --pressure-compare "$TEST_TMPDIR"/pressure_old.txt \
+     "$TEST_TMPDIR"/pressure_new.txt \
+     > "$TEST_TMPDIR"/pressure_compare.txt 2>&1; then
+    if grep -q '^# Nib pressure comparison' \
+         "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q '^== foo ==$' "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q 'spills: 0 -> 1 (+1)' \
+         "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q 'fixups: .*call-arg=0->1(+1)' \
+         "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q 'spill-actions: .*spill-load=0->2(+2).*mem-route=0->1(+1)' \
+         "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q '%0: AX -> spill0' "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q '^== removed ==$' "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q '^  removed function$' "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q '^== added ==$' "$TEST_TMPDIR"/pressure_compare.txt &&
+       grep -q '^  added function$' "$TEST_TMPDIR"/pressure_compare.txt; then
+        pass "pressure-compare: metrics, counts, allocs, functions"
+    else
+        fail "pressure-compare" "expected comparison deltas missing"
+    fi
+else
+    fail "pressure-compare" "$(tail -1 "$TEST_TMPDIR"/pressure_compare.txt)"
+fi
+if ./nibbind --pressure-compare "$TEST_TMPDIR"/pressure_old.txt \
+     "$TEST_TMPDIR"/pressure_old.txt \
+     > "$TEST_TMPDIR"/pressure_compare_same.txt 2>&1 &&
+   grep -q '^No pressure changes\.$' \
+     "$TEST_TMPDIR"/pressure_compare_same.txt; then
+    pass "pressure-compare: identical reports are quiet"
+else
+    fail "pressure-compare-same" "identical reports were not quiet"
+fi
+if ./nibbind --pressure-compare "$TEST_TMPDIR"/pressure_old.txt \
+     "$TEST_TMPDIR"/pressure_new.txt --pressure-fn foo \
+     > "$TEST_TMPDIR"/pressure_compare_filter.txt 2>&1 &&
+   grep -q '^== foo ==$' "$TEST_TMPDIR"/pressure_compare_filter.txt &&
+   ! grep -q '^== removed ==$\|^== added ==$' \
+      "$TEST_TMPDIR"/pressure_compare_filter.txt; then
+    pass "pressure-compare: --pressure-fn filters functions"
+else
+    fail "pressure-compare-filter" "function filter did not apply"
+fi
+
 # Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)
 if [ -f "$TEST_TMPDIR"/t_byte_vreg.asm ]; then
     if grep -q 'mov [A-D]L, [A-D]L\|xor [A-D]H, [A-D]H\|xor [A-D]X, [A-D]X' "$TEST_TMPDIR"/t_byte_vreg.asm; then
