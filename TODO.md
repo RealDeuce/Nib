@@ -16,14 +16,12 @@
 - Binder allocator next pass:
   - Runtime-regress the current allocator baseline in Serif before
     changing allocation behavior again.
-  - Split allocation decisions from fixup/emission policy so call
-    argument routing, CL routing, and address-register routing can share
-    one move-planning model.
-  - Add spill/reload placement as an explicit post-coloring plan instead
-    of letting individual emit helpers discover spilled operands ad hoc.
-  - Teach pressure reports to compare before/after allocator decisions:
-    selected colors, actual spills, fixed-register pressure, and
-    inserted fixups.
+  - Finish moving low-frequency spill routes, such as parameter entry
+    homes and call-return temporaries, onto the shared operand-planning
+    helpers where it improves reporting clarity.
+  - Teach pressure reports to compare before/after allocator decisions
+    across revisions: selected colors, actual spills, fixed-register
+    pressure, inserted fixups, and spill actions.
   - Use the reports to target high-pressure Serif functions such as RTC
     read/write paths and framebuffer blits before changing heuristics.
 

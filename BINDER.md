@@ -134,8 +134,7 @@ Post-allocation pass that builds a **resolved instruction stream**.
 Uses `free_regs_at()` to query which physical registers are free
 at each instruction point (from CFG liveness + allocation results).
 
-Handles three fixup categories via explicit moves instead of
-push/pop sequences:
+Handles three fixup categories through the shared planned-move helper:
 
 - **CL routing**: variable shift counts not in CL get an explicit
   `mov CL, src` inserted. Uses a free register when CX is occupied.
@@ -157,6 +156,10 @@ and lowering IR instructions (RINS_IR) to V20 assembly:
   - `emit_load()`: spilled base/index via BX/SI scratch, CS: prefix
   - `emit_store()`: spilled value/base/index handling
   - `emit_mov()`: byte/word conversion, seg-to-seg, spill-to-spill
+- Operand planning classifies each vreg as register, spill slot, stack
+  home, or local slot. Spill loads, spill stores, scratch save/restore,
+  and memory-to-memory routes go through shared helpers so pressure
+  reports can account for them.
 - CMP+Jcc: finds preceding CMP and emits correct conditional jump
 - Calls: `call label` (near) or `call far seg:off` (extern)
 - Inline asm: spliced through verbatim

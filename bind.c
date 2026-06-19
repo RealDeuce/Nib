@@ -294,6 +294,23 @@ static const char *fixup_reason_name[FIXUP_NUM] = {
     "ret-reload",
 };
 
+typedef enum {
+    SPILL_LOAD,
+    SPILL_STORE,
+    SPILL_SCRATCH_SAVE,
+    SPILL_SCRATCH_RESTORE,
+    SPILL_MEM_ROUTE,
+    SPILL_NUM
+} spill_action_t;
+
+static const char *spill_action_name[SPILL_NUM] = {
+    "spill-load",
+    "spill-store",
+    "scratch-save",
+    "scratch-restore",
+    "mem-route",
+};
+
 /* Function */
 typedef struct {
     char        name[64];
@@ -358,6 +375,7 @@ typedef struct {
     int         nspill_slots;
     int         ncl_fixups;     /* CL routing fixups (push/pop CX) */
     int         fixup_counts[FIXUP_NUM];
+    int         spill_action_counts[SPILL_NUM];
     int         local_size;     /* total bytes for source stack locals */
     int         frame_size;     /* total bytes for spills and source locals */
     bool        needs_call_temp;
@@ -2615,6 +2633,14 @@ static void report_pressure_function(FILE *out, func_t *fn) {
         total_fixups += fn->fixup_counts[r];
     }
     fprintf(out, " total=%d\n", total_fixups);
+    fprintf(out, "spill-actions:");
+    int total_spill_actions = 0;
+    for (int a = 0; a < SPILL_NUM; a++) {
+        fprintf(out, " %s=%d", spill_action_name[a],
+                fn->spill_action_counts[a]);
+        total_spill_actions += fn->spill_action_counts[a];
+    }
+    fprintf(out, " total=%d\n", total_spill_actions);
 
     fprintf(out, "\npressure timeline:\n");
     for (int i = 0; i < fn->ninsns; i++) {
@@ -5183,11 +5209,70 @@ static bool is_spilled(func_t *fn, int v) {
     return fn->vregs[v].spill_slot >= 0 || fn->vregs[v].is_stack_home;
 }
 
+typedef enum {
+    OPERAND_INVALID,
+    OPERAND_REGISTER,
+    OPERAND_SPILL,
+    OPERAND_STACK_HOME,
+    OPERAND_LOCAL
+} operand_plan_kind_t;
+
+typedef struct {
+    operand_plan_kind_t kind;
+    int vreg;
+    int preg;
+} operand_plan_t;
+
+static void note_spill_action(func_t *fn, spill_action_t action) {
+    if (!fn || action < 0 || action >= SPILL_NUM)
+        return;
+    fn->spill_action_counts[action]++;
+}
+
+static operand_plan_t plan_vreg_operand(func_t *fn, int vreg) {
+    operand_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    plan.kind = OPERAND_INVALID;
+    plan.vreg = vreg;
+    plan.preg = PREG_NONE;
+    if (!fn || vreg < 0 || vreg >= fn->nvregs)
+        return plan;
+
+    plan.preg = fn->vregs[vreg].assigned;
+    if (plan.preg != PREG_NONE)
+        plan.kind = OPERAND_REGISTER;
+    else if (fn->vregs[vreg].spill_slot >= 0)
+        plan.kind = OPERAND_SPILL;
+    else if (fn->vregs[vreg].is_stack_home)
+        plan.kind = OPERAND_STACK_HOME;
+    else if (fn->vregs[vreg].is_local_slot)
+        plan.kind = OPERAND_LOCAL;
+    return plan;
+}
+
+static bool operand_plan_is_memory(const operand_plan_t *plan) {
+    return plan && (plan->kind == OPERAND_SPILL ||
+                    plan->kind == OPERAND_STACK_HOME ||
+                    plan->kind == OPERAND_LOCAL);
+}
+
+static void emit_push_scratch(func_t *fn, int scratch_preg);
+static void emit_pop_scratch(func_t *fn, int scratch_preg);
+static void emit_spill_load_to_reg(func_t *fn, int dst_preg, int src_vreg);
+static void emit_spill_store_from_reg(func_t *fn, int dst_vreg,
+                                      const char *src_reg);
+static void emit_spill_route_move(func_t *fn, const char *dst,
+                                  const char *src);
+static void emit_spill_route_push(func_t *fn, const char *src);
+static void emit_spill_route_pop(func_t *fn, const char *dst);
+
 /* Emit a mov that handles memory-to-memory via AX scratch */
 static void emit_mov(func_t *fn, int dst, int src) {
     const char *d = vreg_asm(fn, dst);
     const char *s = vreg_asm(fn, src);
     if (strcmp(d, s) == 0) return; /* skip self-moves */
+    operand_plan_t dplan = plan_vreg_operand(fn, dst);
+    operand_plan_t splan = plan_vreg_operand(fn, src);
     int dst_preg = (dst >= 0 && dst < MAX_VREGS) ?
                    fn->vregs[dst].assigned : PREG_NONE;
     int src_preg = (src >= 0 && src < MAX_VREGS) ?
@@ -5196,18 +5281,18 @@ static void emit_mov(func_t *fn, int dst, int src) {
                      (fn->vregs[dst].is_byte || preg_is_byte(dst_preg)));
     bool src_byte = (src >= 0 && src < MAX_VREGS &&
                      (fn->vregs[src].is_byte || preg_is_byte(src_preg)));
-    if (is_spilled(fn, dst) && is_spilled(fn, src)) {
+    if (operand_plan_is_memory(&dplan) && operand_plan_is_memory(&splan)) {
         if (dst_byte || src_byte) {
             /* Byte spill-to-spill: route through AL to avoid
              * word push/pop copying garbage from adjacent bytes. */
-            fprintf(out_asm, "    push AX\n");
-            fprintf(out_asm, "    mov AL, %s\n", s);
-            fprintf(out_asm, "    mov %s, AL\n", d);
-            fprintf(out_asm, "    pop AX\n");
+            emit_push_scratch(fn, PREG_AX);
+            emit_spill_route_move(fn, "AL", s);
+            emit_spill_route_move(fn, d, "AL");
+            emit_pop_scratch(fn, PREG_AX);
         } else {
             /* Word spill-to-spill: use push/pop */
-            fprintf(out_asm, "    push %s\n", s);
-            fprintf(out_asm, "    pop %s\n", d);
+            emit_spill_route_push(fn, s);
+            emit_spill_route_pop(fn, d);
         }
     } else if (fn->vregs[dst].is_seg && fn->vregs[src].is_seg) {
         /* seg-to-seg: go through AX, saving it first */
@@ -5334,14 +5419,56 @@ static int acc_preg_for_width(bool is_byte) {
 static bool emit_push_acc_if_live(func_t *fn, int insn_idx, bool is_byte) {
     bool preserve = preg_live_after_insn(fn, insn_idx,
                                          acc_preg_for_width(is_byte));
-    if (preserve)
+    if (preserve) {
         fprintf(out_asm, "    push AX\n");
+        note_spill_action(fn, SPILL_SCRATCH_SAVE);
+    }
     return preserve;
 }
 
-static void emit_pop_acc_if_pushed(bool pushed) {
-    if (pushed)
+static void emit_pop_acc_if_pushed_for_func(func_t *fn, bool pushed) {
+    if (pushed) {
         fprintf(out_asm, "    pop AX\n");
+        note_spill_action(fn, SPILL_SCRATCH_RESTORE);
+    }
+}
+
+static void emit_push_scratch(func_t *fn, int scratch_preg) {
+    fprintf(out_asm, "    push %s\n", preg_name[scratch_preg]);
+    note_spill_action(fn, SPILL_SCRATCH_SAVE);
+}
+
+static void emit_pop_scratch(func_t *fn, int scratch_preg) {
+    fprintf(out_asm, "    pop %s\n", preg_name[scratch_preg]);
+    note_spill_action(fn, SPILL_SCRATCH_RESTORE);
+}
+
+static void emit_spill_load_to_reg(func_t *fn, int dst_preg, int src_vreg) {
+    fprintf(out_asm, "    mov %s, %s\n", preg_name[dst_preg],
+            vreg_asm(fn, src_vreg));
+    note_spill_action(fn, SPILL_LOAD);
+}
+
+static void emit_spill_store_from_reg(func_t *fn, int dst_vreg,
+                                      const char *src_reg) {
+    fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, dst_vreg), src_reg);
+    note_spill_action(fn, SPILL_STORE);
+}
+
+static void emit_spill_route_move(func_t *fn, const char *dst,
+                                  const char *src) {
+    fprintf(out_asm, "    mov %s, %s\n", dst, src);
+    note_spill_action(fn, SPILL_MEM_ROUTE);
+}
+
+static void emit_spill_route_push(func_t *fn, const char *src) {
+    fprintf(out_asm, "    push %s\n", src);
+    note_spill_action(fn, SPILL_MEM_ROUTE);
+}
+
+static void emit_spill_route_pop(func_t *fn, const char *dst) {
+    fprintf(out_asm, "    pop %s\n", dst);
+    note_spill_action(fn, SPILL_MEM_ROUTE);
 }
 
 static const char *emit_vreg_or_spill_scratch(func_t *fn, int vreg,
@@ -5352,17 +5479,17 @@ static const char *emit_vreg_or_spill_scratch(func_t *fn, int vreg,
     if (!is_spilled(fn, vreg))
         return vreg_asm(fn, vreg);
 
-    fprintf(out_asm, "    push %s\n", preg_name[scratch_preg]);
-    fprintf(out_asm, "    mov %s, %s\n", preg_name[scratch_preg],
-            vreg_asm(fn, vreg));
+    emit_push_scratch(fn, scratch_preg);
+    emit_spill_load_to_reg(fn, scratch_preg, vreg);
     if (pushed)
         *pushed = true;
     return preg_name[scratch_preg];
 }
 
-static void emit_pop_scratch_if_pushed(int scratch_preg, bool pushed) {
+static void emit_pop_scratch_if_pushed(func_t *fn, int scratch_preg,
+                                       bool pushed) {
     if (pushed)
-        fprintf(out_asm, "    pop %s\n", preg_name[scratch_preg]);
+        emit_pop_scratch(fn, scratch_preg);
 }
 
 static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
@@ -5377,9 +5504,10 @@ static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
                         vreg_is_byte_value(fn, cmp->src2);
         const char *acc = acc_name_for_width(cmp_byte);
         bool preserve_ax = emit_push_acc_if_live(fn, cmp_idx, false);
-        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, cmp->src2));
+        emit_spill_load_to_reg(fn, acc_preg_for_width(cmp_byte), cmp->src2);
         fprintf(out_asm, "    cmp %s, %s\n", vreg_asm(fn, cmp->src1), acc);
-        emit_pop_acc_if_pushed(preserve_ax);
+        note_spill_action(fn, SPILL_MEM_ROUTE);
+        emit_pop_acc_if_pushed_for_func(fn, preserve_ax);
         return;
     }
 
@@ -5668,8 +5796,12 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             fprintf(out_asm, "    push DX\n");
         if (preserve_acc)
             fprintf(out_asm, "    push AX\n");
-        if (dynamic_port && !port_is_dx)
-            fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->src1));
+        if (dynamic_port && !port_is_dx) {
+            if (is_spilled(fn, ins->src1))
+                emit_spill_load_to_reg(fn, PREG_DX, ins->src1);
+            else
+                fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->src1));
+        }
         if (ins->has_imm)
             fprintf(out_asm, "    in %s, 0x%02X\n", acc, ins->imm);
         else
@@ -5684,8 +5816,12 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
                 fprintf(out_asm, "    pop DX\n");
             fprintf(out_asm, "    pop %s\n", preg_name[scratch_parent]);
         } else {
-            if (strcmp(d, acc) != 0)
-                fprintf(out_asm, "    mov %s, %s\n", d, acc);
+            if (strcmp(d, acc) != 0) {
+                if (is_spilled(fn, ins->dst))
+                    emit_spill_store_from_reg(fn, ins->dst, acc);
+                else
+                    fprintf(out_asm, "    mov %s, %s\n", d, acc);
+            }
             if (preserve_acc)
                 fprintf(out_asm, "    pop AX\n");
             if (preserve_dx)
@@ -5717,14 +5853,23 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         if (save_ax_port)
             fprintf(out_asm, "    push AX\n");
         if (dynamic_port && !port_is_dx && port_aliases_ax && !save_ax_port) {
-            fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->dst));
+            if (is_spilled(fn, ins->dst))
+                emit_spill_load_to_reg(fn, PREG_DX, ins->dst);
+            else
+                fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->dst));
             port_loaded = true;
         }
-        if (strcmp(acc, val) != 0)
-            fprintf(out_asm, "    mov %s, %s\n", acc, val);
+        if (strcmp(acc, val) != 0) {
+            if (is_spilled(fn, ins->src1))
+                emit_spill_load_to_reg(fn, acc_preg, ins->src1);
+            else
+                fprintf(out_asm, "    mov %s, %s\n", acc, val);
+        }
         if (dynamic_port && !port_is_dx && !port_loaded) {
             if (save_ax_port)
                 fprintf(out_asm, "    pop DX\n");
+            else if (is_spilled(fn, ins->dst))
+                emit_spill_load_to_reg(fn, PREG_DX, ins->dst);
             else
                 fprintf(out_asm, "    mov DX, %s\n", vreg_asm(fn, ins->dst));
         }
@@ -5744,18 +5889,18 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         bool use_es = emit_es_data_prefix(fn, ins->src1);
         const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
         if (is_spilled(fn, ins->src1)) {
-            fprintf(out_asm, "    push BX\n");
-            fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+            emit_push_scratch(fn, PREG_BX);
+            emit_spill_load_to_reg(fn, PREG_BX, ins->src1);
             if (is_spilled(fn, ins->dst)) {
                 fprintf(out_asm, "    mov AX, [%sBX]\n", seg);
-                fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                emit_spill_store_from_reg(fn, ins->dst, "AX");
             } else {
                 fprintf(out_asm, "    mov %s, [%sBX]\n", vreg_asm(fn, ins->dst), seg);
             }
-            fprintf(out_asm, "    pop BX\n");
+            emit_pop_scratch(fn, PREG_BX);
         } else if (is_spilled(fn, ins->dst)) {
             fprintf(out_asm, "    mov AX, [%s%s]\n", seg, vreg_asm(fn, ins->src1));
-            fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+            emit_spill_store_from_reg(fn, ins->dst, "AX");
         } else {
             fprintf(out_asm, "    mov %s, [%s%s]\n",
                     vreg_asm(fn, ins->dst), seg, vreg_asm(fn, ins->src1));
@@ -5775,10 +5920,10 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         if (dst_is_es) {
             fprintf(out_asm, "    push AX\n");
             if (is_spilled(fn, ins->src1)) {
-                fprintf(out_asm, "    push BX\n");
-                fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+                emit_push_scratch(fn, PREG_BX);
+                emit_spill_load_to_reg(fn, PREG_BX, ins->src1);
                 fprintf(out_asm, "    mov AX, [%sBX+2]\n", seg);
-                fprintf(out_asm, "    pop BX\n");
+                emit_pop_scratch(fn, PREG_BX);
             } else {
                 fprintf(out_asm, "    mov AX, [%s%s+2]\n", seg, vreg_asm(fn, ins->src1));
             }
@@ -5788,20 +5933,26 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
             return;
         }
         if (is_spilled(fn, ins->src1)) {
-            fprintf(out_asm, "    push BX\n");
-            fprintf(out_asm, "    mov BX, %s\n", vreg_asm(fn, ins->src1));
+            emit_push_scratch(fn, PREG_BX);
+            emit_spill_load_to_reg(fn, PREG_BX, ins->src1);
             if (dst_seg || is_spilled(fn, ins->dst)) {
                 fprintf(out_asm, "    mov AX, [%sBX+2]\n", seg);
-                fprintf(out_asm, "    mov %s, AX\n", d);
+                if (is_spilled(fn, ins->dst))
+                    emit_spill_store_from_reg(fn, ins->dst, "AX");
+                else
+                    fprintf(out_asm, "    mov %s, AX\n", d);
             } else {
                 fprintf(out_asm, "    mov %s, [%sBX+2]\n", d, seg);
             }
-            fprintf(out_asm, "    pop BX\n");
+            emit_pop_scratch(fn, PREG_BX);
         } else {
             const char *s = vreg_asm(fn, ins->src1);
             if (dst_seg || is_spilled(fn, ins->dst)) {
                 fprintf(out_asm, "    mov AX, [%s%s+2]\n", seg, s);
-                fprintf(out_asm, "    mov %s, AX\n", d);
+                if (is_spilled(fn, ins->dst))
+                    emit_spill_store_from_reg(fn, ins->dst, "AX");
+                else
+                    fprintf(out_asm, "    mov %s, AX\n", d);
             } else {
                 fprintf(out_asm, "    mov %s, [%s%s+2]\n", d, seg, s);
             }
@@ -5889,8 +6040,10 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         if (is_spilled(fn, ins->src1)) {
             bool alu_byte = fn->vregs[ins->dst].is_byte;
             const char *acc = alu_byte ? "AL" : "AX";
-            fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+            emit_spill_load_to_reg(fn, acc_preg_for_width(alu_byte),
+                                   ins->src1);
             fprintf(out_asm, "    %s %s, %s\n", op, vreg_asm(fn, ins->dst), acc);
+            note_spill_action(fn, SPILL_MEM_ROUTE);
         } else {
             fprintf(out_asm, "    %s %s, %s\n", op,
                     vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src1));
@@ -5906,8 +6059,10 @@ static void emit_alu(func_t *fn, ir_insn_t *ins, int i) {
         } else if (is_spilled(fn, ins->dst) && is_spilled(fn, ins->src2)) {
             bool alu_byte = fn->vregs[ins->dst].is_byte;
             const char *acc = alu_byte ? "AL" : "AX";
-            fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src2));
+            emit_spill_load_to_reg(fn, acc_preg_for_width(alu_byte),
+                                   ins->src2);
             fprintf(out_asm, "    %s %s, %s\n", op, vreg_asm(fn, ins->dst), acc);
+            note_spill_action(fn, SPILL_MEM_ROUTE);
         } else {
             fprintf(out_asm, "    %s %s, %s\n", op,
                     vreg_asm(fn, ins->dst), vreg_asm(fn, ins->src2));
@@ -5934,7 +6089,7 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
     }
 
     if (dst_conflicts_with_scratch)
-        fprintf(out_asm, "    push AX\n");
+        emit_push_scratch(fn, PREG_AX);
 
     base_str = emit_vreg_or_spill_scratch(fn, ins->src1, PREG_BX,
                                           &pushed_bx);
@@ -5952,8 +6107,8 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
             fprintf(out_asm, "    mov AX, [%s%s+%s]\n", seg_pfx, base_str, idx_str);
         else
             fprintf(out_asm, "    mov AX, [%s%s]\n", seg_pfx, base_str);
-        emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
-        emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
+        emit_pop_scratch_if_pushed(fn, PREG_SI, pushed_si);
+        emit_pop_scratch_if_pushed(fn, PREG_BX, pushed_bx);
         emit_es_data_suffix(use_es);
         fprintf(out_asm, "    mov ES, AX\n");
         fprintf(out_asm, "    pop AX\n");
@@ -5967,11 +6122,14 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
             fprintf(out_asm, "    mov %s, [%s%s+%s]\n", acc, seg_pfx, base_str, idx_str);
         else
             fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg_pfx, base_str);
-        emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
-        emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
-        fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
+        emit_pop_scratch_if_pushed(fn, PREG_SI, pushed_si);
+        emit_pop_scratch_if_pushed(fn, PREG_BX, pushed_bx);
+        if (is_spilled(fn, ins->dst))
+            emit_spill_store_from_reg(fn, ins->dst, acc);
+        else
+            fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
         if (dst_conflicts_with_scratch)
-            fprintf(out_asm, "    pop AX\n");
+            emit_pop_scratch(fn, PREG_AX);
         emit_es_data_suffix(use_es);
     } else {
         if (idx_str)
@@ -5980,8 +6138,8 @@ static void emit_load(func_t *fn, ir_insn_t *ins) {
         else
             fprintf(out_asm, "    mov %s, [%s%s]\n",
                     vreg_asm(fn, ins->dst), seg_pfx, base_str);
-        emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
-        emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
+        emit_pop_scratch_if_pushed(fn, PREG_SI, pushed_si);
+        emit_pop_scratch_if_pushed(fn, PREG_BX, pushed_bx);
         emit_es_data_suffix(use_es);
     }
 }
@@ -5999,7 +6157,7 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
     if (is_spilled(fn, ins->dst)) {
         bool st_byte = fn->vregs[ins->dst].is_byte;
         const char *acc = st_byte ? "AL" : "AX";
-        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->dst));
+        emit_spill_load_to_reg(fn, acc_preg_for_width(st_byte), ins->dst);
         val_str = acc;
     } else {
         val_str = vreg_asm(fn, ins->dst);
@@ -6050,8 +6208,8 @@ static void emit_store(func_t *fn, ir_insn_t *ins) {
         fprintf(out_asm, "    mov [%s%s+%s], %s\n", seg_pfx, base_str, idx_str, val_str);
     else
         fprintf(out_asm, "    mov [%s%s], %s\n", seg_pfx, base_str, val_str);
-    emit_pop_scratch_if_pushed(PREG_SI, pushed_si);
-    emit_pop_scratch_if_pushed(PREG_BX, pushed_bx);
+    emit_pop_scratch_if_pushed(fn, PREG_SI, pushed_si);
+    emit_pop_scratch_if_pushed(fn, PREG_BX, pushed_bx);
     emit_es_data_suffix(use_es);
     if (pushed_val_ax)
         fprintf(out_asm, "    pop AX\n");
@@ -6216,13 +6374,13 @@ static void emit_function(func_t *fn) {
             int off = local_bp_offset(fn, ins->src1);
             if (is_spilled(fn, ins->dst)) {
                 if (preg_live_after_insn(fn, i, PREG_AX)) {
-                    fprintf(out_asm, "    push BX\n");
+                    emit_push_scratch(fn, PREG_BX);
                     fprintf(out_asm, "    lea BX, [BP%+d]\n", off);
-                    fprintf(out_asm, "    mov %s, BX\n", vreg_asm(fn, ins->dst));
-                    fprintf(out_asm, "    pop BX\n");
+                    emit_spill_store_from_reg(fn, ins->dst, "BX");
+                    emit_pop_scratch(fn, PREG_BX);
                 } else {
                     fprintf(out_asm, "    lea AX, [BP%+d]\n", off);
-                    fprintf(out_asm, "    mov %s, AX\n", vreg_asm(fn, ins->dst));
+                    emit_spill_store_from_reg(fn, ins->dst, "AX");
                 }
             } else {
                 fprintf(out_asm, "    lea %s, [BP%+d]\n",
@@ -6317,7 +6475,16 @@ static void emit_function(func_t *fn) {
                         }
                     } else if (is_spilled(fn, ins->src1)) {
                         /* Spilled byte: load word from spill, mask to byte */
-                        fprintf(out_asm, "    mov %s, %s\n", d, s);
+                        if (is_spilled(fn, ins->dst)) {
+                            emit_push_scratch(fn, PREG_AX);
+                            emit_spill_load_to_reg(fn, PREG_AX, ins->src1);
+                            fprintf(out_asm, "    and AX, 0x00FF\n");
+                            emit_spill_store_from_reg(fn, ins->dst, "AX");
+                            emit_pop_scratch(fn, PREG_AX);
+                            break;
+                        }
+                        emit_spill_load_to_reg(fn, fn->vregs[ins->dst].assigned,
+                                               ins->src1);
                         fprintf(out_asm, "    and %s, 0x00FF\n", d);
                     } else {
                         /* src is a non-byte reg (shouldn't happen) */
@@ -6331,11 +6498,11 @@ static void emit_function(func_t *fn) {
             if (is_spilled(fn, ins->dst) && fn->vregs[ins->dst].is_byte) {
                 /* Unary on spilled byte: route through AL to
                  * avoid word-sized not/neg on the spill slot. */
-                fprintf(out_asm, "    push AX\n");
-                fprintf(out_asm, "    mov AL, %s\n", vreg_asm(fn, ins->dst));
+                emit_push_scratch(fn, PREG_AX);
+                emit_spill_load_to_reg(fn, PREG_AL, ins->dst);
                 fprintf(out_asm, "    %s AL\n", mnem);
-                fprintf(out_asm, "    mov %s, AL\n", vreg_asm(fn, ins->dst));
-                fprintf(out_asm, "    pop AX\n");
+                emit_spill_store_from_reg(fn, ins->dst, "AL");
+                emit_pop_scratch(fn, PREG_AX);
             } else {
                 fprintf(out_asm, "    %s %s\n", mnem, vreg_asm_sized(fn, ins->dst));
             }
@@ -6545,10 +6712,10 @@ static void emit_function(func_t *fn) {
                 bool use_es = emit_es_data_prefix(fn, ins->src1);
                 const char *ic_seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->src1);
                 if (is_spilled(fn, ins->src1) && vreg_data_label(fn, ins->src1)) {
-                    fprintf(out_asm, "    push BX\n");
-                    fprintf(out_asm, "    mov BX, %s\n", addr);
+                    emit_push_scratch(fn, PREG_BX);
+                    emit_spill_load_to_reg(fn, PREG_BX, ins->src1);
                     fprintf(out_asm, "    call far [%sBX]\n", ic_seg);
-                    fprintf(out_asm, "    pop BX\n");
+                    emit_pop_scratch(fn, PREG_BX);
                 } else if (is_spilled(fn, ins->src1)) {
                     fprintf(out_asm, "    call far %s\n", addr);
                 } else {
@@ -6620,8 +6787,8 @@ static void emit_function(func_t *fn) {
                         bool preserve_acc =
                             emit_push_acc_if_live(fn, i, dst_byte);
                         fprintf(out_asm, "    mov %s, %s\n", acc, ins->name);
-                        fprintf(out_asm, "    mov %s, %s\n", vreg_asm(fn, ins->dst), acc);
-                        emit_pop_acc_if_pushed(preserve_acc);
+                        emit_spill_store_from_reg(fn, ins->dst, acc);
+                        emit_pop_acc_if_pushed_for_func(fn, preserve_acc);
                     } else {
                         fprintf(out_asm, "    mov %s, %s\n",
                                 vreg_asm(fn, ins->dst), ins->name);
@@ -6640,17 +6807,17 @@ static void emit_function(func_t *fn) {
                     if (has_seg) {
                         /* Far: set up ES from seg vreg, then mov dst, [ES:off] */
                         if (is_spilled(fn, ins->src2)) {
-                            fprintf(out_asm, "    push AX\n");
-                            fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
+                            emit_push_scratch(fn, PREG_AX);
+                            emit_spill_load_to_reg(fn, PREG_AX, ins->src2);
                             fprintf(out_asm, "    mov ES, AX\n");
-                            fprintf(out_asm, "    pop AX\n");
+                            emit_pop_scratch(fn, PREG_AX);
                         }
                         if (is_spilled(fn, ins->dst)) {
                             bool preserve_acc =
                                 emit_push_acc_if_live(fn, i, dst_byte);
                             fprintf(out_asm, "    mov %s, [ES:%s]\n", acc, off_reg);
-                            fprintf(out_asm, "    mov %s, %s\n", d, acc);
-                            emit_pop_acc_if_pushed(preserve_acc);
+                            emit_spill_store_from_reg(fn, ins->dst, acc);
+                            emit_pop_acc_if_pushed_for_func(fn, preserve_acc);
                         } else {
                             fprintf(out_asm, "    mov %s, [ES:%s]\n", d, off_reg);
                         }
@@ -6662,14 +6829,14 @@ static void emit_function(func_t *fn) {
                             bool preserve_acc =
                                 emit_push_acc_if_live(fn, i, dst_byte);
                             fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg, off_reg);
-                            fprintf(out_asm, "    mov %s, %s\n", d, acc);
-                            emit_pop_acc_if_pushed(preserve_acc);
+                            emit_spill_store_from_reg(fn, ins->dst, acc);
+                            emit_pop_acc_if_pushed_for_func(fn, preserve_acc);
                         } else {
                             fprintf(out_asm, "    mov %s, [%s%s]\n", d, seg, off_reg);
                         }
                         emit_es_data_suffix(use_es);
                     }
-                    emit_pop_scratch_if_pushed(PREG_BX, off_spilled);
+                    emit_pop_scratch_if_pushed(fn, PREG_BX, off_spilled);
                 }
             } else {
                 if (ins->name[0]) {
@@ -6679,9 +6846,10 @@ static void emit_function(func_t *fn) {
                         const char *acc = acc_name_for_width(src_byte);
                         bool preserve_acc =
                             emit_push_acc_if_live(fn, i, src_byte);
-                        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+                        emit_spill_load_to_reg(fn, acc_preg_for_width(src_byte),
+                                               ins->src1);
                         fprintf(out_asm, "    mov %s, %s\n", ins->name, acc);
-                        emit_pop_acc_if_pushed(preserve_acc);
+                        emit_pop_acc_if_pushed_for_func(fn, preserve_acc);
                     } else {
                         fprintf(out_asm, "    mov %s, %s\n",
                                 ins->name, vreg_asm(fn, ins->src1));
@@ -6704,17 +6872,18 @@ static void emit_function(func_t *fn) {
                         const char *acc = acc_name_for_width(val_byte);
                         preserve_val_acc =
                             emit_push_acc_if_live(fn, i, val_byte);
-                        fprintf(out_asm, "    mov %s, %s\n", acc, vreg_asm(fn, ins->src1));
+                        emit_spill_load_to_reg(fn, acc_preg_for_width(val_byte),
+                                               ins->src1);
                         val_reg = acc;
                     } else {
                         val_reg = vreg_asm(fn, ins->src1);
                     }
                     if (has_seg) {
                         if (is_spilled(fn, ins->src2)) {
-                            fprintf(out_asm, "    push AX\n");
-                            fprintf(out_asm, "    mov AX, %s\n", vreg_asm(fn, ins->src2));
+                            emit_push_scratch(fn, PREG_AX);
+                            emit_spill_load_to_reg(fn, PREG_AX, ins->src2);
                             fprintf(out_asm, "    mov ES, AX\n");
-                            fprintf(out_asm, "    pop AX\n");
+                            emit_pop_scratch(fn, PREG_AX);
                         }
                         fprintf(out_asm, "    mov [ES:%s], %s\n", off_reg, val_reg);
                     } else {
@@ -6724,8 +6893,8 @@ static void emit_function(func_t *fn) {
                         fprintf(out_asm, "    mov [%s%s], %s\n", seg, off_reg, val_reg);
                         emit_es_data_suffix(use_es);
                     }
-                    emit_pop_acc_if_pushed(preserve_val_acc);
-                    emit_pop_scratch_if_pushed(PREG_BX, off_spilled);
+                    emit_pop_acc_if_pushed_for_func(fn, preserve_val_acc);
+                    emit_pop_scratch_if_pushed(fn, PREG_BX, off_spilled);
                 }
             }
             break;
@@ -7771,7 +7940,6 @@ int main(int argc, char **argv) {
         /* Phase 4: deferred — emitted below in source order */
     }
 
-    write_pressure_report(pressure_report_path);
     if (bind_errors > 0)
         return 1;
 
@@ -7785,6 +7953,9 @@ int main(int argc, char **argv) {
     emit_module(inputs[ninputs - 1]);
 
     fclose(out_asm);
+    write_pressure_report(pressure_report_path);
+    if (bind_errors > 0)
+        return 1;
     fprintf(stderr, "Wrote %s\n", outpath);
     return 0;
 }

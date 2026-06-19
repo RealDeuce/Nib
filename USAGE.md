@@ -49,11 +49,13 @@ registers, inserts spill code and callee-save push/pop, and emits
 assembly with real register names.
 
 The pressure report includes a per-function pressure timeline, the peak
-live span, allocation summaries, fixup counts by reason, live ranges with
-their final allocation, dead/early-load warnings, and call-split advice.
-Fixup reasons include call argument routing, caller-save save/restore,
-CL routing for variable shifts, address-register routing, and return-value
-capture/reload around calls.
+live span, allocation summaries, fixup counts by reason, spill-action
+counts, live ranges with their final allocation, dead/early-load warnings,
+and call-split advice. Fixup reasons include call argument routing,
+caller-save save/restore, CL routing for variable shifts, address-register
+routing, and return-value capture/reload around calls. Spill actions
+include spill loads/stores, scratch save/restore, and memory-to-memory
+routes.
 
 ### Examples
 

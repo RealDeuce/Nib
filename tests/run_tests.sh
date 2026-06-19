@@ -1045,7 +1045,9 @@ cat > "$TEST_TMPDIR"/t_cmp_mem_mem.nir <<'NIR'
     ret
 .endfn
 NIR
-if ./nibbind "$TEST_TMPDIR"/t_cmp_mem_mem.nir -o "$TEST_TMPDIR"/t_cmp_mem_mem.asm >/dev/null 2>&1; then
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_cmp_mem_mem_pressure.txt \
+     --pressure-fn cmp_mem_mem "$TEST_TMPDIR"/t_cmp_mem_mem.nir \
+     -o "$TEST_TMPDIR"/t_cmp_mem_mem.asm >/dev/null 2>&1; then
     if awk '
         /^[[:space:]]*cmp[[:space:]]+\[BP[-+][0-9]+\], \[BP[-+][0-9]+\]/ { bad = 1 }
         /^[[:space:]]*mov[[:space:]]+AX, \[BP[-+][0-9]+\]/ { saw_load = 1 }
@@ -1057,7 +1059,19 @@ if ./nibbind "$TEST_TMPDIR"/t_cmp_mem_mem.nir -o "$TEST_TMPDIR"/t_cmp_mem_mem.as
         fail "cmp-mem-mem" "memory-to-memory CMP was emitted"
     fi
 else
-    fail "cmp-mem-mem" "$(./nibbind "$TEST_TMPDIR"/t_cmp_mem_mem.nir -o "$TEST_TMPDIR"/t_cmp_mem_mem.asm 2>&1 | tail -1)"
+    fail "cmp-mem-mem" "$(
+        ./nibbind --pressure-report "$TEST_TMPDIR"/t_cmp_mem_mem_pressure.txt \
+          --pressure-fn cmp_mem_mem "$TEST_TMPDIR"/t_cmp_mem_mem.nir \
+          -o "$TEST_TMPDIR"/t_cmp_mem_mem.asm 2>&1 | tail -1
+    )"
+fi
+if grep -q '^spill-actions: .*spill-load=[1-9]' \
+     "$TEST_TMPDIR"/t_cmp_mem_mem_pressure.txt &&
+   grep -q '^spill-actions: .*mem-route=[1-9]' \
+     "$TEST_TMPDIR"/t_cmp_mem_mem_pressure.txt; then
+    pass "pressure-report: spill actions counted"
+else
+    fail "pressure-report-spill-actions" "spill action counts missing"
 fi
 
 cat > "$TEST_TMPDIR"/t_high_vregs.nir <<'NIR'
@@ -1148,6 +1162,7 @@ if ./nibbind --pressure-report "$TEST_TMPDIR"/t_pressure_report.txt \
        grep -q '^call-split advisor:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q '^allocation: .*peak_fixed=' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q '^fixups: .*call-arg=' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^spill-actions: .*spill-load=' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q 'alloc=' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q 'probe.nib:20 live=' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q 'loaded at probe.nib:20 first-used at probe.nib:30' "$TEST_TMPDIR"/t_pressure_report.txt; then
