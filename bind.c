@@ -3637,12 +3637,16 @@ static bool preg_covered_by_pusha(int preg) {
            preg == PREG_DI;
 }
 
-static int call_saved_pusha_count(int *call_saved, int call_nsaved) {
+static int save_set_pusha_count(int *regs, int nregs) {
     int n = 0;
-    for (int s = 0; s < call_nsaved; s++)
-        if (preg_covered_by_pusha(call_saved[s]))
+    for (int s = 0; s < nregs; s++)
+        if (preg_covered_by_pusha(regs[s]))
             n++;
     return n;
+}
+
+static bool save_set_uses_pusha(int *regs, int nregs) {
+    return save_set_pusha_count(regs, nregs) >= 6;
 }
 
 static void emit_call_saved_push(func_t *fn, int preg) {
@@ -3660,7 +3664,7 @@ static void emit_call_saved_pop(func_t *fn, int preg) {
 }
 
 static bool emit_call_saves(func_t *fn, int *call_saved, int call_nsaved) {
-    bool use_pusha = call_saved_pusha_count(call_saved, call_nsaved) >= 6;
+    bool use_pusha = save_set_uses_pusha(call_saved, call_nsaved);
     if (use_pusha) {
         for (int s = 0; s < call_nsaved; s++)
             if (!preg_covered_by_pusha(call_saved[s]))
@@ -3686,6 +3690,46 @@ static void emit_call_restores(func_t *fn, int *call_saved, int call_nsaved,
 
     for (int s = call_nsaved - 1; s >= 0; s--)
         emit_call_saved_pop(fn, call_saved[s]);
+}
+
+static void emit_asm_saved_push(int preg) {
+    if (preg == PREG_FLAGS)
+        fprintf(out_asm, "    pushf\n");
+    else
+        fprintf(out_asm, "    push %s\n", preg_name[preg]);
+}
+
+static void emit_asm_saved_pop(int preg) {
+    if (preg == PREG_FLAGS)
+        fprintf(out_asm, "    popf\n");
+    else
+        fprintf(out_asm, "    pop %s\n", preg_name[preg]);
+}
+
+static void emit_asm_save_set(int *regs, int nregs, bool use_pusha) {
+    if (use_pusha) {
+        for (int s = 0; s < nregs; s++)
+            if (!preg_covered_by_pusha(regs[s]))
+                emit_asm_saved_push(regs[s]);
+        fprintf(out_asm, "    pusha\n");
+        return;
+    }
+
+    for (int s = 0; s < nregs; s++)
+        emit_asm_saved_push(regs[s]);
+}
+
+static void emit_asm_restore_set(int *regs, int nregs, bool used_pusha) {
+    if (used_pusha) {
+        fprintf(out_asm, "    popa\n");
+        for (int s = nregs - 1; s >= 0; s--)
+            if (!preg_covered_by_pusha(regs[s]))
+                emit_asm_saved_pop(regs[s]);
+        return;
+    }
+
+    for (int s = nregs - 1; s >= 0; s--)
+        emit_asm_saved_pop(regs[s]);
 }
 
 static bool is_shift_op(const char *op) {
@@ -5206,23 +5250,14 @@ static void emit_epilogue(func_t *fn, int *save_regs, int nsave,
     if (ds_explicit_save)
         fprintf(out_asm, "    pop DS\n");
     /* Callee-save pops (reverse order) */
-    for (int j = nsave - 1; j >= 0; j--) {
-        if (save_regs[j] == PREG_FLAGS)
-            fprintf(out_asm, "    popf\n");
-        else
-            fprintf(out_asm, "    pop %s\n", preg_name[save_regs[j]]);
-    }
+    emit_asm_restore_set(save_regs, nsave, false);
     if (fn->needs_frame) {
         fprintf(out_asm, "    mov sp, bp\n");
         fprintf(out_asm, "    pop bp\n");
     }
     if (fn->is_interrupt) {
-        if (isr_nsave >= 6) {
-            fprintf(out_asm, "    popa\n");
-        } else {
-            for (int j = isr_nsave - 1; j >= 0; j--)
-                fprintf(out_asm, "    pop %s\n", preg_name[isr_save[j]]);
-        }
+        emit_asm_restore_set(isr_save, isr_nsave,
+                             save_set_uses_pusha(isr_save, isr_nsave));
         fprintf(out_asm, "    iret\n");
     } else if (fn->is_far) {
         fprintf(out_asm, "    retf\n");
@@ -5789,12 +5824,8 @@ static void emit_function(func_t *fn) {
     /* Prologue (bare functions manage their own stack) */
     if (!fn->is_bare) {
         if (fn->is_interrupt) {
-            if (isr_nsave >= 6) {
-                fprintf(out_asm, "    pusha\n");
-            } else {
-                for (int i = 0; i < isr_nsave; i++)
-                    fprintf(out_asm, "    push %s\n", preg_name[isr_save[i]]);
-            }
+            emit_asm_save_set(isr_save, isr_nsave,
+                              save_set_uses_pusha(isr_save, isr_nsave));
         }
 
         if (fn->needs_frame) {
@@ -5805,12 +5836,7 @@ static void emit_function(func_t *fn) {
         }
 
         /* Callee-save pushes */
-        for (int i = 0; i < nsave; i++) {
-            if (save_regs[i] == PREG_FLAGS)
-                fprintf(out_asm, "    pushf\n");
-            else
-                fprintf(out_asm, "    push %s\n", preg_name[save_regs[i]]);
-        }
+        emit_asm_save_set(save_regs, nsave, false);
 
         emit_ds_setup(fn, ds_explicit_save);
 
