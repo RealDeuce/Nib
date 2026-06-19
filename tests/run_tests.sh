@@ -269,6 +269,27 @@ if [ -f tests/callee_save.nib ]; then
     fi
 fi
 
+# Callee-save speed policy: five PUSHA-covered registers are still faster
+# as individual push/pop pairs on V20, even when segment saves are also
+# present.
+if [ -f "$TEST_TMPDIR"/t_callee_save_speed.asm ]; then
+    save_many_window=$(sed -n '/t_callee_save_speed_save_many:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_callee_save_speed.asm)
+    if printf "%s\n" "$save_many_window" | grep -q 'push AX' &&
+       printf "%s\n" "$save_many_window" | grep -q 'push CX' &&
+       printf "%s\n" "$save_many_window" | grep -q 'push DX' &&
+       printf "%s\n" "$save_many_window" | grep -q 'push BX' &&
+       printf "%s\n" "$save_many_window" | grep -q 'push DI' &&
+       printf "%s\n" "$save_many_window" | grep -q 'push DS' &&
+       printf "%s\n" "$save_many_window" | grep -q 'push ES' &&
+       printf "%s\n" "$save_many_window" | grep -q 'pop ES' &&
+       printf "%s\n" "$save_many_window" | grep -q 'pop DS' &&
+       ! printf "%s\n" "$save_many_window" | grep -q 'pusha\|popa'; then
+        pass "callee-save-speed: five GP saves avoid slower PUSHA"
+    else
+        fail "callee-save-speed" "callee save policy used PUSHA or missed explicit saves"
+    fi
+fi
+
 # Saturating add: flag check block should emit JNC
 if [ -f "$TEST_TMPDIR"/t_flags.asm ]; then
     if grep -q "jnc" "$TEST_TMPDIR"/t_flags.asm; then

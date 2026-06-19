@@ -1,0 +1,7 @@
+// Test: speed-first callee saves should not use PUSHA for five GP regs.
+
+fn save_many() preserves(AX, CX, DX, BX, DI, DS, ES) {
+    asm clobbers(AX, CX, DX, BX, DI, DS, ES) {
+        nop
+    }
+}
