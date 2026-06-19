@@ -4307,11 +4307,120 @@ static bool vregs_interfere(func_t *fn, int a, int b) {
     return vset_test(igraph_row(fn, a), b);
 }
 
+static int block_of(func_t *fn, int pos);
+
 static void add_vreg_affinity(func_t *fn, int v, int preg, int weight) {
     if (!fn || v < 0 || v >= fn->nvregs ||
         preg < 0 || preg >= NUM_PREGS || weight <= 0)
         return;
     fn->vregs[v].affinity[preg] += weight;
+}
+
+static bool vreg_is_byte_alloc_value(func_t *fn, int v) {
+    return fn && v >= 0 && v < fn->nvregs && fn->vregs[v].is_byte &&
+           !fn->vregs[v].is_seg && !fn->vregs[v].needs_cl;
+}
+
+static bool int_list_contains(int *items, int nitems, int value) {
+    for (int i = 0; i < nitems; i++)
+        if (items[i] == value)
+            return true;
+    return false;
+}
+
+static int collect_byte_copy_family(func_t *fn, int root, int *out,
+                                    int cap) {
+    if (!vreg_is_byte_alloc_value(fn, root) || cap <= 0)
+        return 0;
+
+    int n = 0;
+    out[n++] = root;
+
+    bool changed;
+    do {
+        changed = false;
+        for (int i = 0; i < fn->ninsns && n < cap; i++) {
+            ir_insn_t *ins = &fn->insns[i];
+            if (ins->op != IR_MOV || ins->has_imm || ins->name[0])
+                continue;
+            if (!int_list_contains(out, n, ins->src1))
+                continue;
+            if (!vreg_is_byte_alloc_value(fn, ins->dst))
+                continue;
+            if (int_list_contains(out, n, ins->dst))
+                continue;
+            out[n++] = ins->dst;
+            changed = true;
+        }
+    } while (changed);
+
+    return n;
+}
+
+static bool byte_families_interfere(func_t *fn, int *a, int na,
+                                    int *b, int nb) {
+    for (int ai = 0; ai < na; ai++)
+        for (int bi = 0; bi < nb; bi++)
+            if (vregs_interfere(fn, a[ai], b[bi]))
+                return true;
+    return false;
+}
+
+static void add_sibling_byte_affinity(func_t *fn, int low_root,
+                                      int high_root) {
+    int lows[16], highs[16];
+    int nlows = collect_byte_copy_family(fn, low_root, lows,
+                                         (int)(sizeof(lows) / sizeof(lows[0])));
+    int nhighs = collect_byte_copy_family(fn, high_root, highs,
+                                          (int)(sizeof(highs) / sizeof(highs[0])));
+    if (nlows == 0 || nhighs == 0)
+        return;
+    if (!byte_families_interfere(fn, lows, nlows, highs, nhighs))
+        return;
+
+    static const int low_regs[] = { PREG_DL, PREG_BL, PREG_CL, PREG_AL };
+    static const int high_regs[] = { PREG_DH, PREG_BH, PREG_CH, PREG_AH };
+    static const int weights[] = { 80, 50, 30, 10 };
+    for (int i = 0; i < (int)(sizeof(weights) / sizeof(weights[0])); i++) {
+        for (int l = 0; l < nlows; l++)
+            add_vreg_affinity(fn, lows[l], low_regs[i], weights[i]);
+        for (int h = 0; h < nhighs; h++)
+            add_vreg_affinity(fn, highs[h], high_regs[i], weights[i]);
+    }
+}
+
+static bool is_byte_shift_imm(func_t *fn, ir_insn_t *ins, const char *op) {
+    return ins->op == IR_ALU && strcmp(ins->name, op) == 0 &&
+           ins->has_imm && ins->imm > 0 && ins->imm < 8 &&
+           vreg_is_byte_alloc_value(fn, ins->dst) &&
+           vreg_is_byte_alloc_value(fn, ins->src1);
+}
+
+static void scan_sibling_byte_affinities(func_t *fn) {
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *a = &fn->insns[i];
+        bool a_shr = is_byte_shift_imm(fn, a, "shr");
+        bool a_shl = is_byte_shift_imm(fn, a, "shl");
+        if (!a_shr && !a_shl)
+            continue;
+
+        int a_block = block_of(fn, i);
+        for (int j = i + 1; j < fn->ninsns; j++) {
+            if (block_of(fn, j) != a_block)
+                break;
+            ir_insn_t *b = &fn->insns[j];
+            bool b_shr = is_byte_shift_imm(fn, b, "shr");
+            bool b_shl = is_byte_shift_imm(fn, b, "shl");
+            if (!b_shr && !b_shl)
+                continue;
+            if (a->src1 != b->src1 || a->imm + b->imm != 8)
+                continue;
+            if (a_shr && b_shl)
+                add_sibling_byte_affinity(fn, a->dst, b->dst);
+            else if (a_shl && b_shr)
+                add_sibling_byte_affinity(fn, b->dst, a->dst);
+        }
+    }
 }
 
 /* ================================================================
@@ -9647,6 +9756,7 @@ int main(int argc, char **argv) {
         compute_liveness(fn);  /* derives def_pos/last_use from CFG */
         build_igraph(fn);
         scan_addressing_constraints(fn);
+        scan_sibling_byte_affinities(fn);
 
         /* Phase 2: estimate register pressure from interference graph.
          * If any vreg's degree exceeds its pool size, spills are likely

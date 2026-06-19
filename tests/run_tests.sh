@@ -1520,6 +1520,48 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_shift_pair_affinity.nir <<'NIR'
+; Binder regression: opposite byte shifts from the same source should
+; prefer sibling halves of one parent even outside the RMW combiner.
+.fn shift_pair_affinity
+.param %0, seg, "src_seg", register, pin=ES
+.param %1, u16, "src", register, pin=BX
+.param %2, u16, "dst", register, pin=SI
+    loadmem %3, %1, ES
+.vreg %3, u8
+    mov %4, %3
+.vreg %4, u8, const
+    shr %5, %4, 1
+.vreg %5, u8
+    shl %6, %4, 7
+.vreg %6, u8
+    storemem %2, %5
+    add %7, %2, 1
+    storemem %7, %6
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_shift_pair_affinity.nir \
+       -o "$TEST_TMPDIR"/t_shift_pair_affinity.asm >/dev/null 2>&1; then
+    shift_affinity_window=$(sed -n '/shift_pair_affinity_shift_pair_affinity:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_shift_pair_affinity.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_shift_pair_affinity.asm \
+           -o "$TEST_TMPDIR"/t_shift_pair_affinity.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$shift_affinity_window" | grep -Fq 'shr DL, 1' &&
+       printf "%s\n" "$shift_affinity_window" | grep -Fq 'shl DH, 7' &&
+       printf "%s\n" "$shift_affinity_window" | grep -Fq 'mov [SI], DL' &&
+       printf "%s\n" "$shift_affinity_window" | grep -Fq 'mov [SI+1], DH' &&
+       ! printf "%s\n" "$shift_affinity_window" | grep -q '\[BP-'; then
+        pass "shift-pair-affinity: opposite byte shifts prefer DX halves"
+    else
+        fail "shift-pair-affinity" "opposite byte shifts did not share DX"
+    fi
+else
+    fail "shift-pair-affinity" "$(
+        ./nibbind "$TEST_TMPDIR"/t_shift_pair_affinity.nir \
+            -o "$TEST_TMPDIR"/t_shift_pair_affinity.asm 2>&1 | tail -1
+    )"
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)

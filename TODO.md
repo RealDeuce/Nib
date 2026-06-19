@@ -17,13 +17,13 @@
     - require loop back edges to preserve stack state,
     - allow balanced call argument pushes above cached values,
     - fall back to frame spills when states cannot be proven identical.
-  - Generalize sibling-byte lifetime coalescing. The shifted full-copy
-    blit hot loop now has a targeted emission combine that keeps low/high
-    byte fragments in `DL`/`DH`, but the allocator should learn the
-    general case: when two overlapping byte vregs can occupy sibling
-    halves of one parent word, extend and spill them as one word lifetime.
-    This should reduce pressure in any byte-heavy code that naturally
-    produces paired halves.
+  - Continue sibling-byte lifetime coalescing:
+    - done: opposite byte shifts from one source get allocator affinities
+      for sibling low/high halves, so non-special cases naturally prefer
+      `DL`/`DH`-style placement;
+    - remaining: when two overlapping byte vregs occupy sibling halves of
+      one parent word, extend and spill them as one word lifetime so frame
+      spill/load traffic can be combined across byte-heavy code.
   - Add byte stack-cache eligibility only after the planner can prove the
     parent word is free at the restore point and the use-site instruction
     does not need the sibling byte at the same time.
