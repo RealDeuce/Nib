@@ -3348,6 +3348,29 @@ static int choose_color(func_t *fn, int v, int *pool, int psz) {
     return best;
 }
 
+static int spill_cost(func_t *fn, int v) {
+    int uses = fn->vregs[v].use_count;
+    if (uses <= 0)
+        uses = 1;
+
+    int cost = uses * 100;
+    if (fn->vregs[v].in_loop)
+        cost *= 10;
+    if (fn->vregs[v].is_const)
+        cost /= 4;
+    if (fn->vregs[v].fixed)
+        cost += 10000;
+    else if (fn->vregs[v].prefer != PREG_NONE)
+        cost += 500;
+
+    int range = fn->vregs[v].last_use - fn->vregs[v].def_pos;
+    if (range > 0)
+        cost -= range;
+    if (cost < 1)
+        cost = 1;
+    return cost;
+}
+
 /* Chaitin-Briggs register allocation using the interference graph.
  *
  * 1. Pre-color: assign vregs with preferences (params, propagated)
@@ -3470,9 +3493,7 @@ static void allocate_registers(func_t *fn, bool bp_available) {
             int best_cost = INT_MAX;
             for (int i = 0; i < nv; i++) {
                 if (removed[i]) continue;
-                int cost = fn->vregs[i].use_count;
-                if (fn->vregs[i].in_loop) cost *= 10;
-                if (fn->vregs[i].is_const) cost /= 2;
+                int cost = spill_cost(fn, i);
                 if (cost < best_cost) { best_cost = cost; best = i; }
             }
             if (best >= 0) {

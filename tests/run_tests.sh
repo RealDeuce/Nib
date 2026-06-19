@@ -957,48 +957,11 @@ cat > "$TEST_TMPDIR"/t_storemem_live_accum.nir <<'NIR'
 .fn storemem_live_accum
 .param %1, seg, "dst_seg", register, pin=ES
 .param %2, u16, "dst_off", register, pin=SI
+.param %3, u8, "value", stack
 .vreg %0, u8, pin=AL, const
-.vreg %3, u8
-.vreg %4, u8
-.vreg %5, u8
-.vreg %6, u8
-.vreg %7, u8
-.vreg %8, u8
-.vreg %9, u8
-.vreg %10, u8
-.vreg %11, u8
-.vreg %12, u8
-.vreg %13, u8
-.vreg %14, u8
-.vreg %15, u8
     mov %0, 0
-    mov %3, 3
-    mov %4, 4
-    mov %5, 5
-    mov %6, 6
-    mov %7, 7
-    mov %8, 8
-    mov %9, 9
-    mov %10, 10
-    mov %11, 11
-    mov %12, 12
-    mov %13, 13
-    mov %14, 14
-    mov %15, 15
     storemem %2, %1, %3
     call %16, select_page, %0
-    mov %17, %4
-    mov %18, %5
-    mov %19, %6
-    mov %20, %7
-    mov %21, %8
-    mov %22, %9
-    mov %23, %10
-    mov %24, %11
-    mov %25, %12
-    mov %26, %13
-    mov %27, %14
-    mov %28, %15
     ret
 .endfn
 NIR
