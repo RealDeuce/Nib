@@ -23,6 +23,8 @@
 #include <ctype.h>
 #include <stdarg.h>
 
+#include "table.h"
+
 /* ================================================================
  * Physical register model
  * ================================================================ */
@@ -413,9 +415,10 @@ typedef struct {
     int  npreserves;
 } extern_fn_t;
 
-#define MAX_EXTERNS 64
-static extern_fn_t externs[MAX_EXTERNS];
-static int nexterns = 0;
+typedef NIB_VEC(extern_fn_t) extern_vec_t;
+static extern_vec_t extern_vec;
+#define externs (extern_vec.items)
+#define nexterns (extern_vec.len)
 
 /* Forward declarations */
 static const char *fn_asm_name(func_t *fn);
@@ -437,6 +440,13 @@ static const char *pressure_report_path = NULL;
 static const char *pressure_fn_filter = NULL;
 static const char *pressure_compare_old_path = NULL;
 static const char *pressure_compare_new_path = NULL;
+
+static char *xstrdup_checked(const char *s) {
+    size_t len = strlen(s) + 1;
+    char *p = nib_xmalloc(len, "string");
+    memcpy(p, s, len);
+    return p;
+}
 
 static bool insn_defines_dst(const ir_insn_t *ins) {
     if (!ins || ins->dst < 0)
@@ -717,12 +727,12 @@ typedef struct {
     bool clobbers[NUM_PREGS]; /* true if function clobbers this register */
 } fn_assignment_t;
 
-static fn_assignment_t fn_assigns[MAX_FNS];
+typedef NIB_VEC(fn_assignment_t) fn_assignment_vec_t;
+static fn_assignment_vec_t fn_assigns_vec;
+#define fn_assigns (fn_assigns_vec.items)
 
 
 /* Data blocks (initialized globals with placement) */
-#define MAX_DATA_BLOCKS 64
-#define MAX_DATA_ENTRIES 1024
 typedef struct {
     char label[64];
     bool has_at;
@@ -731,13 +741,15 @@ typedef struct {
     bool has_emit_seg;
     int  emit_seg;
     /* Entries: raw assembly lines to emit */
-    char entries[MAX_DATA_ENTRIES][512];
+    NIB_VEC(char *) entries;
     int  nentries;
     char module[64];    /* source module this data block belongs to */
 } data_block_t;
 
-static data_block_t data_blocks[MAX_DATA_BLOCKS];
-static int ndata_blocks = 0;
+typedef NIB_VEC(data_block_t) data_block_vec_t;
+static data_block_vec_t data_blocks_vec;
+#define data_blocks (data_blocks_vec.items)
+#define ndata_blocks (data_blocks_vec.len)
 static int bind_errors = 0;
 
 static data_block_t *find_data_block(const char *label) {
@@ -745,6 +757,16 @@ static data_block_t *find_data_block(const char *label) {
         if (strcmp(data_blocks[i].label, label) == 0)
             return &data_blocks[i];
     return NULL;
+}
+
+static void data_block_add_entry(data_block_t *db, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    *NIB_VEC_PUSH(&db->entries, "data entries") = xstrdup_checked(buf);
+    db->nentries = db->entries.len;
 }
 
 static const char *vreg_data_label(func_t *fn, int v) {
@@ -761,7 +783,6 @@ static void set_vreg_data_label(func_t *fn, int v, const char *label) {
 }
 
 /* Global variable declarations */
-#define MAX_GLOBALS 256
 typedef struct {
     char name[64];
     char type[32];
@@ -772,8 +793,10 @@ typedef struct {
     int  at_off;
 } global_var_t;
 
-static global_var_t globals[MAX_GLOBALS];
-static int nglobals = 0;
+typedef NIB_VEC(global_var_t) global_vec_t;
+static global_vec_t globals_vec;
+#define globals (globals_vec.items)
+#define nglobals (globals_vec.len)
 
 /* Emission order — tracks the source order of all top-level items */
 #define EMIT_FN    0
@@ -782,36 +805,37 @@ static int nglobals = 0;
 #define EMIT_AT    3
 #define EMIT_USE   4
 #define EMIT_ENDAT 5
-#define MAX_AT_DIRECTIVES 64
-static struct { int seg; int off; } at_directives[MAX_AT_DIRECTIVES];
-static int nat_directives = 0;
+typedef struct { int seg; int off; } at_directive_t;
+typedef NIB_VEC(at_directive_t) at_directive_vec_t;
+static at_directive_vec_t at_directives_vec;
+#define at_directives (at_directives_vec.items)
+#define nat_directives (at_directives_vec.len)
 
-#define MAX_USE_DIRECTIVES 64
-static char use_modules[MAX_USE_DIRECTIVES][64]; /* module name from .use */
-static int nuse_directives = 0;
+typedef NIB_VEC(char *) use_module_vec_t;
+static use_module_vec_t use_modules_vec;
+#define use_modules (use_modules_vec.items)
+#define nuse_directives (use_modules_vec.len)
 
-#define MAX_EMIT_ORDER 1024
-static struct { int kind; int index; char module[64]; } emit_order[MAX_EMIT_ORDER];
-static int nemit_order = 0;
+typedef struct { int kind; int index; char module[64]; } emit_order_t;
+typedef NIB_VEC(emit_order_t) emit_order_vec_t;
+static emit_order_vec_t emit_order_vec;
+#define emit_order (emit_order_vec.items)
+#define nemit_order (emit_order_vec.len)
 
 static char _cur_parse_module[64]; /* set during parse_nir */
 
 static void record_emit(int kind, int index) {
-    if (nemit_order < MAX_EMIT_ORDER) {
-        emit_order[nemit_order].kind = kind;
-        emit_order[nemit_order].index = index;
-        strncpy(emit_order[nemit_order].module, _cur_parse_module, 63);
-        nemit_order++;
-    } else {
-        fprintf(stderr, "bind: too many top-level items (max %d)\n",
-                MAX_EMIT_ORDER);
-        bind_errors++;
-    }
+    emit_order_t *e = NIB_VEC_PUSH(&emit_order_vec, "emit order");
+    e->kind = kind;
+    e->index = index;
+    strncpy(e->module, _cur_parse_module, 63);
 }
 
 /* Global binder state */
-static func_t functions[MAX_FNS];
-static int nfunctions = 0;
+typedef NIB_VEC(func_t) func_vec_t;
+static func_vec_t functions_vec;
+#define functions (functions_vec.items)
+#define nfunctions (functions_vec.len)
 static FILE *out_asm = NULL;
 
 /* ================================================================
@@ -1880,13 +1904,7 @@ static void parse_nir(const char *path) {
         if (!*p || *p == ';') continue;
 
         if (strncmp(p, ".fn ", 4) == 0) {
-            if (nfunctions >= MAX_FNS) {
-                fprintf(stderr, "%s: too many functions (max %d)\n",
-                        path, MAX_FNS);
-                bind_errors++;
-                break;
-            }
-            func_t *fn = &functions[nfunctions++];
+            func_t *fn = NIB_VEC_PUSH(&functions_vec, "functions");
             memset(fn, 0, sizeof(*fn));
             fn->ret_pin = PREG_NONE;
             strncpy(fn->module, cur_module, 63);
@@ -1904,8 +1922,7 @@ static void parse_nir(const char *path) {
             record_emit(EMIT_FN, nfunctions - 1);
         }
         if (strncmp(p, ".extern ", 8) == 0) {
-            if (nexterns >= MAX_EXTERNS) continue;
-            extern_fn_t *ext = &externs[nexterns++];
+            extern_fn_t *ext = NIB_VEC_PUSH(&extern_vec, "externs");
             memset(ext, 0, sizeof(*ext));
             for (int i = 0; i < MAX_RETURNS; i++)
                 ext->ret_pins[i] = PREG_NONE;
@@ -2018,9 +2035,10 @@ static void parse_nir(const char *path) {
             ext->nparams = pi;
         }
         if (strncmp(p, ".data ", 6) == 0) {
-            if (ndata_blocks >= MAX_DATA_BLOCKS) continue;
-            data_block_t *db = &data_blocks[ndata_blocks++];
+            data_block_t *db = NIB_VEC_PUSH(&data_blocks_vec,
+                                            "data blocks");
             memset(db, 0, sizeof(*db));
+            NIB_VEC_INIT(&db->entries);
             strncpy(db->module, cur_module, 63);
             record_emit(EMIT_DATA, ndata_blocks - 1);
             p += 6;
@@ -2052,39 +2070,34 @@ static void parse_nir(const char *path) {
                 if (nl) *nl = '\0';
                 if (strncmp(dp, ".enddata", 8) == 0) break;
                 if (!*dp || *dp == ';') continue;
-                if (db->nentries < MAX_DATA_ENTRIES) {
-                    /* Convert IR data entries to assembly */
-                    if (strncmp(dp, "far.ref ", 8) == 0) {
-                        char fname[64];
-                        read_word(dp + 8, fname, sizeof(fname));
-                        /* Mark with \x01 prefix for deferred resolution */
-                        snprintf(db->entries[db->nentries++], 512,
-                                 "\x01%s", fname);
-                    } else if (strncmp(dp, "far ", 4) == 0) {
-                        int seg = 0, off = 0;
-                        char *fp2 = dp + 4;
-                        seg = (int)strtol(fp2, &fp2, 0);
-                        if (*fp2 == ':') fp2++;
-                        off = (int)strtol(fp2, NULL, 0);
-                        snprintf(db->entries[db->nentries++], 512,
-                                 "    dw 0x%04X, 0x%04X", off, seg);
-                    } else if (strncmp(dp, "dw ", 3) == 0) {
-                        snprintf(db->entries[db->nentries++], 512,
-                                 "    %s", dp);
-                    } else if (strncmp(dp, "db ", 3) == 0) {
-                        snprintf(db->entries[db->nentries++], 512,
-                                 "    %s", dp);
-                    } else if (strncmp(dp, "dd ", 3) == 0) {
-                        snprintf(db->entries[db->nentries++], 512,
-                                 "    %s", dp);
-                    }
+                /* Convert IR data entries to assembly */
+                if (strncmp(dp, "far.ref ", 8) == 0) {
+                    char fname[64];
+                    read_word(dp + 8, fname, sizeof(fname));
+                    /* Mark with \x01 prefix for deferred resolution */
+                    data_block_add_entry(db, "\x01%s", fname);
+                } else if (strncmp(dp, "far ", 4) == 0) {
+                    int seg = 0, off = 0;
+                    char *fp2 = dp + 4;
+                    seg = (int)strtol(fp2, &fp2, 0);
+                    if (*fp2 == ':') fp2++;
+                    off = (int)strtol(fp2, NULL, 0);
+                    data_block_add_entry(db, "    dw 0x%04X, 0x%04X",
+                                         off, seg);
+                } else if (strncmp(dp, "dw ", 3) == 0) {
+                    data_block_add_entry(db, "    %s", dp);
+                } else if (strncmp(dp, "db ", 3) == 0) {
+                    data_block_add_entry(db, "    %s", dp);
+                } else if (strncmp(dp, "dd ", 3) == 0) {
+                    data_block_add_entry(db, "    %s", dp);
                 }
             }
             continue;
         }
-        if (strncmp(p, ".global ", 8) == 0 && nglobals < MAX_GLOBALS) {
+        if (strncmp(p, ".global ", 8) == 0) {
             p += 8;
-            global_var_t *g = &globals[nglobals];
+            global_var_t *g = NIB_VEC_PUSH(&globals_vec, "globals");
+            memset(g, 0, sizeof(*g));
             p = read_word(p, g->name, sizeof(g->name));
             /* strip trailing comma */
             int nlen = strlen(g->name);
@@ -2123,22 +2136,20 @@ static void parse_nir(const char *path) {
                 }
             }
             strncpy(g->module, cur_module, 63);
-            nglobals++;
             record_emit(EMIT_GLOB, nglobals - 1);
             continue;
         }
         if (strncmp(p, ".use ", 5) == 0) {
             p += 5;
             if (*p == '"') p++;
-            if (nuse_directives < MAX_USE_DIRECTIVES) {
-                char *m = use_modules[nuse_directives];
-                int mi = 0;
-                while (*p && *p != '"' && *p != '.' && mi < 63)
-                    m[mi++] = *p++;
-                m[mi] = '\0';
-                record_emit(EMIT_USE, nuse_directives);
-                nuse_directives++;
-            }
+            char module[64];
+            int mi = 0;
+            while (*p && *p != '"' && *p != '.' && mi < 63)
+                module[mi++] = *p++;
+            module[mi] = '\0';
+            *NIB_VEC_PUSH(&use_modules_vec, "use directives") =
+                xstrdup_checked(module);
+            record_emit(EMIT_USE, nuse_directives - 1);
             continue;
         }
         if (strncmp(p, ".endat", 6) == 0) {
@@ -2147,15 +2158,14 @@ static void parse_nir(const char *path) {
         }
         if (strncmp(p, ".at ", 4) == 0) {
             p += 4;
-            if (nat_directives < MAX_AT_DIRECTIVES) {
-                int seg = (int)strtol(p, (char **)&p, 0);
-                if (*p == ':') p++;
-                int off = (int)strtol(p, (char **)&p, 0);
-                at_directives[nat_directives].seg = seg;
-                at_directives[nat_directives].off = off;
-                record_emit(EMIT_AT, nat_directives);
-                nat_directives++;
-            }
+            int seg = (int)strtol(p, (char **)&p, 0);
+            if (*p == ':') p++;
+            int off = (int)strtol(p, (char **)&p, 0);
+            at_directive_t *at = NIB_VEC_PUSH(&at_directives_vec,
+                                              "at directives");
+            at->seg = seg;
+            at->off = off;
+            record_emit(EMIT_AT, nat_directives - 1);
             continue;
         }
         /* Skip other top-level directives */
@@ -7522,9 +7532,11 @@ typedef struct {
     char callee_name[64];
 } call_edge_t;
 
-#define MAX_EDGES 1024
-static call_edge_t call_edges[MAX_EDGES];
-static int nedges = 0;
+typedef NIB_VEC(call_edge_t) call_edge_vec_t;
+typedef NIB_VEC(int) int_vec_t;
+static call_edge_vec_t call_edges_vec;
+#define call_edges (call_edges_vec.items)
+#define nedges (call_edges_vec.len)
 
 static int find_fn(const char *name) {
     for (int i = 0; i < nfunctions; i++)
@@ -7535,7 +7547,7 @@ static int find_fn(const char *name) {
 
 /* Build call graph by scanning all functions for call instructions */
 static void build_call_graph(void) {
-    nedges = 0;
+    call_edges_vec.len = 0;
     for (int fi = 0; fi < nfunctions; fi++) {
         func_t *fn = &functions[fi];
         for (int i = 0; i < fn->ninsns; i++) {
@@ -7543,8 +7555,7 @@ static void build_call_graph(void) {
             if (ins->op != IR_CALL && ins->op != IR_MCALL && ins->op != IR_TAILCALL &&
                 ins->op != IR_ICALL) continue;
 
-            if (nedges >= MAX_EDGES) break;
-            call_edge_t *e = &call_edges[nedges++];
+            call_edge_t *e = NIB_VEC_PUSH(&call_edges_vec, "call graph");
             e->caller_fn = fi;
             e->callee_fn = (ins->op == IR_ICALL) ? -1 : find_fn(ins->name);
             e->insn_idx = i;
@@ -7580,24 +7591,27 @@ static void build_call_graph(void) {
 
 /* Topological sort of functions — leaf functions first.
  * A leaf is a function that makes no calls to other Nib functions. */
-static int topo_order[MAX_FNS];
-static int ntopo;
+static int_vec_t topo_order_vec;
+#define topo_order (topo_order_vec.items)
+#define ntopo (topo_order_vec.len)
 
 static void topo_sort(void) {
     /* Compute in-degree (how many Nib functions call this one) */
-    bool visited[MAX_FNS] = {0};
-    bool has_callee[MAX_FNS] = {0}; /* does this fn call other Nib fns? */
+    bool *visited = nib_xcalloc((size_t)nfunctions, sizeof(bool),
+                                "topo visited set");
+    bool *has_callee = nib_xcalloc((size_t)nfunctions, sizeof(bool),
+                                   "topo callee set");
 
     for (int i = 0; i < nedges; i++) {
         if (call_edges[i].callee_fn >= 0)
             has_callee[call_edges[i].caller_fn] = true;
     }
 
-    ntopo = 0;
+    topo_order_vec.len = 0;
     /* First pass: all leaf functions (no outgoing Nib calls) */
     for (int i = 0; i < nfunctions; i++) {
         if (!has_callee[i]) {
-            topo_order[ntopo++] = i;
+            *NIB_VEC_PUSH(&topo_order_vec, "topo order") = i;
             visited[i] = true;
         }
     }
@@ -7618,7 +7632,7 @@ static void topo_sort(void) {
                 }
             }
             if (all_callees_visited) {
-                topo_order[ntopo++] = i;
+                *NIB_VEC_PUSH(&topo_order_vec, "topo order") = i;
                 visited[i] = true;
                 changed = true;
             }
@@ -7628,8 +7642,11 @@ static void topo_sort(void) {
     /* Any remaining (recursive) — add them anyway */
     for (int i = 0; i < nfunctions; i++) {
         if (!visited[i])
-            topo_order[ntopo++] = i;
+            *NIB_VEC_PUSH(&topo_order_vec, "topo order") = i;
     }
+
+    free(visited);
+    free(has_callee);
 }
 
 /* Propagate register preferences bottom-up through the call graph.
@@ -7644,6 +7661,9 @@ static void topo_sort(void) {
  */
 static void propagate_preferences(void) {
     /* Initialize */
+    NIB_VEC_RESERVE(&fn_assigns_vec, nfunctions, "function assignments");
+    fn_assigns_vec.len = nfunctions;
+    memset(fn_assigns, 0, (size_t)nfunctions * sizeof(fn_assigns[0]));
     for (int i = 0; i < nfunctions; i++) {
         fn_assigns[i].resolved = false;
         fn_assigns[i].return_reg = PREG_NONE;
@@ -7937,19 +7957,22 @@ static void propagate_preferences(void) {
 
 static int at_depth = 0;
 static int current_seg = -1;    /* segment from last at() directive */
-static int seg_stack[MAX_AT_DIRECTIVES];
-static int seg_sp = 0;
+static int_vec_t seg_stack_vec;
+#define seg_stack (seg_stack_vec.items)
+#define seg_sp (seg_stack_vec.len)
 
 static int place_at_depth = 0;
 static int place_current_seg = -1;
-static int place_seg_stack[MAX_AT_DIRECTIVES];
-static int place_seg_sp = 0;
-static char placed_modules[128][64];
-static int nplaced_modules = 0;
+static int_vec_t place_seg_stack_vec;
+#define place_seg_stack (place_seg_stack_vec.items)
+#define place_seg_sp (place_seg_stack_vec.len)
+static use_module_vec_t placed_modules_vec;
+#define placed_modules (placed_modules_vec.items)
+#define nplaced_modules (placed_modules_vec.len)
 
 static void place_push_seg(int seg) {
-    if (place_seg_sp < MAX_AT_DIRECTIVES)
-        place_seg_stack[place_seg_sp++] = place_current_seg;
+    *NIB_VEC_PUSH(&place_seg_stack_vec, "placement segment stack") =
+        place_current_seg;
     place_current_seg = seg;
     place_at_depth++;
 }
@@ -8002,7 +8025,8 @@ static void place_module(const char *path) {
 
     for (int i = 0; i < nplaced_modules; i++)
         if (strcmp(placed_modules[i], mod) == 0) return;
-    strncpy(placed_modules[nplaced_modules++], mod, 63);
+    *NIB_VEC_PUSH(&placed_modules_vec, "placed modules") =
+        xstrdup_checked(mod);
 
     for (int ei = 0; ei < nemit_order; ei++) {
         if (strcmp(emit_order[ei].module, mod) != 0) continue;
@@ -8040,8 +8064,7 @@ static void emit_item(int ei) {
         fprintf(out_asm, "\n; === data: %s ===\n", db->label);
         if (db->has_at) {
             int lin = db->at_seg * 16 + db->at_off;
-            if (seg_sp < MAX_AT_DIRECTIVES)
-                seg_stack[seg_sp++] = current_seg;
+            *NIB_VEC_PUSH(&seg_stack_vec, "segment stack") = current_seg;
             fprintf(out_asm, "    org 0x%05X ; %04X:%04X\n",
                     lin, db->at_seg, db->at_off);
             fprintf(out_asm, "    seg 0x%04X\n", db->at_seg);
@@ -8052,19 +8075,18 @@ static void emit_item(int ei) {
         }
         fprintf(out_asm, "%s:\n", db->label);
         for (int j = 0; j < db->nentries; j++) {
-            if (db->entries[j][0] == '\x01') {
-                const char *r = resolve_fn_name(db->entries[j] + 1);
+            if (db->entries.items[j][0] == '\x01') {
+                const char *r = resolve_fn_name(db->entries.items[j] + 1);
                 fprintf(out_asm, "    dw %s, SEG %s\n", r, r);
             } else {
-                fprintf(out_asm, "%s\n", db->entries[j]);
+                fprintf(out_asm, "%s\n", db->entries.items[j]);
             }
         }
     } else if (kind == EMIT_GLOB) {
         global_var_t *g = &globals[idx];
         if (g->has_at) {
             int lin = g->at_seg * 16 + g->at_off;
-            if (seg_sp < MAX_AT_DIRECTIVES)
-                seg_stack[seg_sp++] = current_seg;
+            *NIB_VEC_PUSH(&seg_stack_vec, "segment stack") = current_seg;
             fprintf(out_asm, "\n    org 0x%05X ; %04X:%04X\n",
                     lin, g->at_seg, g->at_off);
             fprintf(out_asm, "    seg 0x%04X\n", g->at_seg);
@@ -8088,8 +8110,7 @@ static void emit_item(int ei) {
         int s = at_directives[idx].seg;
         int o = at_directives[idx].off;
         int lin = s * 16 + o;
-        if (seg_sp < MAX_AT_DIRECTIVES)
-            seg_stack[seg_sp++] = current_seg;
+        *NIB_VEC_PUSH(&seg_stack_vec, "segment stack") = current_seg;
         fprintf(out_asm, "\n    org 0x%05X ; %04X:%04X\n", lin, s, o);
         fprintf(out_asm, "    seg 0x%04X\n", s);
         current_seg = s;
@@ -8102,8 +8123,9 @@ static void emit_item(int ei) {
     }
 }
 
-static char done_modules[128][64];
-static int ndone_modules = 0;
+static use_module_vec_t done_modules_vec;
+#define done_modules (done_modules_vec.items)
+#define ndone_modules (done_modules_vec.len)
 
 static void emit_module(const char *path) {
     /* Extract module name from path */
@@ -8117,7 +8139,8 @@ static void emit_module(const char *path) {
     /* Skip if already emitted */
     for (int i = 0; i < ndone_modules; i++)
         if (strcmp(done_modules[i], mod) == 0) return;
-    strncpy(done_modules[ndone_modules++], mod, 63);
+    *NIB_VEC_PUSH(&done_modules_vec, "emitted modules") =
+        xstrdup_checked(mod);
 
     /* Walk this module's items in emit_order, expanding .use recursively */
     for (int ei = 0; ei < nemit_order; ei++) {
@@ -8152,8 +8175,25 @@ static void emit_module(const char *path) {
 
 int main(int argc, char **argv) {
     const char *outpath = "out.asm";
-    int ninputs = 0;
-    const char *inputs[64];
+    use_module_vec_t inputs_vec;
+    NIB_VEC_INIT(&inputs_vec);
+#define inputs (inputs_vec.items)
+#define ninputs (inputs_vec.len)
+
+    NIB_VEC_INIT(&extern_vec);
+    NIB_VEC_INIT(&fn_assigns_vec);
+    NIB_VEC_INIT(&data_blocks_vec);
+    NIB_VEC_INIT(&globals_vec);
+    NIB_VEC_INIT(&at_directives_vec);
+    NIB_VEC_INIT(&use_modules_vec);
+    NIB_VEC_INIT(&emit_order_vec);
+    NIB_VEC_INIT(&functions_vec);
+    NIB_VEC_INIT(&call_edges_vec);
+    NIB_VEC_INIT(&topo_order_vec);
+    NIB_VEC_INIT(&seg_stack_vec);
+    NIB_VEC_INIT(&place_seg_stack_vec);
+    NIB_VEC_INIT(&placed_modules_vec);
+    NIB_VEC_INIT(&done_modules_vec);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
@@ -8168,7 +8208,7 @@ int main(int argc, char **argv) {
             pressure_compare_old_path = argv[++i];
             pressure_compare_new_path = argv[++i];
         } else {
-            inputs[ninputs++] = argv[i];
+            *NIB_VEC_PUSH(&inputs_vec, "input files") = argv[i];
         }
     }
 
