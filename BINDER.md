@@ -82,11 +82,21 @@ This is the key innovation: register assignments chosen by leaf
 functions ripple up through the entire call graph, so callers place
 values in the right registers from the start.
 
-### Phase 4: Addressing constraint scan
+### Phase 4: Machine constraint collection
 
-Vregs used in LOAD/STORE instructions (memory operands) are marked
-`needs_addressable`, restricting them to {BX, BP, SI, DI}. Pre-colored
-preferences that violate addressing constraints are overridden.
+Scan every instruction into a compact machine-constraint record. This
+centralizes hardware requirements before allocation:
+
+- instruction clobbers such as accumulator and port I/O effects
+- hard register requirements such as shift counts in CL
+- addressability requirements for memory base and index operands
+- register affinities for operands that are faster or simpler in a
+  particular physical register
+
+Vregs used in memory operands are marked `needs_addressable`,
+restricting them to {BX, BP, SI, DI}. Base-only operands are restricted
+to {BX, BP}; index-only operands are restricted to {SI, DI}. Hard
+constraints override ordinary preferences.
 
 ### Phase 5: CFG and liveness
 
@@ -109,9 +119,14 @@ enabling future move coalescing).
 3. **Simplify**: repeatedly remove vregs with degree < pool_size
    from the graph, pushing onto a stack
 4. **Potential spill**: when stuck, push the vreg with lowest spill
-   cost (use_count weighted by loop depth and const flag)
-5. **Select**: pop stack and assign colors, preferring affinities;
-   if no color fits, actually spill to a stack slot
+   cost. Uses are weighted heavily, loop values are expensive to spill,
+   consts are cheaper to rematerialize, fixed registers are very
+   expensive, preferred registers are somewhat expensive, and very long
+   low-use ranges are cheaper.
+5. **Select**: pop stack and assign colors with a shared color chooser.
+   Explicit preferences dominate, machine affinities rank the remaining
+   valid colors, and pool order is the final speed-first tie-breaker. If
+   no color fits, actually spill to a stack slot.
 
 ### Phase 7: Move insertion
 
