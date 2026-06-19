@@ -1556,6 +1556,112 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.nir <<'NIR'
+; Binder regression: the shifted full-row blit shape can assign the two
+; fragment copy vregs to spill homes. The selector should still carry the
+; immediate RMW users in a sibling byte pair instead of emitting frame
+; stores for the split source byte.
+.fn sp_rmw_pressure
+.param %0, seg, "src_seg", register, pin=ES
+.param %1, u16, "start_src_row"
+.param %2, u16, "src_stride", stack
+.param %3, u16, "full_bytes", stack
+.param %4, u8, "height", stack
+.param %5, u16, "start_dst_row"
+    mov %6, %1
+    mov %7, %5
+.vreg %4, u8
+    mov %8, %4
+row:
+.vreg %8, u8
+    cmp.eq %9, %8, 0
+    jz %9, .L14
+    ret
+.L14:
+    mov %10, %6
+    mov %11, %7
+    mov %12, %3
+loop:
+    cmp.eq %13, %12, 0
+    jz %13, .L16
+    jmp next
+.L16:
+.vreg %14, u8, const
+    loadmem %15, %10, ES
+.vreg %15, u8
+    mov %14, %15
+.vreg %16, u8, const
+.vreg %14, u8
+    shr %17, %14, 1
+.vreg %17, u8
+    mov %16, %17
+.vreg %18, u8, const
+.vreg %14, u8
+    shl %19, %14, 7
+.vreg %19, u8
+    mov %18, %19
+    loadmem %20, %11
+.vreg %20, u8
+    and %21, %20, 128
+.vreg %21, u8
+.vreg %16, u8
+    or %22, %21, %16
+.vreg %22, u8
+    storemem %11, %22
+    add %24, %11, 1
+    loadmem %23, %24
+.vreg %23, u8
+    and %25, %23, 127
+.vreg %25, u8
+.vreg %18, u8
+    or %26, %25, %18
+.vreg %26, u8
+    add %27, %11, 1
+    storemem %27, %26
+    add %28, %10, 1
+    mov %10, %28
+    add %29, %11, 1
+    mov %11, %29
+    sub %30, %12, 1
+    mov %12, %30
+    jmp loop
+next:
+    add %31, %6, %2
+    mov %6, %31
+    add %32, %7, 64
+    mov %7, %32
+.vreg %8, u8
+    sub %33, %8, 1
+.vreg %33, u8
+    mov %8, %33
+    jmp row
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.nir \
+       -o "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.asm >/dev/null 2>&1; then
+    shift_pressure_window=$(sed -n '/sp_rmw_pressure:$/,/.*_next:$/p' "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.asm \
+           -o "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'mov DL, [ES:BX]' &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'mov DH, DL' &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'shr DL, 1' &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'shl DH, 7' &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'and byte [SI], 128' &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'or byte [SI], DL' &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'and byte [SI+1], 127' &&
+       printf "%s\n" "$shift_pressure_window" | grep -Fq 'or byte [SI+1], DH' &&
+       ! printf "%s\n" "$shift_pressure_window" | grep -Eq '\[BP-[46]\]'; then
+        pass "shift-pair-rmw-pressure: spilled fragments fold into RMW"
+    else
+        fail "shift-pair-rmw-pressure" "shift fragments still spill in full-row shape"
+    fi
+else
+    fail "shift-pair-rmw-pressure" "$(
+        ./nibbind "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.nir \
+            -o "$TEST_TMPDIR"/t_shift_pair_rmw_pressure.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_shift_pair_affinity.nir <<'NIR'
 ; Binder regression: opposite byte shifts from the same source should
 ; prefer sibling halves of one parent even outside the RMW combiner.

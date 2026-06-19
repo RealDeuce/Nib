@@ -7910,6 +7910,105 @@ static bool preg_range_occupied_except(func_t *fn, int preg, int start,
     return false;
 }
 
+static bool load_store_same_mem(ir_insn_t *load, ir_insn_t *store) {
+    if (load->op != IR_LOADMEM || store->op != IR_STOREMEM)
+        return false;
+    if (load->name[0] || store->name[0])
+        return false;
+    if (load->src1 != store->dst || load->src2 != store->src2 ||
+        load->mem_seg != store->mem_seg ||
+        load->has_mem_disp != store->has_mem_disp)
+        return false;
+    if (load->has_mem_disp && load->mem_disp != store->mem_disp)
+        return false;
+    return true;
+}
+
+typedef struct {
+    int start;
+    int end;
+    int load_vreg;
+    int mask_vreg;
+    int out_vreg;
+    int value_vreg;
+    int mask;
+    const char *op;
+    char mem[64];
+} mem_rmw_match_t;
+
+static bool match_mem_rmw_use(func_t *fn, int i, int value_vreg,
+                              mem_rmw_match_t *m) {
+    int idx[4];
+    int p = i;
+    for (int n = 0; n < 4; n++) {
+        p = next_effective_insn(fn, p);
+        if (p < 0)
+            return false;
+        idx[n] = p++;
+    }
+
+    ir_insn_t *load = &fn->insns[idx[0]];
+    ir_insn_t *mask = &fn->insns[idx[1]];
+    ir_insn_t *combine = &fn->insns[idx[2]];
+    ir_insn_t *store = &fn->insns[idx[3]];
+
+    if (load->op != IR_LOADMEM || load->name[0] ||
+        !vreg_is_byte_value(fn, load->dst))
+        return false;
+    if (!ir_alu_imm(mask, "and", mask->dst, load->dst, mask->imm) ||
+        !vreg_is_byte_value(fn, mask->dst))
+        return false;
+    if (combine->op != IR_ALU || combine->has_imm ||
+        (strcmp(combine->name, "or") != 0 &&
+         strcmp(combine->name, "xor") != 0) ||
+        combine->src1 != mask->dst || combine->src2 != value_vreg ||
+        !vreg_is_byte_value(fn, combine->dst))
+        return false;
+    if (!load_store_same_mem(load, store) || store->src1 != combine->dst)
+        return false;
+    if (block_of(fn, idx[0]) != block_of(fn, idx[3]))
+        return false;
+    if (vreg_live_after_insn(fn, idx[3], load->dst) ||
+        vreg_live_after_insn(fn, idx[3], mask->dst) ||
+        vreg_live_after_insn(fn, idx[3], combine->dst))
+        return false;
+    if (vreg_live_after_insn(fn, idx[3], value_vreg))
+        return false;
+
+    bool explicit_seg = (load->src2 >= 0 || load->mem_seg != PREG_NONE);
+    if (!simple_mem_expr(fn, load, load->src1, explicit_seg,
+                         m->mem, sizeof(m->mem)))
+        return false;
+
+    m->start = idx[0];
+    m->end = idx[3];
+    m->load_vreg = load->dst;
+    m->mask_vreg = mask->dst;
+    m->out_vreg = combine->dst;
+    m->value_vreg = value_vreg;
+    m->mask = mask->imm;
+    m->op = combine->name;
+    return true;
+}
+
+static bool choose_sibling_byte_regs(func_t *fn, int start, int end,
+                                     int *except, int nexcept,
+                                     int *low_reg, int *high_reg) {
+    static const int lows[] = { PREG_DL, PREG_BL, PREG_CL, PREG_AL };
+    static const int highs[] = { PREG_DH, PREG_BH, PREG_CH, PREG_AH };
+    for (int i = 0; i < (int)(sizeof(lows) / sizeof(lows[0])); i++) {
+        if (preg_range_occupied_except(fn, lows[i], start, end,
+                                       except, nexcept) ||
+            preg_range_occupied_except(fn, highs[i], start, end,
+                                       except, nexcept))
+            continue;
+        *low_reg = lows[i];
+        *high_reg = highs[i];
+        return true;
+    }
+    return false;
+}
+
 static bool emit_sibling_shift_pair_pattern(func_t *fn, int i, int *skip_to) {
     if (i < 0 || i >= fn->ninsns)
         return false;
@@ -7956,25 +8055,50 @@ static bool emit_sibling_shift_pair_pattern(func_t *fn, int i, int *skip_to) {
         vreg_live_after_insn(fn, idx[5], copy_src->dst))
         return false;
 
+    mem_rmw_match_t rmw1, rmw2;
+    bool have_rmw1 = match_mem_rmw_use(fn, idx[5] + 1, copy1->dst, &rmw1);
+    bool have_rmw2 = false;
+    if (have_rmw1)
+        have_rmw2 = match_mem_rmw_use(fn, rmw1.end + 1, copy2->dst, &rmw2);
+
     int reg1 = vreg_preg(fn, copy1->dst);
     int reg2 = vreg_preg(fn, copy2->dst);
-    if (!preg_is_byte(reg1) || !preg_is_byte(reg2) || reg1 == reg2 ||
-        preg_alias_parent[reg1] != preg_alias_parent[reg2])
-        return false;
-    if (vreg_preg(fn, shift1->dst) != reg1 ||
-        vreg_preg(fn, shift2->dst) != reg2)
-        return false;
+    int pattern_end = have_rmw2 ? rmw2.end : idx[5];
 
-    int except[] = {
+    int except[16] = {
         load->dst, copy_src->dst, shift1->dst, copy1->dst,
         shift2->dst, copy2->dst
     };
-    int nexcept = (int)(sizeof(except) / sizeof(except[0]));
-    if (preg_range_occupied_except(fn, reg1, idx[0], idx[5],
-                                   except, nexcept) ||
-        preg_range_occupied_except(fn, reg2, idx[0], idx[5],
-                                   except, nexcept))
-        return false;
+    int nexcept = 6;
+    if (have_rmw2) {
+        except[nexcept++] = rmw1.load_vreg;
+        except[nexcept++] = rmw1.mask_vreg;
+        except[nexcept++] = rmw1.out_vreg;
+        except[nexcept++] = rmw2.load_vreg;
+        except[nexcept++] = rmw2.mask_vreg;
+        except[nexcept++] = rmw2.out_vreg;
+    }
+
+    if (have_rmw2) {
+        int low_reg, high_reg;
+        if (!choose_sibling_byte_regs(fn, idx[0], pattern_end,
+                                      except, nexcept, &low_reg, &high_reg))
+            return false;
+        reg1 = s1_shr ? low_reg : high_reg;
+        reg2 = s2_shr ? low_reg : high_reg;
+    } else {
+        if (!preg_is_byte(reg1) || !preg_is_byte(reg2) || reg1 == reg2 ||
+            preg_alias_parent[reg1] != preg_alias_parent[reg2])
+            return false;
+        if (vreg_preg(fn, shift1->dst) != reg1 ||
+            vreg_preg(fn, shift2->dst) != reg2)
+            return false;
+        if (preg_range_occupied_except(fn, reg1, idx[0], idx[5],
+                                       except, nexcept) ||
+            preg_range_occupied_except(fn, reg2, idx[0], idx[5],
+                                       except, nexcept))
+            return false;
+    }
 
     char mem[64];
     bool explicit_seg = (load->src2 >= 0 || load->mem_seg != PREG_NONE);
@@ -7988,21 +8112,15 @@ static bool emit_sibling_shift_pair_pattern(func_t *fn, int i, int *skip_to) {
             shift1->imm);
     fprintf(out_asm, "    %s %s, %d\n", shift2->name, preg_name[reg2],
             shift2->imm);
-    *skip_to = idx[5];
-    return true;
-}
-
-static bool load_store_same_mem(ir_insn_t *load, ir_insn_t *store) {
-    if (load->op != IR_LOADMEM || store->op != IR_STOREMEM)
-        return false;
-    if (load->name[0] || store->name[0])
-        return false;
-    if (load->src1 != store->dst || load->src2 != store->src2 ||
-        load->mem_seg != store->mem_seg ||
-        load->has_mem_disp != store->has_mem_disp)
-        return false;
-    if (load->has_mem_disp && load->mem_disp != store->mem_disp)
-        return false;
+    if (have_rmw2) {
+        fprintf(out_asm, "    and byte %s, %d\n", rmw1.mem, rmw1.mask);
+        fprintf(out_asm, "    %s byte %s, %s\n", rmw1.op, rmw1.mem,
+                preg_name[reg1]);
+        fprintf(out_asm, "    and byte %s, %d\n", rmw2.mem, rmw2.mask);
+        fprintf(out_asm, "    %s byte %s, %s\n", rmw2.op, rmw2.mem,
+                preg_name[reg2]);
+    }
+    *skip_to = pattern_end;
     return true;
 }
 
