@@ -199,6 +199,8 @@ typedef struct {
     int     line;           /* source line */
     char    src_file[64];   /* source filename for debug */
     int     mem_seg;        /* explicit segment register for loadmem/storemem */
+    int     mem_disp;       /* constant displacement for loadmem/storemem */
+    bool    has_mem_disp;
 } ir_insn_t;
 
 /* Virtual register info */
@@ -627,6 +629,8 @@ static ir_insn_t *fn_push_insn(func_t *fn) {
     memset(ins, 0, sizeof(*ins));
     ins->dst = ins->src1 = ins->src2 = -1;
     ins->mem_seg = PREG_NONE;
+    ins->mem_disp = 0;
+    ins->has_mem_disp = false;
     return ins;
 }
 
@@ -2588,6 +2592,84 @@ static void parse_nir(const char *path) {
     }
 
     fclose(fp);
+}
+
+static int count_vreg_uses(func_t *fn, int vreg) {
+    if (!fn || vreg < 0)
+        return 0;
+    int count = 0;
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (ins->src1 == vreg)
+            count++;
+        if (ins->src2 == vreg)
+            count++;
+        if (insn_reads_dst(ins) && ins->dst == vreg)
+            count++;
+        for (int j = 0; j < ins->nextra_args; j++) {
+            if (ins_extra_arg(ins, j) == vreg)
+                count++;
+        }
+        if (ins->op == IR_RETVAL) {
+            for (int j = 0; j < ins->nret_vregs; j++) {
+                if (ins_ret_vreg(ins, j) == vreg)
+                    count++;
+            }
+        }
+    }
+    return count;
+}
+
+static void make_nop(ir_insn_t *ins) {
+    if (!ins)
+        return;
+    ins->op = IR_NOP;
+    ins->dst = ins->src1 = ins->src2 = -1;
+    ins->nextra_args = 0;
+    ins->nret_vregs = 0;
+    ins->nargs = 0;
+    ins->nrets = 0;
+    ins->imm = 0;
+    ins->has_imm = false;
+    ins->name[0] = '\0';
+    ins->asm_body[0] = '\0';
+    ins->asm_ann[0] = '\0';
+    ins->asm_is_block = false;
+    ins->label_id = -1;
+    ins->mem_seg = PREG_NONE;
+    ins->mem_disp = 0;
+    ins->has_mem_disp = false;
+}
+
+static void fold_memory_displacements(func_t *fn) {
+    if (!fn)
+        return;
+
+    for (int i = 1; i < fn->ninsns; i++) {
+        ir_insn_t *mem = &fn->insns[i];
+        if ((mem->op != IR_LOADMEM && mem->op != IR_STOREMEM) ||
+            mem->name[0] || mem->has_mem_disp)
+            continue;
+
+        int addr_vreg = (mem->op == IR_LOADMEM) ? mem->src1 : mem->dst;
+        if (addr_vreg < 0)
+            continue;
+
+        ir_insn_t *add = &fn->insns[i - 1];
+        if (add->op != IR_ALU || strcmp(add->name, "add") != 0 ||
+            !add->has_imm || add->dst != addr_vreg || add->src1 < 0)
+            continue;
+        if (count_vreg_uses(fn, addr_vreg) != 1)
+            continue;
+
+        if (mem->op == IR_LOADMEM)
+            mem->src1 = add->src1;
+        else
+            mem->dst = add->src1;
+        mem->mem_disp = add->imm;
+        mem->has_mem_disp = true;
+        make_nop(add);
+    }
 }
 
 /* ================================================================
@@ -6468,6 +6550,20 @@ static const char *mem_seg_prefix_from_preg(int preg) {
     return "ES";
 }
 
+static const char *mem_offset_expr(const char *base, ir_insn_t *ins) {
+    static char buf[4][64];
+    static int idx = 0;
+    if (!ins || !ins->has_mem_disp || ins->mem_disp == 0)
+        return base;
+
+    char *b = buf[idx++ & 3];
+    if (ins->mem_disp > 0)
+        snprintf(b, 64, "%s+%d", base, ins->mem_disp);
+    else
+        snprintf(b, 64, "%s%d", base, ins->mem_disp);
+    return b;
+}
+
 static int acc_preg_for_width(bool is_byte) {
     return is_byte ? PREG_AL : PREG_AX;
 }
@@ -7863,6 +7959,7 @@ static void emit_function(func_t *fn) {
                     off_reg = emit_vreg_or_spill_scratch(fn, ins->src1,
                                                          PREG_BX,
                                                          &off_spilled);
+                    const char *off_expr = mem_offset_expr(off_reg, ins);
                     if (has_seg) {
                         /* Segment value vregs are materialized through ES.
                          * Literal segment-register syntax uses that segment
@@ -7877,12 +7974,12 @@ static void emit_function(func_t *fn) {
                             bool preserve_acc =
                                 emit_push_acc_if_live(fn, i, dst_byte);
                             fprintf(out_asm, "    mov %s, [%s:%s]\n",
-                                    acc, mem_seg, off_reg);
+                                    acc, mem_seg, off_expr);
                             emit_spill_store_from_reg(fn, ins->dst, acc);
                             emit_pop_acc_if_pushed_for_func(fn, preserve_acc);
                         } else {
                             fprintf(out_asm, "    mov %s, [%s:%s]\n",
-                                    d, mem_seg, off_reg);
+                                    d, mem_seg, off_expr);
                         }
                     } else {
                         /* Near: mov dst, [off] or [CS:off] */
@@ -7891,11 +7988,11 @@ static void emit_function(func_t *fn) {
                         if (is_spilled(fn, ins->dst)) {
                             bool preserve_acc =
                                 emit_push_acc_if_live(fn, i, dst_byte);
-                            fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg, off_reg);
+                            fprintf(out_asm, "    mov %s, [%s%s]\n", acc, seg, off_expr);
                             emit_spill_store_from_reg(fn, ins->dst, acc);
                             emit_pop_acc_if_pushed_for_func(fn, preserve_acc);
                         } else {
-                            fprintf(out_asm, "    mov %s, [%s%s]\n", d, seg, off_reg);
+                            fprintf(out_asm, "    mov %s, [%s%s]\n", d, seg, off_expr);
                         }
                         emit_es_data_suffix(use_es);
                     }
@@ -7931,6 +8028,7 @@ static void emit_function(func_t *fn) {
                     off_reg = emit_vreg_or_spill_scratch(fn, ins->dst,
                                                          PREG_BX,
                                                          &off_spilled);
+                    const char *off_expr = mem_offset_expr(off_reg, ins);
                     /* Resolve value — if spilled, load into accumulator */
                     const char *val_reg;
                     bool val_spilled = is_spilled(fn, ins->src1);
@@ -7953,12 +8051,12 @@ static void emit_function(func_t *fn) {
                             emit_pop_scratch(fn, PREG_AX);
                         }
                         fprintf(out_asm, "    mov [%s:%s], %s\n",
-                                mem_seg, off_reg, val_reg);
+                                mem_seg, off_expr, val_reg);
                     } else {
                         /* Near store, check CS: override */
                         bool use_es = emit_es_data_prefix(fn, ins->dst);
                         const char *seg = use_es ? "ES:" : near_data_seg_prefix(fn, ins->dst);
-                        fprintf(out_asm, "    mov [%s%s], %s\n", seg, off_reg, val_reg);
+                        fprintf(out_asm, "    mov [%s%s], %s\n", seg, off_expr, val_reg);
                         emit_es_data_suffix(use_es);
                     }
                     emit_pop_acc_if_pushed_for_func(fn, preserve_val_acc);
@@ -8880,6 +8978,9 @@ int main(int argc, char **argv) {
         parse_nir(inputs[i]);
 
     fprintf(stderr, "Loaded %d functions\n", nfunctions);
+
+    for (int i = 0; i < nfunctions; i++)
+        fold_memory_displacements(&functions[i]);
 
     nplaced_modules = 0;
     place_current_seg = -1;

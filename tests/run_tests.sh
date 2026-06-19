@@ -1283,6 +1283,35 @@ else
     fail "byte-pressure-copy" "$(./nibbind "$TEST_TMPDIR"/t_byte_pressure_copy.nir -o "$TEST_TMPDIR"/t_byte_pressure_copy.asm 2>&1 | tail -1)"
 fi
 
+cat > "$TEST_TMPDIR"/t_mem_disp_fold.nir <<'NIR'
+; Binder regression: a single-use address add feeding raw memory access
+; should become a memory displacement instead of a stack address temp.
+.fn mem_disp_fold
+.param %0, u16, "idx", register, pin=BX
+    add %1, %0, 1
+    loadmem %2, %1
+.vreg %2, u8
+    and %3, %2, 127
+.vreg %3, u8
+    add %4, %0, 1
+    storemem %4, %3
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_mem_disp_fold.nir -o "$TEST_TMPDIR"/t_mem_disp_fold.asm >/dev/null 2>&1; then
+    disp_window=$(sed -n '/mem_disp_fold_mem_disp_fold:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_mem_disp_fold.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_mem_disp_fold.asm -o "$TEST_TMPDIR"/t_mem_disp_fold.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$disp_window" | grep -q 'mov [A-D][HL], \[BX+1\]' &&
+       printf "%s\n" "$disp_window" | grep -q 'mov \[BX+1\], [A-D][HL]' &&
+       ! printf "%s\n" "$disp_window" | grep -q 'push BX\|pop BX\|\[BP-'; then
+        pass "mem-disp-fold: address add folds into memory displacement"
+    else
+        fail "mem-disp-fold" "address add still routed through stack temp"
+    fi
+else
+    fail "mem-disp-fold" "$(./nibbind "$TEST_TMPDIR"/t_mem_disp_fold.nir -o "$TEST_TMPDIR"/t_mem_disp_fold.asm 2>&1 | tail -1)"
+fi
+
 # Port I/O: OUT must use AL, IN must read into AL
 if [ -f "$TEST_TMPDIR"/t_port_io.asm ]; then
     port_accum_window=$(sed -n '/t_port_io_test_out_accum:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_port_io.asm)
