@@ -1,7 +1,6 @@
 # Nib TODO
 
 ## Hardware Investigation
-- Trace pins between gate array and V20 CPU — does the gate array use LOCK#?
 - Check if any V20 extension instructions expose TA/TB/TC/LC internal registers
 - Determine if power button NMI is usable as debug break trigger
 
