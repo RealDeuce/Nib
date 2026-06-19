@@ -20,11 +20,9 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
-#define MAX_LABELS   4096
-#define MAX_LINE     1024
 #define MAX_OUTPUT   1048576  /* 1MB — full V20 address space */
-#define MAX_FIXUPS   4096
-#define MAX_DBG      8192
+
+#include "table.h"
 
 /* Source-level debug tracking (for error messages and .dbg output) */
 static char pending_dbg_file[64];  /* from last ; @ comment */
@@ -67,16 +65,26 @@ static int org_base = 0;
 static int seg_base = 0; /* current segment for SEG operator */
 
 /* org stack for at()/end at; */
-#define MAX_ORG_STACK 16
-static struct { int org_base; int out_pos; int seg_base; } org_stack[MAX_ORG_STACK];
-static int org_sp = 0;
+typedef struct { int org_base; int out_pos; int seg_base; } org_state_t;
+typedef NIB_VEC(org_state_t) org_stack_vec_t;
+static org_stack_vec_t org_stack_vec;
+#define org_stack (org_stack_vec.items)
+#define org_sp (org_stack_vec.len)
 static int pass = 1;     /* 1 or 2 */
 static int errors = 0;
 /* Jcc relaxation: track which source lines need 5-byte relaxed form */
-#define MAX_RELAXED 256
-static int relaxed_lines[MAX_RELAXED];
-static int nrelaxed = 0;
+typedef NIB_VEC(int) int_vec_t;
+static int_vec_t relaxed_lines_vec;
+#define relaxed_lines (relaxed_lines_vec.items)
+#define nrelaxed (relaxed_lines_vec.len)
 static bool jcc_relaxed = false;
+
+static char *xstrdup_checked(const char *s) {
+    size_t len = strlen(s) + 1;
+    char *p = nib_xmalloc(len, "string");
+    memcpy(p, s, len);
+    return p;
+}
 
 static bool is_relaxed_line(int line) {
     for (int i = 0; i < nrelaxed; i++)
@@ -86,8 +94,7 @@ static bool is_relaxed_line(int line) {
 
 static void mark_relaxed_line(int line) {
     if (is_relaxed_line(line)) return;
-    if (nrelaxed < MAX_RELAXED)
-        relaxed_lines[nrelaxed++] = line;
+    *NIB_VEC_PUSH(&relaxed_lines_vec, "relaxed branch lines") = line;
     jcc_relaxed = true;
 }
 
@@ -119,8 +126,10 @@ typedef struct {
     int  segment;       /* segment value when label was defined */
 } label_t;
 
-static label_t labels[MAX_LABELS];
-static int nlabels = 0;
+typedef NIB_VEC(label_t) label_vec_t;
+static label_vec_t labels_vec;
+#define labels (labels_vec.items)
+#define nlabels (labels_vec.len)
 
 /* Debug info entries */
 typedef struct {
@@ -129,8 +138,10 @@ typedef struct {
     int  line;          /* source line number */
 } dbg_entry_t;
 
-static dbg_entry_t dbg_entries[MAX_DBG];
-static int ndbg_entries = 0;
+typedef NIB_VEC(dbg_entry_t) dbg_entry_vec_t;
+static dbg_entry_vec_t dbg_entries_vec;
+#define dbg_entries (dbg_entries_vec.items)
+#define ndbg_entries (dbg_entries_vec.len)
 
 static label_t *find_label(const char *name) {
     for (int i = 0; i < nlabels; i++)
@@ -159,9 +170,7 @@ static label_t *add_label_typed(const char *name, int value, label_type_t ltype)
         l->segment = seg_base;
         return l;
     }
-    if (nlabels >= MAX_LABELS)
-        fatal("too many labels");
-    l = &labels[nlabels++];
+    l = NIB_VEC_PUSH(&labels_vec, "labels");
     strncpy(l->name, name, 63);
     l->name[63] = '\0';
     l->value = value;
@@ -1734,12 +1743,11 @@ static void process_line(char *line) {
     /* On pass 2, record debug entry at the current address
      * when the next real instruction is encountered */
     if (pass == 2 && pending_dbg_line > 0 && *lp && *lp != ';') {
-        if (ndbg_entries < MAX_DBG) {
-            dbg_entry_t *de = &dbg_entries[ndbg_entries++];
-            de->addr = org_base + out_pos;
-            strncpy(de->file, pending_dbg_file, 63);
-            de->line = pending_dbg_line;
-        }
+        dbg_entry_t *de = NIB_VEC_PUSH(&dbg_entries_vec, "debug entries");
+        de->addr = org_base + out_pos;
+        strncpy(de->file, pending_dbg_file, 63);
+        de->file[63] = '\0';
+        de->line = pending_dbg_line;
         /* Don't reset — keep for error messages until next ; @ comment */
     }
 
@@ -1784,12 +1792,10 @@ static void process_line(char *line) {
     if (strcasecmp(t.sval, "org") == 0) {
         operand_t op = parse_operand();
         /* Push current position before changing */
-        if (org_sp < MAX_ORG_STACK) {
-            org_stack[org_sp].org_base = org_base;
-            org_stack[org_sp].out_pos = out_pos;
-            org_stack[org_sp].seg_base = seg_base;
-            org_sp++;
-        }
+        org_state_t *st = NIB_VEC_PUSH(&org_stack_vec, "org stack");
+        st->org_base = org_base;
+        st->out_pos = out_pos;
+        st->seg_base = seg_base;
         org_base = op.imm;
         out_pos = 0;
         return;
@@ -1864,6 +1870,11 @@ int main(int argc, char **argv) {
     const char *dbgfile = NULL;
     bool ihex = false;
 
+    NIB_VEC_INIT(&org_stack_vec);
+    NIB_VEC_INIT(&relaxed_lines_vec);
+    NIB_VEC_INIT(&labels_vec);
+    NIB_VEC_INIT(&dbg_entries_vec);
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outfile = argv[++i];
@@ -1886,18 +1897,18 @@ int main(int argc, char **argv) {
     }
 
     /* Read all lines into memory */
-    char **lines = NULL;
-    int nlines = 0;
-    int lines_cap = 0;
-    char buf[MAX_LINE];
+    typedef NIB_VEC(char *) line_vec_t;
+    line_vec_t line_vec;
+    NIB_VEC_INIT(&line_vec);
+    char *buf = NULL;
+    size_t bufsz = 0;
 
-    while (fgets(buf, sizeof(buf), fp)) {
-        if (nlines >= lines_cap) {
-            lines_cap = lines_cap ? lines_cap * 2 : 256;
-            lines = realloc(lines, lines_cap * sizeof(char *));
-        }
-        lines[nlines++] = strdup(buf);
-    }
+    while (getline(&buf, &bufsz, fp) >= 0)
+        *NIB_VEC_PUSH(&line_vec, "assembly source lines") =
+            xstrdup_checked(buf);
+    free(buf);
+    char **lines = line_vec.items;
+    int nlines = line_vec.len;
     if (fp != stdin) fclose(fp);
 
     /* Allocate output buffers */
@@ -1909,12 +1920,12 @@ int main(int argc, char **argv) {
     /* Pass 1: collect labels and sizes, with iterative Jcc relaxation.
      * First run establishes labels assuming all Jcc are short.
      * If any are out of range, mark them, re-run to get correct sizes. */
-    nrelaxed = 0;
+    relaxed_lines_vec.len = 0;
     pass = 1;
     out_pos = 0;
     org_base = 0;
     seg_base = 0;
-    org_sp = 0;
+    org_stack_vec.len = 0;
     errors = 0;
     jcc_relaxed = false;
     for (int i = 0; i < nlines; i++) {
@@ -1929,7 +1940,7 @@ int main(int argc, char **argv) {
             out_pos = 0;
             org_base = 0;
             seg_base = 0;
-            org_sp = 0;
+            org_stack_vec.len = 0;
             errors = 0;
             jcc_relaxed = false;
             for (int i = 0; i < nlines; i++) {
@@ -1945,7 +1956,7 @@ int main(int argc, char **argv) {
     out_pos = 0;
     org_base = 0;
     seg_base = 0;
-    org_sp = 0;
+    org_stack_vec.len = 0;
     pending_dbg_line = 0;
     for (int i = 0; i < nlines; i++) {
         current_line = i + 1;
