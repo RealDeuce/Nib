@@ -273,6 +273,27 @@ typedef struct {
     char ref_name[64];
 } fn_const_t;
 
+typedef enum {
+    FIXUP_CALL_ARG,
+    FIXUP_CALL_SAVE,
+    FIXUP_CALL_RESTORE,
+    FIXUP_CL_ROUTE,
+    FIXUP_ADDR_ROUTE,
+    FIXUP_RET_CAPTURE,
+    FIXUP_RET_RELOAD,
+    FIXUP_NUM
+} fixup_reason_t;
+
+static const char *fixup_reason_name[FIXUP_NUM] = {
+    "call-arg",
+    "call-save",
+    "call-restore",
+    "cl-route",
+    "addr-route",
+    "ret-capture",
+    "ret-reload",
+};
+
 /* Function */
 typedef struct {
     char        name[64];
@@ -336,6 +357,7 @@ typedef struct {
     bool        needs_frame;    /* BP reserved for frame pointer */
     int         nspill_slots;
     int         ncl_fixups;     /* CL routing fixups (push/pop CX) */
+    int         fixup_counts[FIXUP_NUM];
     int         local_size;     /* total bytes for source stack locals */
     int         frame_size;     /* total bytes for spills and source locals */
     bool        needs_call_temp;
@@ -2456,6 +2478,27 @@ static const char *vreg_note(func_t *fn, int v, char *buf, size_t bufsz) {
     return buf;
 }
 
+static const char *vreg_alloc_note(func_t *fn, int v, char *buf,
+                                   size_t bufsz) {
+    if (v < 0 || v >= fn->nvregs) {
+        snprintf(buf, bufsz, "alloc=?");
+    } else if (fn->vregs[v].assigned != PREG_NONE) {
+        snprintf(buf, bufsz, "alloc=%s",
+                 preg_name[fn->vregs[v].assigned]);
+    } else if (fn->vregs[v].spill_slot >= 0) {
+        snprintf(buf, bufsz, "alloc=spill%d", fn->vregs[v].spill_slot);
+    } else if (fn->vregs[v].is_stack_home) {
+        snprintf(buf, bufsz, "alloc=stack+%d",
+                 fn->vregs[v].stack_offset);
+    } else if (fn->vregs[v].is_local_slot) {
+        snprintf(buf, bufsz, "alloc=local+%d",
+                 fn->vregs[v].local_offset);
+    } else {
+        snprintf(buf, bufsz, "alloc=none");
+    }
+    return buf;
+}
+
 static void print_source_loc(FILE *out, func_t *fn, int idx) {
     int line = insn_source_line(fn, idx);
     fprintf(out, "%s:%d", insn_source_file(fn, idx), line);
@@ -2538,12 +2581,40 @@ static void report_pressure_function(FILE *out, func_t *fn) {
             span_end_line = line;
     }
 
+    int peak_fixed = 0;
+    int peak_preferred = 0;
+    int peak_spilled = 0;
+    int total_spilled = 0;
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (fn->vregs[v].spill_slot >= 0)
+            total_spilled++;
+        if (!vset_test(before[peak_idx], v))
+            continue;
+        if (fn->vregs[v].fixed)
+            peak_fixed++;
+        if (fn->vregs[v].prefer != PREG_NONE)
+            peak_preferred++;
+        if (fn->vregs[v].spill_slot >= 0 || fn->vregs[v].is_stack_home)
+            peak_spilled++;
+    }
+
     fprintf(out, "\n== %s ==\n", fn->name);
     fprintf(out, "summary: vregs=%d spills=%d peak_live=%d at ",
             fn->nvregs, fn->nspill_slots, peak.live);
     print_source_loc(out, fn, peak_idx);
     fprintf(out, " u8=%d u16=%d seg=%d far32=%d\n",
             peak.u8, peak.u16, peak.seg, peak.far32);
+    fprintf(out,
+            "allocation: spilled=%d peak_fixed=%d peak_preferred=%d "
+            "peak_spilled=%d\n",
+            total_spilled, peak_fixed, peak_preferred, peak_spilled);
+    fprintf(out, "fixups:");
+    int total_fixups = 0;
+    for (int r = 0; r < FIXUP_NUM; r++) {
+        fprintf(out, " %s=%d", fixup_reason_name[r], fn->fixup_counts[r]);
+        total_fixups += fn->fixup_counts[r];
+    }
+    fprintf(out, " total=%d\n", total_fixups);
 
     fprintf(out, "\npressure timeline:\n");
     for (int i = 0; i < fn->ninsns; i++) {
@@ -2576,12 +2647,14 @@ static void report_pressure_function(FILE *out, func_t *fn) {
     for (int i = 0; i < nprint; i++) {
         int v = live_vregs[i];
         char note[96];
+        char alloc[32];
         fprintf(out, "    %%%d %-5s def ", v, vreg_kind(fn, v));
         print_source_loc(out, fn, fn->vregs[v].def_pos);
         fprintf(out, " last ");
         print_source_loc(out, fn, fn->vregs[v].last_use);
-        fprintf(out, " len=%d%s\n",
+        fprintf(out, " len=%d %s%s\n",
                 fn->vregs[v].last_use - fn->vregs[v].def_pos,
+                vreg_alloc_note(fn, v, alloc, sizeof(alloc)),
                 vreg_note(fn, v, note, sizeof(note)));
     }
 
@@ -2590,6 +2663,7 @@ static void report_pressure_function(FILE *out, func_t *fn) {
         if (fn->vregs[v].def_pos < 0 && fn->vregs[v].last_use < 0)
             continue;
         char note[96];
+        char alloc[32];
         int first = vreg_first_use(fn, v);
         fprintf(out, "  %%%d %-5s def ", v, vreg_kind(fn, v));
         print_source_loc(out, fn, fn->vregs[v].def_pos);
@@ -2597,7 +2671,8 @@ static void report_pressure_function(FILE *out, func_t *fn) {
         print_source_loc(out, fn, first);
         fprintf(out, " last ");
         print_source_loc(out, fn, fn->vregs[v].last_use);
-        fprintf(out, " uses=%d%s\n", fn->vregs[v].use_count,
+        fprintf(out, " uses=%d %s%s\n", fn->vregs[v].use_count,
+                vreg_alloc_note(fn, v, alloc, sizeof(alloc)),
                 vreg_note(fn, v, note, sizeof(note)));
     }
 
@@ -3754,6 +3829,25 @@ static void rins_asm(func_t *fn, const char *fmt, ...) {
     fn->nresolved++;
 }
 
+static void note_fixup(func_t *fn, fixup_reason_t reason) {
+    if (!fn || reason < 0 || reason >= FIXUP_NUM)
+        return;
+    fn->fixup_counts[reason]++;
+}
+
+static void rins_asm_fixup(func_t *fn, fixup_reason_t reason,
+                           const char *fmt, ...) {
+    if (fn->nresolved >= MAX_RESOLVED) return;
+    fn->resolved[fn->nresolved].kind = RINS_ASM;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(fn->resolved[fn->nresolved].asm_text,
+              sizeof(fn->resolved[fn->nresolved].asm_text), fmt, ap);
+    va_end(ap);
+    fn->nresolved++;
+    note_fixup(fn, reason);
+}
+
 static bool preg_covered_by_pusha(int preg) {
     return preg == PREG_AX || preg == PREG_CX || preg == PREG_DX ||
            preg == PREG_BX || preg == PREG_BP || preg == PREG_SI ||
@@ -3774,16 +3868,18 @@ static bool save_set_uses_pusha(int *regs, int nregs) {
 
 static void emit_call_saved_push(func_t *fn, int preg) {
     if (preg == PREG_FLAGS)
-        rins_asm(fn, "    pushf");
+        rins_asm_fixup(fn, FIXUP_CALL_SAVE, "    pushf");
     else
-        rins_asm(fn, "    push %s", preg_name[preg]);
+        rins_asm_fixup(fn, FIXUP_CALL_SAVE, "    push %s",
+                       preg_name[preg]);
 }
 
 static void emit_call_saved_pop(func_t *fn, int preg) {
     if (preg == PREG_FLAGS)
-        rins_asm(fn, "    popf");
+        rins_asm_fixup(fn, FIXUP_CALL_RESTORE, "    popf");
     else
-        rins_asm(fn, "    pop %s", preg_name[preg]);
+        rins_asm_fixup(fn, FIXUP_CALL_RESTORE, "    pop %s",
+                       preg_name[preg]);
 }
 
 static bool emit_call_saves(func_t *fn, int *call_saved, int call_nsaved) {
@@ -3792,7 +3888,7 @@ static bool emit_call_saves(func_t *fn, int *call_saved, int call_nsaved) {
         for (int s = 0; s < call_nsaved; s++)
             if (!preg_covered_by_pusha(call_saved[s]))
                 emit_call_saved_push(fn, call_saved[s]);
-        rins_asm(fn, "    pusha");
+        rins_asm_fixup(fn, FIXUP_CALL_SAVE, "    pusha");
         return true;
     }
 
@@ -3804,7 +3900,7 @@ static bool emit_call_saves(func_t *fn, int *call_saved, int call_nsaved) {
 static void emit_call_restores(func_t *fn, int *call_saved, int call_nsaved,
                                bool used_pusha) {
     if (used_pusha) {
-        rins_asm(fn, "    popa");
+        rins_asm_fixup(fn, FIXUP_CALL_RESTORE, "    popa");
         for (int s = call_nsaved - 1; s >= 0; s--)
             if (!preg_covered_by_pusha(call_saved[s]))
                 emit_call_saved_pop(fn, call_saved[s]);
@@ -4028,13 +4124,13 @@ static void rins_push_byte_vreg(func_t *fn, int src_vreg) {
     rins_asm(fn, "    pop BP");
 }
 
-static void rins_push_call_arg(func_t *fn, int arg_vreg) {
-    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
+static void rins_push_vreg_temp(func_t *fn, int src_vreg) {
+    if (src_vreg < 0 || src_vreg >= fn->nvregs)
         return;
-    if (fn->vregs[arg_vreg].is_byte) {
-        rins_push_byte_vreg(fn, arg_vreg);
+    if (fn->vregs[src_vreg].is_byte) {
+        rins_push_byte_vreg(fn, src_vreg);
     } else {
-        rins_asm(fn, "    push %s", vreg_asm(fn, arg_vreg));
+        rins_asm(fn, "    push %s", vreg_asm(fn, src_vreg));
     }
 }
 
@@ -4200,11 +4296,12 @@ typedef struct {
     int src_vreg;
     int src_dep_reg;
     int clobber_reg;
+    fixup_reason_t reason;
     bool done;
     bool saved;
-} call_arg_move_t;
+} planned_move_t;
 
-static int call_arg_source_dep_reg(func_t *fn, int src_vreg) {
+static int planned_move_source_dep_reg(func_t *fn, int src_vreg) {
     if (src_vreg < 0 || src_vreg >= fn->nvregs)
         return PREG_NONE;
     int actual = fn->vregs[src_vreg].assigned;
@@ -4216,7 +4313,7 @@ static int call_arg_source_dep_reg(func_t *fn, int src_vreg) {
     return PREG_NONE;
 }
 
-static int call_arg_move_clobber_reg(func_t *fn, int expected, int src_vreg) {
+static int planned_move_clobber_reg(func_t *fn, int expected, int src_vreg) {
     if (src_vreg < 0 || src_vreg >= fn->nvregs || expected == PREG_NONE)
         return PREG_NONE;
 
@@ -4245,10 +4342,85 @@ static int call_arg_move_clobber_reg(func_t *fn, int expected, int src_vreg) {
     return expected;
 }
 
+static void emit_planned_register_moves(func_t *fn, planned_move_t *moves,
+                                        int nmoves) {
+    for (int done = 0; done < nmoves; ) {
+        int pick = -1;
+        for (int mi = 0; mi < nmoves; mi++) {
+            if (moves[mi].done)
+                continue;
+            bool clobbers_pending_src = false;
+            for (int mj = 0; mj < nmoves; mj++) {
+                if (mi == mj || moves[mj].done)
+                    continue;
+                if (preg_write_clobbers(moves[mi].clobber_reg,
+                                        moves[mj].src_dep_reg)) {
+                    clobbers_pending_src = true;
+                    break;
+                }
+            }
+            if (!clobbers_pending_src) {
+                pick = mi;
+                break;
+            }
+        }
+
+        if (pick >= 0) {
+            note_fixup(fn, moves[pick].reason);
+            rins_mov_preg_from_vreg(fn, moves[pick].dst_reg,
+                                    moves[pick].src_vreg);
+            moves[pick].done = true;
+            done++;
+            continue;
+        }
+
+        for (pick = 0; pick < nmoves; pick++) {
+            if (moves[pick].done)
+                continue;
+            if (preg_is_byte(moves[pick].dst_reg) &&
+                preg_alias_parent[moves[pick].dst_reg] == PREG_AX)
+                continue;
+            break;
+        }
+        if (pick >= nmoves) {
+            for (pick = 0; pick < nmoves && moves[pick].done; pick++)
+                ;
+        }
+        if (pick >= nmoves)
+            break;
+        note_fixup(fn, moves[pick].reason);
+        rins_push_vreg_temp(fn, moves[pick].src_vreg);
+        moves[pick].saved = true;
+        moves[pick].done = true;
+        done++;
+    }
+
+    for (int mi = nmoves - 1; mi >= 0; mi--) {
+        if (!moves[mi].saved)
+            continue;
+        if (preg_is_byte(moves[mi].dst_reg)) {
+            if (preg_alias_parent[moves[mi].dst_reg] == PREG_AX) {
+                rins_asm_fixup(fn, moves[mi].reason, "    pop AX");
+            } else {
+                rins_asm_fixup(fn, moves[mi].reason, "    push BP");
+                rins_asm_fixup(fn, moves[mi].reason, "    mov BP, SP");
+                rins_asm_fixup(fn, moves[mi].reason, "    xchg AX, [BP+2]");
+                rins_asm_fixup(fn, moves[mi].reason, "    mov %s, AL",
+                               preg_name[moves[mi].dst_reg]);
+                rins_asm_fixup(fn, moves[mi].reason, "    pop BP");
+                rins_asm_fixup(fn, moves[mi].reason, "    pop AX");
+            }
+        } else {
+            rins_asm_fixup(fn, moves[mi].reason, "    pop %s",
+                           preg_name[moves[mi].dst_reg]);
+        }
+    }
+}
+
 static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
                                          int callee_fi, int callee_ext,
                                          bool indirect_args) {
-    call_arg_move_t moves[MAX_ABI_PARAMS];
+    planned_move_t moves[MAX_ABI_PARAMS];
     int nmoves = 0;
     int nparams = 0;
 
@@ -4282,81 +4454,16 @@ static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
 
         moves[nmoves].dst_reg = expected;
         moves[nmoves].src_vreg = arg_vreg;
-        moves[nmoves].src_dep_reg = call_arg_source_dep_reg(fn, arg_vreg);
+        moves[nmoves].src_dep_reg = planned_move_source_dep_reg(fn, arg_vreg);
         moves[nmoves].clobber_reg =
-            call_arg_move_clobber_reg(fn, expected, arg_vreg);
+            planned_move_clobber_reg(fn, expected, arg_vreg);
+        moves[nmoves].reason = FIXUP_CALL_ARG;
         moves[nmoves].done = false;
         moves[nmoves].saved = false;
         nmoves++;
     }
 
-    for (int done = 0; done < nmoves; ) {
-        int pick = -1;
-        for (int mi = 0; mi < nmoves; mi++) {
-            if (moves[mi].done)
-                continue;
-            bool clobbers_pending_src = false;
-            for (int mj = 0; mj < nmoves; mj++) {
-                if (mi == mj || moves[mj].done)
-                    continue;
-                if (preg_write_clobbers(moves[mi].clobber_reg,
-                                        moves[mj].src_dep_reg)) {
-                    clobbers_pending_src = true;
-                    break;
-                }
-            }
-            if (!clobbers_pending_src) {
-                pick = mi;
-                break;
-            }
-        }
-
-        if (pick >= 0) {
-            rins_mov_preg_from_vreg(fn, moves[pick].dst_reg,
-                                    moves[pick].src_vreg);
-            moves[pick].done = true;
-            done++;
-            continue;
-        }
-
-        for (pick = 0; pick < nmoves; pick++) {
-            if (moves[pick].done)
-                continue;
-            if (preg_is_byte(moves[pick].dst_reg) &&
-                preg_alias_parent[moves[pick].dst_reg] == PREG_AX)
-                continue;
-            break;
-        }
-        if (pick >= nmoves) {
-            for (pick = 0; pick < nmoves && moves[pick].done; pick++)
-                ;
-        }
-        if (pick >= nmoves)
-            break;
-        rins_push_call_arg(fn, moves[pick].src_vreg);
-        moves[pick].saved = true;
-        moves[pick].done = true;
-        done++;
-    }
-
-    for (int mi = nmoves - 1; mi >= 0; mi--) {
-        if (!moves[mi].saved)
-            continue;
-        if (preg_is_byte(moves[mi].dst_reg)) {
-            if (preg_alias_parent[moves[mi].dst_reg] == PREG_AX) {
-                rins_asm(fn, "    pop AX");
-            } else {
-                rins_asm(fn, "    push BP");
-                rins_asm(fn, "    mov BP, SP");
-                rins_asm(fn, "    xchg AX, [BP+2]");
-                rins_asm(fn, "    mov %s, AL", preg_name[moves[mi].dst_reg]);
-                rins_asm(fn, "    pop BP");
-                rins_asm(fn, "    pop AX");
-            }
-        } else {
-            rins_asm(fn, "    pop %s", preg_name[moves[mi].dst_reg]);
-        }
-    }
+    emit_planned_register_moves(fn, moves, nmoves);
 }
 
 /* Build the resolved instruction stream.
@@ -4364,6 +4471,7 @@ static void emit_call_arg_register_moves(func_t *fn, ir_insn_t *ins,
  * otherwise handle with push/pop sequences. */
 static void insert_fixup_moves(func_t *fn, int fn_idx) {
     fn->nresolved = 0;
+    memset(fn->fixup_counts, 0, sizeof(fn->fixup_counts));
 
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
@@ -4386,43 +4494,60 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             bool cx_free = (free >> PREG_CX) & 1;
 
             if (cx_free && !dst_is_cx) {
-                /* CX is free — just mov CL, src2. No save needed. */
-                if (is_spilled(fn, ins->src2))
-                    rins_asm(fn, "    mov CL, %s", vreg_asm(fn, ins->src2));
-                else
-                    rins_asm(fn, "    mov CL, %s", preg_name[src2_preg]);
-                /* Mark that the emitter should use CL directly */
+                planned_move_t move = {
+                    .dst_reg = PREG_CL,
+                    .src_vreg = ins->src2,
+                    .src_dep_reg = planned_move_source_dep_reg(fn, ins->src2),
+                    .clobber_reg = planned_move_clobber_reg(fn, PREG_CL,
+                                                            ins->src2),
+                    .reason = FIXUP_CL_ROUTE,
+                    .done = false,
+                    .saved = false,
+                };
+                emit_planned_register_moves(fn, &move, 1);
                 fn->vregs[ins->src2].assigned = PREG_CL;
                 rins_ir(fn, i);
                 fn->vregs[ins->src2].assigned = src2_preg; /* restore */
             } else if (!dst_is_cx) {
                 /* CX is occupied — push/pop CX around the route */
-                rins_asm(fn, "    push CX");
-                if (is_spilled(fn, ins->src2))
-                    rins_asm(fn, "    mov CL, %s", vreg_asm(fn, ins->src2));
-                else
-                    rins_asm(fn, "    mov CL, %s", preg_name[src2_preg]);
+                planned_move_t move = {
+                    .dst_reg = PREG_CL,
+                    .src_vreg = ins->src2,
+                    .src_dep_reg = planned_move_source_dep_reg(fn, ins->src2),
+                    .clobber_reg = planned_move_clobber_reg(fn, PREG_CL,
+                                                            ins->src2),
+                    .reason = FIXUP_CL_ROUTE,
+                    .done = false,
+                    .saved = false,
+                };
+                rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    push CX");
+                emit_planned_register_moves(fn, &move, 1);
                 fn->vregs[ins->src2].assigned = PREG_CL;
                 rins_ir(fn, i);
                 fn->vregs[ins->src2].assigned = src2_preg;
-                rins_asm(fn, "    pop CX");
+                rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    pop CX");
             } else {
                 /* dst aliases CX — need to route through AX */
                 bool byte_dst = fn->vregs[ins->dst].is_byte;
                 const char *acc = byte_dst ? "AL" : "AX";
                 const char *d = vreg_asm(fn, ins->dst);
                 bool ax_free = (free >> PREG_AX) & 1;
-                if (!ax_free) rins_asm(fn, "    push AX");
-                rins_asm(fn, "    mov %s, %s", acc, d);
-                rins_asm(fn, "    push CX");
+                if (!ax_free)
+                    rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    push AX");
+                rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    mov %s, %s", acc, d);
+                rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    push CX");
                 if (is_spilled(fn, ins->src2))
-                    rins_asm(fn, "    mov CL, %s", vreg_asm(fn, ins->src2));
+                    rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    mov CL, %s",
+                                   vreg_asm(fn, ins->src2));
                 else
-                    rins_asm(fn, "    mov CL, %s", preg_name[src2_preg]);
-                rins_asm(fn, "    %s %s, CL", ins->name, acc);
-                rins_asm(fn, "    pop CX");
-                rins_asm(fn, "    mov %s, %s", d, acc);
-                if (!ax_free) rins_asm(fn, "    pop AX");
+                    rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    mov CL, %s",
+                                   preg_name[src2_preg]);
+                rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    %s %s, CL",
+                               ins->name, acc);
+                rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    pop CX");
+                rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    mov %s, %s", d, acc);
+                if (!ax_free)
+                    rins_asm_fixup(fn, FIXUP_CL_ROUTE, "    pop AX");
                 /* Don't emit the original IR instruction — we handled it */
             }
             continue;
@@ -4433,6 +4558,8 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             /* If address references a physical register (e.g., [ES:SI])
              * and the vreg preferring that register got assigned elsewhere,
              * insert a mov to place the value in the expected register. */
+            planned_move_t moves[NUM_PREGS];
+            int nmoves = 0;
             for (int preg = 0; preg < NUM_PREGS; preg++) {
                 const char *rn = preg_name[preg];
                 const char *p2 = ins->name;
@@ -4454,10 +4581,20 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     if (fn->vregs[v].def_pos > best_def)
                         { best_def = fn->vregs[v].def_pos; best_v = v; }
                 }
-                if (best_v >= 0)
-                    rins_asm(fn, "    mov %s, %s",
-                             rn, preg_name[fn->vregs[best_v].assigned]);
+                if (best_v >= 0 && nmoves < NUM_PREGS) {
+                    moves[nmoves].dst_reg = preg;
+                    moves[nmoves].src_vreg = best_v;
+                    moves[nmoves].src_dep_reg =
+                        planned_move_source_dep_reg(fn, best_v);
+                    moves[nmoves].clobber_reg =
+                        planned_move_clobber_reg(fn, preg, best_v);
+                    moves[nmoves].reason = FIXUP_ADDR_ROUTE;
+                    moves[nmoves].done = false;
+                    moves[nmoves].saved = false;
+                    nmoves++;
+                }
             }
+            emit_planned_register_moves(fn, moves, nmoves);
             rins_ir(fn, i);
             continue;
         }
@@ -4647,7 +4784,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     for (int a = last_arg; a >= 0; a--) {
                         if (!abi_place_is_stack(callee_fa->param_places[a]))
                             continue;
-                        rins_push_call_arg(fn, call_arg_vreg(ins, a));
+                        rins_push_vreg_temp(fn, call_arg_vreg(ins, a));
                     }
                 } else if (callee_ext >= 0) {
                     int last_arg = ins->nargs < externs[callee_ext].nparams ?
@@ -4655,7 +4792,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     for (int a = last_arg; a >= 0; a--) {
                         if (!abi_place_is_stack(externs[callee_ext].param_places[a]))
                             continue;
-                        rins_push_call_arg(fn, call_arg_vreg(ins, a));
+                        rins_push_vreg_temp(fn, call_arg_vreg(ins, a));
                     }
                 }
             }
@@ -4714,11 +4851,13 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     temp_ret[ri] = true;
                     temp_expected[ri] = expected;
                     temp_is_byte[ri] = fn->vregs[ret_v].is_byte;
+                    note_fixup(fn, FIXUP_RET_CAPTURE);
                     rins_store_call_temp_return(fn, expected,
                                                 temp_is_byte[ri]);
                     continue;
                 }
                 if (actual != expected) {
+                    note_fixup(fn, FIXUP_RET_CAPTURE);
                     rins_asm(fn, "    mov %s, %s",
                              vreg_asm(fn, ret_v), preg_name[expected]);
                 }
@@ -4751,6 +4890,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
                 if (temp_expected[ri] == PREG_NONE)
                     continue;
+                note_fixup(fn, FIXUP_RET_RELOAD);
                 rins_load_call_temp_return(fn, ret_v, temp_is_byte[ri]);
             }
 
@@ -4849,11 +4989,13 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     temp_ret[ri] = true;
                     temp_expected[ri] = expected;
                     temp_is_byte[ri] = fn->vregs[ret_v].is_byte;
+                    note_fixup(fn, FIXUP_RET_CAPTURE);
                     rins_store_call_temp_return(fn, expected,
                                                 temp_is_byte[ri]);
                     continue;
                 }
                 if (actual != expected) {
+                    note_fixup(fn, FIXUP_RET_CAPTURE);
                     rins_asm(fn, "    mov %s, %s",
                              vreg_asm(fn, ret_v), preg_name[expected]);
                 }
@@ -4867,6 +5009,7 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                 int ret_v = (ri == 0) ? ins->dst : ins->ret_vregs[ri - 1];
                 if (temp_expected[ri] == PREG_NONE)
                     continue;
+                note_fixup(fn, FIXUP_RET_RELOAD);
                 rins_load_call_temp_return(fn, ret_v, temp_is_byte[ri]);
             }
 

@@ -1146,6 +1146,9 @@ if ./nibbind --pressure-report "$TEST_TMPDIR"/t_pressure_report.txt \
        grep -q '^live ranges:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q '^dead/early-load warnings:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q '^call-split advisor:$' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^allocation: .*peak_fixed=' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q '^fixups: .*call-arg=' "$TEST_TMPDIR"/t_pressure_report.txt &&
+       grep -q 'alloc=' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q 'probe.nib:20 live=' "$TEST_TMPDIR"/t_pressure_report.txt &&
        grep -q 'loaded at probe.nib:20 first-used at probe.nib:30' "$TEST_TMPDIR"/t_pressure_report.txt; then
         pass "pressure-report: timeline, peak, ranges, warnings emitted"
@@ -1154,6 +1157,25 @@ if ./nibbind --pressure-report "$TEST_TMPDIR"/t_pressure_report.txt \
     fi
 else
     fail "pressure-report" "$(./nibbind --pressure-report "$TEST_TMPDIR"/t_pressure_report.txt --pressure-fn pressure_probe "$TEST_TMPDIR"/t_pressure_report.nir -o "$TEST_TMPDIR"/t_pressure_report.asm 2>&1 | tail -1)"
+fi
+
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_call_arg_cycle_report.txt \
+     --pressure-fn call_arg_cycle "$TEST_TMPDIR"/t_call_arg_cycle.nir \
+     -o "$TEST_TMPDIR"/t_call_arg_cycle_report.asm >/dev/null 2>&1; then
+    if grep -q '^fixups: .*call-arg=[1-9]' \
+         "$TEST_TMPDIR"/t_call_arg_cycle_report.txt; then
+        pass "pressure-report: call-arg fixups counted"
+    else
+        fail "pressure-report-call-arg" "call-arg fixup count missing"
+    fi
+else
+    fail "pressure-report-call-arg" "$(
+        ./nibbind --pressure-report \
+          "$TEST_TMPDIR"/t_call_arg_cycle_report.txt \
+          --pressure-fn call_arg_cycle \
+          "$TEST_TMPDIR"/t_call_arg_cycle.nir \
+          -o "$TEST_TMPDIR"/t_call_arg_cycle_report.asm 2>&1 | tail -1
+    )"
 fi
 
 # Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)
