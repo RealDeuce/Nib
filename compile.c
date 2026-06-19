@@ -13,14 +13,11 @@
 #include <ctype.h>
 #include "ast.h"
 #include "compile.h"
+#include "table.h"
 
 /* ================================================================
  * Symbol table / scoping
  * ================================================================ */
-
-#define MAX_SYMBOLS 256
-#define MAX_RETURNS 8
-#define MAX_PARAMS 64
 
 static abi_place_t effective_param_place(param_t *p) {
     if (!p)
@@ -71,11 +68,49 @@ typedef struct symbol {
     int         stack_size;
 } symbol_t;
 
+typedef NIB_VEC(symbol_t) symbol_vec_t;
+
 typedef struct scope {
-    symbol_t     syms[MAX_SYMBOLS];
-    int          nsyms;
+    symbol_vec_t syms;
     struct scope *parent;
 } scope_t;
+
+typedef struct {
+    char    name[64];
+    int     nparams;        /* source-level param count */
+    int     nparams_ir;     /* IR param count (far splits add 1) */
+    type_t *return_type;
+    int     nreturns;
+    type_t **return_types;
+    bool    *param_is_far;  /* which params are far type */
+} function_sig_t;
+
+typedef struct {
+    char    name[64];
+    field_t *fields;
+    bool    aligned;
+} struct_sig_t;
+
+typedef struct {
+    char name[64];
+    int  value;
+} const_sig_t;
+
+typedef NIB_VEC(function_sig_t) function_vec_t;
+typedef NIB_VEC(struct_sig_t) struct_vec_t;
+typedef NIB_VEC(const_sig_t) const_vec_t;
+typedef NIB_VEC(char *) str_vec_t;
+typedef NIB_VEC(int) int_vec_t;
+typedef NIB_VEC(bool) bool_vec_t;
+
+typedef struct {
+    int vreg;
+    int vreg_seg;
+    type_t *type;
+    expr_t *expr;
+} call_arg_t;
+
+typedef NIB_VEC(call_arg_t) call_arg_vec_t;
 
 /* ================================================================
  * Compiler state
@@ -104,43 +139,21 @@ typedef struct {
     int         cur_fn_nreturns;
     fn_modifiers_t cur_fn_mods;
 
-    /* Known functions (for call checking) */
-    struct {
-        char    name[64];
-        int     nparams;        /* source-level param count */
-        int     nparams_ir;     /* IR param count (far splits add 1) */
-        type_t *return_type;
-        int     nreturns;
-        type_t *return_types[MAX_RETURNS];
-        bool    param_is_far[MAX_PARAMS]; /* which params are far type */
-    } functions[512];
-    int nfunctions;
-
-    /* Known structs */
-    struct {
-        char    name[64];
-        field_t *fields;
-        bool    aligned;
-    } structs[128];
-    int nstructs;
-
-    /* Named constants */
-    struct {
-        char name[64];
-        int  value;
-    } constants[512];
-    int nconstants;
-
-    /* Interrupt handler names (far32 constants, not callable) */
-    char isr_names[64][64];
-    int  nisr;
-
-    /* Local names whose address is taken in the current function. */
-    char addr_taken[256][64];
-    int  naddr_taken;
+    function_vec_t functions;  /* Known functions (for call checking) */
+    struct_vec_t structs;      /* Known structs */
+    const_vec_t constants;     /* Named constants */
+    str_vec_t isr_names;       /* Interrupt handlers as far32 constants */
+    str_vec_t addr_taken;      /* Address-taken locals in current function */
 } compiler_t;
 
 static compiler_t C;
+
+static char *xstrdup_checked(const char *s) {
+    size_t len = strlen(s) + 1;
+    char *p = nib_xmalloc(len, "string");
+    memcpy(p, s, len);
+    return p;
+}
 
 /* ---- Error reporting ---- */
 
@@ -158,6 +171,11 @@ static void cerr(int line, const char *fmt, ...) {
 
 static void push_scope(void) {
     scope_t *s = calloc(1, sizeof(scope_t));
+    if (!s) {
+        fprintf(stderr, "out of memory allocating scope\n");
+        exit(1);
+    }
+    NIB_VEC_INIT(&s->syms);
     s->parent = C.scope;
     C.scope = s;
 }
@@ -165,23 +183,21 @@ static void push_scope(void) {
 static void pop_scope(void) {
     scope_t *old = C.scope;
     C.scope = old->parent;
+    NIB_VEC_FREE(&old->syms);
     free(old);
 }
 
 static symbol_t *sym_lookup(const char *name) {
     for (scope_t *s = C.scope; s; s = s->parent)
-        for (int i = 0; i < s->nsyms; i++)
-            if (strcmp(s->syms[i].name, name) == 0)
-                return &s->syms[i];
+        for (int i = 0; i < s->syms.len; i++)
+            if (strcmp(s->syms.items[i].name, name) == 0)
+                return &s->syms.items[i];
     return NULL;
 }
 
 static symbol_t *sym_add(const char *name, type_t *type, bool is_global) {
-    if (C.scope->nsyms >= MAX_SYMBOLS) {
-        fprintf(stderr, "too many symbols in scope\n");
-        exit(1);
-    }
-    symbol_t *sym = &C.scope->syms[C.scope->nsyms++];
+    symbol_t *sym = NIB_VEC_PUSH(&C.scope->syms, "symbols");
+    memset(sym, 0, sizeof(*sym));
     strncpy(sym->name, name, 63);
     sym->name[63] = '\0';
     sym->type = type;
@@ -215,25 +231,24 @@ static symbol_t *sym_add_pinned(type_t *type, int reg, reg_class_t rc) {
 }
 
 static bool addr_taken_contains(const char *name) {
-    for (int i = 0; i < C.naddr_taken; i++)
-        if (strcmp(C.addr_taken[i], name) == 0)
+    for (int i = 0; i < C.addr_taken.len; i++)
+        if (strcmp(C.addr_taken.items[i], name) == 0)
             return true;
     return false;
 }
 
 static void addr_taken_add(const char *name) {
-    if (!name || addr_taken_contains(name) || C.naddr_taken >= 256)
+    if (!name || addr_taken_contains(name))
         return;
-    strncpy(C.addr_taken[C.naddr_taken], name, 63);
-    C.addr_taken[C.naddr_taken][63] = '\0';
-    C.naddr_taken++;
+    *NIB_VEC_PUSH(&C.addr_taken, "address-taken names") =
+        xstrdup_checked(name);
 }
 
 /* ---- Struct lookup ---- */
 
 static int find_struct(const char *name) {
-    for (int i = 0; i < C.nstructs; i++)
-        if (strcmp(C.structs[i].name, name) == 0)
+    for (int i = 0; i < C.structs.len; i++)
+        if (strcmp(C.structs.items[i].name, name) == 0)
             return i;
     return -1;
 }
@@ -241,19 +256,19 @@ static int find_struct(const char *name) {
 /* ---- Constant lookup ---- */
 
 static int find_constant(const char *name, int *value) {
-    for (int i = 0; i < C.nconstants; i++)
-        if (strcmp(C.constants[i].name, name) == 0) {
-            if (value) *value = C.constants[i].value;
+    for (int i = 0; i < C.constants.len; i++)
+        if (strcmp(C.constants.items[i].name, name) == 0) {
+            if (value) *value = C.constants.items[i].value;
             return i;
         }
     return -1;
 }
 
 static void register_constant(const char *name, int value) {
-    if (C.nconstants >= 512) return;
-    strncpy(C.constants[C.nconstants].name, name, 63);
-    C.constants[C.nconstants].value = value;
-    C.nconstants++;
+    const_sig_t *c = NIB_VEC_PUSH(&C.constants, "constants");
+    memset(c, 0, sizeof(*c));
+    strncpy(c->name, name, 63);
+    c->value = value;
 }
 
 /* Evaluate a constant expression at compile time.
@@ -351,15 +366,15 @@ static void resolve_fn_modifier_constants(fn_modifiers_t *mods, int line) {
 /* ---- Function lookup ---- */
 
 static bool is_isr(const char *name) {
-    for (int i = 0; i < C.nisr; i++)
-        if (strcmp(C.isr_names[i], name) == 0)
+    for (int i = 0; i < C.isr_names.len; i++)
+        if (strcmp(C.isr_names.items[i], name) == 0)
             return true;
     return false;
 }
 
 static int find_function(const char *name) {
-    for (int i = 0; i < C.nfunctions; i++)
-        if (strcmp(C.functions[i].name, name) == 0)
+    for (int i = 0; i < C.functions.len; i++)
+        if (strcmp(C.functions.items[i].name, name) == 0)
             return i;
     return -1;
 }
@@ -393,24 +408,32 @@ static int find_indirect_descriptor(const char *name, const char *module,
 
 static void register_function_returns(const char *name, int nparams,
                                       return_t *rets, param_t *params) {
-    if (C.nfunctions >= 512) return;
-    int fi = C.nfunctions++;
-    strncpy(C.functions[fi].name, name, 63);
-    C.functions[fi].nparams = nparams;
-    C.functions[fi].return_type = rets ? rets->type : NULL;
-    C.functions[fi].nreturns = return_list_count(rets);
+    function_sig_t *fn = NIB_VEC_PUSH(&C.functions, "function signatures");
+    memset(fn, 0, sizeof(*fn));
+    strncpy(fn->name, name, 63);
+    fn->nparams = nparams;
+    fn->return_type = rets ? rets->type : NULL;
+    fn->nreturns = return_list_count(rets);
+    if (fn->nreturns > 0)
+        fn->return_types = nib_xcalloc((size_t)fn->nreturns,
+                                       sizeof(*fn->return_types),
+                                       "function return types");
+    if (nparams > 0)
+        fn->param_is_far = nib_xcalloc((size_t)nparams,
+                                       sizeof(*fn->param_is_far),
+                                       "function parameter metadata");
     int ri = 0;
-    for (return_t *r = rets; r && ri < MAX_RETURNS; r = r->next, ri++)
-        C.functions[fi].return_types[ri] = r->type;
+    for (return_t *r = rets; r; r = r->next, ri++)
+        fn->return_types[ri] = r->type;
     /* Track which params are far (for call-site splitting) */
     int ir_count = 0;
     int pi = 0;
-    for (param_t *p = params; p && pi < MAX_PARAMS; p = p->next, pi++) {
-        C.functions[fi].param_is_far[pi] = (p->type && p->type->kind == TYPE_FAR);
+    for (param_t *p = params; p; p = p->next, pi++) {
+        fn->param_is_far[pi] = (p->type && p->type->kind == TYPE_FAR);
         ir_count++;
-        if (C.functions[fi].param_is_far[pi]) ir_count++; /* far splits into 2 */
+        if (fn->param_is_far[pi]) ir_count++; /* far splits into 2 */
     }
-    C.functions[fi].nparams_ir = ir_count;
+    fn->nparams_ir = ir_count;
 }
 
 /* ---- Register name helpers ---- */
@@ -1510,19 +1533,22 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
 
         /* Emit arguments */
-        int argc = 0;
-        int arg_vregs[MAX_PARAMS];
-        int arg_seg_vregs[MAX_PARAMS];
-        type_t *arg_types[MAX_PARAMS];
-        memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
-        for (expr_t *a = e->u.call.args; a; a = a->next) {
-            if (argc < MAX_PARAMS) {
-                typed_vreg_t av = emit_expr_typed(a);
-                arg_vregs[argc] = av.vreg;
-                arg_seg_vregs[argc] = av.vreg_seg;
-                arg_types[argc] = av.type;
-            }
-            argc++;
+        int argc = expr_list_count(e->u.call.args);
+        int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
+                                     "call arguments");
+        int *arg_seg_vregs = nib_xcalloc((size_t)argc,
+                                         sizeof(*arg_seg_vregs),
+                                         "call segment arguments");
+        type_t **arg_types = nib_xcalloc((size_t)argc, sizeof(*arg_types),
+                                         "call argument types");
+        for (int i = 0; i < argc; i++)
+            arg_seg_vregs[i] = -1;
+        int ai = 0;
+        for (expr_t *a = e->u.call.args; a; a = a->next, ai++) {
+            typed_vreg_t av = emit_expr_typed(a);
+            arg_vregs[ai] = av.vreg;
+            arg_seg_vregs[ai] = av.vreg_seg;
+            arg_types[ai] = av.type;
         }
         /* Get function name */
         const char *fn_name = "?";
@@ -1750,23 +1776,24 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (e->u.call.func->kind == EXPR_IDENT) {
             fi = find_function(fn_name);
             if (fi >= 0) {
-                if (C.functions[fi].nparams != argc)
+                if (C.functions.items[fi].nparams != argc)
                     cerr(e->line, "'%s' expects %d arguments, got %d",
-                         fn_name, C.functions[fi].nparams, argc);
-                if (C.functions[fi].nreturns > 1)
+                         fn_name, C.functions.items[fi].nparams, argc);
+                if (C.functions.items[fi].nreturns > 1)
                     cerr(e->line, "'%s' returns multiple values; use destructuring assignment",
                          fn_name);
-                ret_type = C.functions[fi].return_type;
+                ret_type = C.functions.items[fi].return_type;
             }
         }
         /* Build IR arg list, splitting far params into off+seg vregs.
          * Pre-extract far components before emitting the call. */
-        int ir_args[32];
+        int *ir_args = nib_xcalloc((size_t)argc * 2 + 2,
+                                   sizeof(*ir_args), "IR call arguments");
         int nir_args = 0;
         {
             expr_t *arg_expr = e->u.call.args;
-            for (int i = 0; i < argc && i < MAX_PARAMS; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
-                if (fi >= 0 && C.functions[fi].param_is_far[i]) {
+            for (int i = 0; i < argc; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+                if (fi >= 0 && i < C.functions.items[fi].nparams && C.functions.items[fi].param_is_far[i]) {
                     /* Far param — split into offset + segment vregs */
                     symbol_t *asym = NULL;
                     if (arg_seg_vregs[i] >= 0) {
@@ -1807,17 +1834,19 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         const char *ext_name = e->u.indirect_call.extern_name;
 
         /* Emit arguments */
-        int argc = 0;
-        int arg_vregs[MAX_PARAMS];
-        int arg_seg_vregs[MAX_PARAMS];
-        memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
-        for (expr_t *a = e->u.indirect_call.args; a; a = a->next) {
-            if (argc < MAX_PARAMS) {
-                typed_vreg_t av = emit_expr_typed(a);
-                arg_vregs[argc] = av.vreg;
-                arg_seg_vregs[argc] = av.vreg_seg;
-            }
-            argc++;
+        int argc = expr_list_count(e->u.indirect_call.args);
+        int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
+                                     "indirect call arguments");
+        int *arg_seg_vregs = nib_xcalloc((size_t)argc,
+                                         sizeof(*arg_seg_vregs),
+                                         "indirect call segment arguments");
+        for (int i = 0; i < argc; i++)
+            arg_seg_vregs[i] = -1;
+        int ai = 0;
+        for (expr_t *a = e->u.indirect_call.args; a; a = a->next, ai++) {
+            typed_vreg_t av = emit_expr_typed(a);
+            arg_vregs[ai] = av.vreg;
+            arg_seg_vregs[ai] = av.vreg_seg;
         }
 
         int dst = alloc_vreg();
@@ -1829,14 +1858,16 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
                                           e->u.indirect_call.module_name,
                                           &descriptor_name);
         if (fi >= 0)
-            ret_type = C.functions[fi].return_type;
+            ret_type = C.functions.items[fi].return_type;
 
         /* Build IR arg list with far splitting */
-        int ir_args[32];
+        int *ir_args = nib_xcalloc((size_t)argc * 2 + 2,
+                                   sizeof(*ir_args),
+                                   "IR indirect call arguments");
         int nir_args = 0;
         expr_t *arg_expr = e->u.indirect_call.args;
-        for (int i = 0; i < argc && i < MAX_PARAMS; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
-            if (fi >= 0 && C.functions[fi].param_is_far[i]) {
+        for (int i = 0; i < argc; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+            if (fi >= 0 && i < C.functions.items[fi].nparams && C.functions.items[fi].param_is_far[i]) {
                 symbol_t *asym = NULL;
                 if (arg_expr && arg_expr->kind == EXPR_IDENT)
                     asym = sym_lookup(arg_expr->u.ident);
@@ -1961,7 +1992,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             int si = find_struct(obj.type->struct_name);
             if (si >= 0) {
                 bool found = false;
-                for (field_t *f = C.structs[si].fields; f; f = f->next) {
+                for (field_t *f = C.structs.items[si].fields; f; f = f->next) {
                     if (f->name && strcmp(f->name, e->u.field.field_name) == 0) {
                         found = true;
                         if (f->as_type) {
@@ -2090,7 +2121,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             int si = find_struct(obj.type->struct_name);
             if (si >= 0) {
                 bool found = false;
-                for (field_t *f = C.structs[si].fields; f; f = f->next) {
+                for (field_t *f = C.structs.items[si].fields; f; f = f->next) {
                     if (f->name && strcmp(f->name, e->u.field.field_name) == 0) {
                         found = true;
                         /* Raw access: always return the storage type, not as_type */
@@ -2232,34 +2263,35 @@ static bool emit_multi_call_assign(expr_t *targets, expr_t *value, int line) {
     }
 
     int ntargets = expr_list_count(targets);
-    if (C.functions[fi].nreturns != ntargets)
+    if (C.functions.items[fi].nreturns != ntargets)
         cerr(line, "'%s' returns %d values, assignment has %d targets",
-             fn_name, C.functions[fi].nreturns, ntargets);
-    if (ntargets > MAX_RETURNS)
-        cerr(line, "too many return targets");
-
-    int argc = 0;
-    int arg_vregs[MAX_PARAMS];
-    int arg_seg_vregs[MAX_PARAMS];
-    expr_t *arg_exprs[MAX_PARAMS];
-    memset(arg_seg_vregs, -1, sizeof(arg_seg_vregs));
-    for (expr_t *a = value->u.call.args; a; a = a->next) {
-        if (argc < MAX_PARAMS) {
-            typed_vreg_t av = emit_expr_typed(a);
-            arg_vregs[argc] = av.vreg;
-            arg_seg_vregs[argc] = av.vreg_seg;
-            arg_exprs[argc] = a;
-        }
-        argc++;
+             fn_name, C.functions.items[fi].nreturns, ntargets);
+    int argc = expr_list_count(value->u.call.args);
+    int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
+                                 "multi-call arguments");
+    int *arg_seg_vregs = nib_xcalloc((size_t)argc,
+                                     sizeof(*arg_seg_vregs),
+                                     "multi-call segment arguments");
+    expr_t **arg_exprs = nib_xcalloc((size_t)argc, sizeof(*arg_exprs),
+                                     "multi-call argument expressions");
+    for (int i = 0; i < argc; i++)
+        arg_seg_vregs[i] = -1;
+    int ai = 0;
+    for (expr_t *a = value->u.call.args; a; a = a->next, ai++) {
+        typed_vreg_t av = emit_expr_typed(a);
+        arg_vregs[ai] = av.vreg;
+        arg_seg_vregs[ai] = av.vreg_seg;
+        arg_exprs[ai] = a;
     }
-    if (C.functions[fi].nparams != argc)
+    if (C.functions.items[fi].nparams != argc)
         cerr(line, "'%s' expects %d arguments, got %d",
-             fn_name, C.functions[fi].nparams, argc);
+             fn_name, C.functions.items[fi].nparams, argc);
 
-    int ir_args[32];
+    int *ir_args = nib_xcalloc((size_t)argc * 2 + 2,
+                               sizeof(*ir_args), "IR multi-call arguments");
     int nir_args = 0;
-    for (int i = 0; i < argc && i < MAX_PARAMS; i++) {
-        if (C.functions[fi].param_is_far[i]) {
+    for (int i = 0; i < argc; i++) {
+        if (i < C.functions.items[fi].nparams && C.functions.items[fi].param_is_far[i]) {
             symbol_t *asym = NULL;
             if (arg_seg_vregs[i] >= 0) {
                 ir_args[nir_args++] = arg_vregs[i];
@@ -2284,9 +2316,10 @@ static bool emit_multi_call_assign(expr_t *targets, expr_t *value, int line) {
         }
     }
 
-    int ret_vregs[MAX_RETURNS];
+    int *ret_vregs = nib_xcalloc((size_t)ntargets, sizeof(*ret_vregs),
+                                 "multi-call return vregs");
     fprintf(C.nir, "    mcall");
-    for (int i = 0; i < ntargets && i < MAX_RETURNS; i++) {
+    for (int i = 0; i < ntargets; i++) {
         ret_vregs[i] = alloc_vreg();
         fprintf(C.nir, " %%%d,", ret_vregs[i]);
     }
@@ -2294,15 +2327,15 @@ static bool emit_multi_call_assign(expr_t *targets, expr_t *value, int line) {
     for (int i = 0; i < nir_args; i++)
         fprintf(C.nir, ", %%%d", ir_args[i]);
     fprintf(C.nir, "\n");
-    for (int i = 0; i < ntargets && i < MAX_RETURNS; i++) {
-        type_t *rt = C.functions[fi].return_types[i];
+    for (int i = 0; i < ntargets; i++) {
+        type_t *rt = C.functions.items[fi].return_types[i];
         if (rt)
             fprintf(C.nir, ".vreg %%%d, %s\n", ret_vregs[i], type_str(rt));
     }
 
     int i = 0;
-    for (expr_t *t = targets; t && i < ntargets && i < MAX_RETURNS; t = t->next, i++) {
-        typed_vreg_t tv = TV(ret_vregs[i], C.functions[fi].return_types[i]);
+    for (expr_t *t = targets; t && i < ntargets; t = t->next, i++) {
+        typed_vreg_t tv = TV(ret_vregs[i], C.functions.items[fi].return_types[i]);
         emit_assign_simple(t, tv, line);
     }
     return true;
@@ -2826,7 +2859,7 @@ static void emit_stmt(stmt_t *s) {
         push_scope();
         /* Add CX as a scoped symbol so body refs to CX use the loop vreg */
         {
-            symbol_t *cx_sym = &C.scope->syms[C.scope->nsyms++];
+            symbol_t *cx_sym = NIB_VEC_PUSH(&C.scope->syms, "symbols");
             memset(cx_sym, 0, sizeof(*cx_sym));
             strncpy(cx_sym->name, "CX", 63);
             cx_sym->type = mk_type(TYPE_U16);
@@ -2855,9 +2888,10 @@ static void emit_stmt(stmt_t *s) {
                 cerr(s->line, "function returns %d values, got %d",
                      C.cur_fn_nreturns, nexprs);
             }
-            int vals[MAX_RETURNS];
+            int *vals = nib_xcalloc((size_t)nexprs, sizeof(*vals),
+                                    "return value vregs");
             int i = 0;
-            for (expr_t *e = s->u.ret_expr; e && i < MAX_RETURNS; e = e->next, i++) {
+            for (expr_t *e = s->u.ret_expr; e; e = e->next, i++) {
                 return_t *ret = return_nth(C.cur_fn_returns, i);
                 typed_vreg_t val = emit_expr_typed_for(e, ret ? ret->type : NULL);
                 if (ret && val.type && !type_assignable(ret->type, val.type) &&
@@ -2907,18 +2941,17 @@ static void emit_stmt(stmt_t *s) {
             cerr(s->line, "tailcall requires a function call");
             break;
         }
-        int argc = 0;
-        int arg_vregs[MAX_PARAMS];
-        for (expr_t *a = e->u.call.args; a; a = a->next) {
-            if (argc < MAX_PARAMS)
-                arg_vregs[argc] = emit_expr(a);
-            argc++;
-        }
+        int argc = expr_list_count(e->u.call.args);
+        int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
+                                     "tailcall arguments");
+        int ai = 0;
+        for (expr_t *a = e->u.call.args; a; a = a->next, ai++)
+            arg_vregs[ai] = emit_expr(a);
         const char *fn_name = "?";
         if (e->u.call.func->kind == EXPR_IDENT)
             fn_name = e->u.call.func->u.ident;
         fprintf(C.nir, "    tailcall %s", fn_name);
-        for (int i = 0; i < argc && i < MAX_PARAMS; i++)
+        for (int i = 0; i < argc; i++)
             fprintf(C.nir, ", %%%d", arg_vregs[i]);
         fprintf(C.nir, "\n");
         break;
@@ -3170,7 +3203,7 @@ static void compile_fn(decl_t *d) {
     C.cur_fn_returns = d->u.fn.returns;
     C.cur_fn_nreturns = d->u.fn.nreturns;
     C.cur_fn_mods = d->u.fn.mods;
-    C.naddr_taken = 0;
+    C.addr_taken.len = 0;
     scan_addr_taken_stmt(d->u.fn.body);
     resolve_fn_modifier_constants(&d->u.fn.mods, d->line);
     resolve_param_type_constants(d->u.fn.params, d->line);
@@ -3204,8 +3237,8 @@ static void compile_fn(decl_t *d) {
         if (d->u.fn.nreturns > 0)
             cerr(d->line, "interrupt handlers cannot have a return type");
         /* Record as far32 constant, not a callable function */
-        if (C.nisr < 64)
-            strncpy(C.isr_names[C.nisr++], d->u.fn.name, 63);
+        *NIB_VEC_PUSH(&C.isr_names, "interrupt handler names") =
+            xstrdup_checked(d->u.fn.name);
     } else {
         int nparams = 0;
         for (param_t *p = d->u.fn.params; p; p = p->next) nparams++;
@@ -3340,7 +3373,6 @@ static void compile_fn(decl_t *d) {
 }
 
 static void compile_struct(decl_t *d) {
-    if (C.nstructs >= 128) return;
     for (field_t *f = d->u.struc.fields; f; f = f->next) {
         resolve_type_constants(f->type, d->line);
         resolve_type_constants(f->as_type, d->line);
@@ -3350,10 +3382,11 @@ static void compile_struct(decl_t *d) {
             f->bits_expr = NULL;
         }
     }
-    strncpy(C.structs[C.nstructs].name, d->u.struc.name, 63);
-    C.structs[C.nstructs].fields = d->u.struc.fields;
-    C.structs[C.nstructs].aligned = d->u.struc.aligned;
-    C.nstructs++;
+    struct_sig_t *st = NIB_VEC_PUSH(&C.structs, "structs");
+    memset(st, 0, sizeof(*st));
+    strncpy(st->name, d->u.struc.name, 63);
+    st->fields = d->u.struc.fields;
+    st->aligned = d->u.struc.aligned;
 
     /* Emit to .nif so other modules know the struct layout */
     if (d->is_pub) {
@@ -3675,7 +3708,8 @@ static void import_nif(const char *path, int use_line) {
     char cur_fn[64] = "";
     int cur_nparams = 0;
     return_t *cur_rets = NULL;
-    bool cur_param_is_far[MAX_PARAMS] = {0};
+    bool_vec_t cur_param_is_far;
+    NIB_VEC_INIT(&cur_param_is_far);
     while (fgets(line, sizeof(line), fp)) {
         int len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
@@ -3692,7 +3726,7 @@ static void import_nif(const char *path, int use_line) {
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
             cur_rets = NULL;
-            memset(cur_param_is_far, 0, sizeof(cur_param_is_far));
+            cur_param_is_far.len = 0;
             continue;
         }
 
@@ -3704,7 +3738,7 @@ static void import_nif(const char *path, int use_line) {
             strncpy(cur_fn, name, 63);
             cur_nparams = 0;
             cur_rets = NULL;
-            memset(cur_param_is_far, 0, sizeof(cur_param_is_far));
+            cur_param_is_far.len = 0;
             continue;
         }
 
@@ -3718,9 +3752,8 @@ static void import_nif(const char *path, int use_line) {
             /* Read type */
             char ptype[32];
             nif_read_word(p, ptype, sizeof(ptype));
-            if (cur_nparams < MAX_PARAMS)
-                cur_param_is_far[cur_nparams] = (strcmp(ptype, "far") == 0 ||
-                                                  strcmp(ptype, "far32") == 0);
+            *NIB_VEC_PUSH(&cur_param_is_far, "imported parameter metadata") =
+                (strcmp(ptype, "far") == 0 || strcmp(ptype, "far32") == 0);
             cur_nparams++;
             continue;
         }
@@ -3737,17 +3770,18 @@ static void import_nif(const char *path, int use_line) {
         /* .endfn / .endextern — register the function */
         if (strncmp(p, ".endfn", 6) == 0 || strncmp(p, ".endextern", 10) == 0) {
             if (cur_fn[0]) {
-                int fi = C.nfunctions;
+                int fi = C.functions.len;
                 register_function_returns(cur_fn, cur_nparams, cur_rets, NULL);
                 /* Apply far flags parsed from .param lines */
-                if (fi < C.nfunctions) {
+                if (fi < C.functions.len) {
                     int ir_count = 0;
-                    for (int pi = 0; pi < cur_nparams && pi < MAX_PARAMS; pi++) {
-                        C.functions[fi].param_is_far[pi] = cur_param_is_far[pi];
+                    for (int pi = 0; pi < cur_nparams; pi++) {
+                        C.functions.items[fi].param_is_far[pi] =
+                            cur_param_is_far.items[pi];
                         ir_count++;
-                        if (cur_param_is_far[pi]) ir_count++;
+                        if (cur_param_is_far.items[pi]) ir_count++;
                     }
-                    C.functions[fi].nparams_ir = ir_count;
+                    C.functions.items[fi].nparams_ir = ir_count;
                 }
             }
             cur_fn[0] = '\0';
@@ -3761,7 +3795,7 @@ static void import_nif(const char *path, int use_line) {
             p = nif_read_word(p, name, sizeof(name));
             bool aligned = false;
             p = nif_skip_ws(p);
-            if (*p == ',') { p++; char q[MAX_PARAMS]; nif_read_word(p, q, sizeof(q));
+            if (*p == ',') { p++; char q[64]; nif_read_word(p, q, sizeof(q));
                 if (strcmp(q, "aligned") == 0) aligned = true; }
             /* Parse fields until .endstruct */
             field_t *fields = NULL, *tail = NULL;
@@ -3802,12 +3836,11 @@ static void import_nif(const char *path, int use_line) {
                 else tail->next = f;
                 tail = f;
             }
-            if (C.nstructs < 128) {
-                strncpy(C.structs[C.nstructs].name, name, 63);
-                C.structs[C.nstructs].fields = fields;
-                C.structs[C.nstructs].aligned = aligned;
-                C.nstructs++;
-            }
+            struct_sig_t *st = NIB_VEC_PUSH(&C.structs, "imported structs");
+            memset(st, 0, sizeof(*st));
+            strncpy(st->name, name, 63);
+            st->fields = fields;
+            st->aligned = aligned;
             continue;
         }
 
@@ -3844,6 +3877,7 @@ static void import_nif(const char *path, int use_line) {
     }
 
     fclose(fp);
+    NIB_VEC_FREE(&cur_param_is_far);
 }
 
 /* ================================================================
@@ -3853,6 +3887,11 @@ static void import_nif(const char *path, int use_line) {
 int compile(program_t *prog, const char *nir_path, const char *nif_path,
             const char *src_dir, const char *src_file) {
     memset(&C, 0, sizeof(C));
+    NIB_VEC_INIT(&C.functions);
+    NIB_VEC_INIT(&C.structs);
+    NIB_VEC_INIT(&C.constants);
+    NIB_VEC_INIT(&C.isr_names);
+    NIB_VEC_INIT(&C.addr_taken);
     if (src_dir)
         strncpy(C.src_dir, src_dir, sizeof(C.src_dir) - 1);
     if (src_file) {
