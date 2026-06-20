@@ -618,6 +618,7 @@ static const char *vreg_asm(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
 static bool vreg_storage_is_remat(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
+static bool preg_is_word(int preg);
 static bool flags_live_after_insn(func_t *fn, int insn_idx);
 static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg);
 static uint32_t free_regs_at(func_t *fn, int b_idx, int pos);
@@ -6059,6 +6060,97 @@ static void collect_call_arg_setup_clobbers(func_t *fn, ir_insn_t *ins,
     }
 }
 
+static int collect_function_save_regs(func_t *fn, int fn_idx, int *save_regs) {
+    int nsave = 0;
+    if (fn->nfn_preserves <= 0)
+        return 0;
+    for (int i = 0; i < fn->nfn_preserves; i++) {
+        int preg = fn->fn_preserves[i];
+        if (fn_idx >= 0 && fn_assigns[fn_idx].clobbers[preg])
+            save_regs[nsave++] = preg;
+    }
+    return nsave;
+}
+
+static bool save_reg_list_contains(int *regs, int nregs, int preg) {
+    for (int i = 0; i < nregs; i++)
+        if (regs[i] == preg)
+            return true;
+    return false;
+}
+
+static bool save_reg_list_aliases(int *regs, int nregs, int preg) {
+    for (int i = 0; i < nregs; i++)
+        if (pregs_alias(regs[i], preg))
+            return true;
+    return false;
+}
+
+static void collect_register_arg_parents(ir_insn_t *ins, int callee_ext,
+                                         bool *arg_regs) {
+    if (callee_ext < 0)
+        return;
+    for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
+        if (abi_place_is_stack(externs[callee_ext].param_places[a]))
+            continue;
+        int preg = externs[callee_ext].param_pins[a].preg;
+        if (preg == PREG_NONE || preg == PREG_SP)
+            continue;
+        if (preg >= PREG_AL && preg <= PREG_BH)
+            preg = preg_alias_parent[preg];
+        arg_regs[preg] = true;
+    }
+}
+
+static bool ntailcall_target_reg_is_safe(func_t *fn, ir_insn_t *ins,
+                                         int *save_regs, int nsave,
+                                         bool *arg_regs) {
+    if (ins->src1 < 0 || ins->src1 >= fn->nvregs)
+        return false;
+    int preg = fn->vregs[ins->src1].assigned;
+    if (!preg_is_word(preg))
+        return false;
+    if (fn->needs_frame && preg == PREG_BP)
+        return false;
+    if (save_reg_list_aliases(save_regs, nsave, preg))
+        return false;
+    if (arg_regs[preg])
+        return false;
+    return true;
+}
+
+static int choose_ntailcall_target_reg(func_t *fn, int *save_regs, int nsave,
+                                       bool *arg_regs) {
+    int temps[] = { PREG_DI, PREG_SI, PREG_BX, PREG_DX, PREG_CX, PREG_AX };
+    for (size_t ti = 0; ti < sizeof(temps) / sizeof(temps[0]); ti++) {
+        int preg = temps[ti];
+        if (fn->needs_frame && preg == PREG_BP)
+            continue;
+        if (arg_regs[preg])
+            continue;
+        if (save_reg_list_aliases(save_regs, nsave, preg))
+            continue;
+        return preg;
+    }
+    return PREG_NONE;
+}
+
+static void emit_resolved_tail_cleanup(func_t *fn, int *save_regs, int nsave,
+                                       bool ds_explicit_save) {
+    if (ds_explicit_save)
+        rins_asm(fn, "    pop DS");
+    for (int s = nsave - 1; s >= 0; s--) {
+        if (save_regs[s] == PREG_FLAGS)
+            rins_asm(fn, "    popf");
+        else
+            rins_asm(fn, "    pop %s", preg_name[save_regs[s]]);
+    }
+    if (fn->needs_frame) {
+        rins_asm(fn, "    mov sp, bp");
+        rins_asm(fn, "    pop bp");
+    }
+}
+
 static void collect_fixup_clobbers(func_t *fn, ir_insn_t *ins,
                                    int insn_idx, bool *clobbers) {
     if (ins->op == IR_CALL || ins->op == IR_MCALL ||
@@ -7224,6 +7316,39 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
                     break;
                 }
             }
+
+            int save_regs[NUM_PREGS];
+            int nsave = collect_function_save_regs(fn, fn_idx, save_regs);
+            bool ds_explicit_save =
+                (fn->ds_policy == DS_POLICY_SYMBOL ||
+                 fn->ds_policy == DS_POLICY_LITERAL) &&
+                !save_reg_list_contains(save_regs, nsave, PREG_DS);
+            bool arg_regs[NUM_PREGS];
+            memset(arg_regs, 0, sizeof(arg_regs));
+            collect_register_arg_parents(ins, callee_ext, arg_regs);
+
+            if (!ntailcall_target_reg_is_safe(fn, ins, save_regs, nsave,
+                                              arg_regs)) {
+                int target_reg = choose_ntailcall_target_reg(fn, save_regs,
+                                                             nsave,
+                                                             arg_regs);
+                if (target_reg == PREG_NONE) {
+                    fprintf(stderr,
+                            "%s: no stable register for near indirect tailcall '%s'\n",
+                            fn->name, ins->name);
+                    target_reg = PREG_AX;
+                }
+                note_fixup(fn, FIXUP_CALL_ARG);
+                rins_push_vreg_temp(fn, ins->src1);
+                emit_call_arg_register_moves(fn, ins, -1, callee_ext, true);
+                rins_asm_fixup(fn, FIXUP_CALL_ARG, "    pop %s",
+                               preg_name[target_reg]);
+                emit_resolved_tail_cleanup(fn, save_regs, nsave,
+                                           ds_explicit_save);
+                rins_asm(fn, "    jmp %s", preg_name[target_reg]);
+                continue;
+            }
+
             emit_call_arg_register_moves(fn, ins, -1, callee_ext, true);
             rins_ir_stack_cached(fn, i);
             continue;
@@ -7857,13 +7982,6 @@ static void emit_es_data_suffix(bool used_es) {
 static bool ds_policy_sets_ds(func_t *fn) {
     return fn->ds_policy == DS_POLICY_SYMBOL ||
            fn->ds_policy == DS_POLICY_LITERAL;
-}
-
-static bool reg_list_contains(int *regs, int nregs, int preg) {
-    for (int i = 0; i < nregs; i++)
-        if (regs[i] == preg)
-            return true;
-    return false;
 }
 
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg) {
@@ -8915,16 +9033,9 @@ static void emit_function(func_t *fn) {
     for (int fi2 = 0; fi2 < nfunctions; fi2++)
         if (&functions[fi2] == fn) { fn_idx = fi2; break; }
 
-    if (fn->nfn_preserves > 0) {
-        /* Find this function's clobber set */
-        for (int i = 0; i < fn->nfn_preserves; i++) {
-            int preg = fn->fn_preserves[i];
-            if (fn_idx >= 0 && fn_assigns[fn_idx].clobbers[preg])
-                save_regs[nsave++] = preg;
-        }
-    }
+    nsave = collect_function_save_regs(fn, fn_idx, save_regs);
     bool ds_explicit_save = ds_policy_sets_ds(fn) &&
-        !reg_list_contains(save_regs, nsave, PREG_DS);
+        !save_reg_list_contains(save_regs, nsave, PREG_DS);
 
     /* For interrupt handlers: compute which word registers are clobbered */
     int isr_save[8]; /* word regs to save: AX,CX,DX,BX,SP,BP,SI,DI */

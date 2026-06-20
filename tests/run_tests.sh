@@ -1206,10 +1206,28 @@ if [ -f "$TEST_TMPDIR"/t_ncall.asm ]; then
         "$TEST_TMPDIR"/t_ncall.asm)
     ntail_window=$(sed -n '/t_ncall_dispatch:/,/^[[:space:]]*ret$/p' \
         "$TEST_TMPDIR"/t_ncall.asm)
+    ntail_conflict_window=$(
+        sed -n '/t_ncall_dispatch_conflict:/,/^[[:space:]]*ret$/p' \
+            "$TEST_TMPDIR"/t_ncall.asm
+    )
     if grep -q 'ncall .*, declared,' tests/t_ncall.nir &&
        grep -q 'ntailcall .*, declared,' tests/t_ncall.nir &&
+       grep -q 'ntailcall .*, declared_word,' tests/t_ncall.nir &&
        printf "%s\n" "$ncall_window" | grep -Eq 'call (AX|CX|DX|BX|SI|DI)' &&
        printf "%s\n" "$ntail_window" | grep -Eq 'jmp (AX|CX|DX|BX|SI|DI)' &&
+       printf "%s\n" "$ntail_conflict_window" | awk '
+           /^[[:space:]]*mov AX, \[CS:/ { loaded = 1 }
+           loaded && /^[[:space:]]*push AX$/ { pushed = 1 }
+           pushed && /^[[:space:]]*mov AX, DI$/ { routed_arg = 1 }
+           routed_arg && /^[[:space:]]*pop (CX|DX|BX|SI|DI)$/ {
+               target = $2
+           }
+           target && /^[[:space:]]*jmp (AX|CX|DX|BX|SI|DI)$/ {
+               jumped = 1
+               if ($2 != target || $2 == "AX") bad = 1
+           }
+           END { exit (loaded && pushed && routed_arg && jumped && !bad) ? 0 : 1 }
+       ' &&
        printf "%s\n" "$ncall_target_window" | grep -q 'push DS' &&
        printf "%s\n" "$ncall_target_window" | grep -q 'mov AX, 0x0000' &&
        printf "%s\n" "$ncall_target_window" | grep -q 'mov DS, AX' &&

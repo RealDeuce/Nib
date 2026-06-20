@@ -6,6 +6,13 @@ fn api declared(byte: u8 in AL) ds(0x0000) clobbers(FLAGS) {
     tmp := tmp + 1;
 }
 
+fn api declared_word(src_seg: seg in ES, src_off: u16 in AX, idx: u16 in BX)
+    ds(0x0000) clobbers(FLAGS) {
+    return;
+}
+
+u16[1] word_dispatch at(0xE000:0x0100) = {&declared_word};
+
 fn call_table(byte: u8) {
     const u16 target = &declared;
     target as declared(byte);
@@ -14,4 +21,10 @@ fn call_table(byte: u8) {
 fn dispatch(byte: u8) ds(0x1234) {
     const u16 target = &declared;
     tailcall target as declared(byte);
+}
+
+fn dispatch_conflict(src_seg: seg in ES, src_off: u16 in DI, idx: u16 in BX)
+    ds(0x1234) {
+    const u16 target = word_dispatch[0];
+    tailcall target as declared_word(src_seg, src_off, idx);
 }
