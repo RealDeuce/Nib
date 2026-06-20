@@ -227,6 +227,9 @@ typedef struct {
     int     affinity[NUM_PREGS]; /* speed hints from machine constraints */
     int     assigned;       /* physical reg after coloring, or PREG_NONE */
     int     spill_slot;     /* stack offset if spilled, or -1 */
+    int     spill_byte_offset; /* byte offset inside a shared spill word */
+    int     sibling_byte_group; /* low/high byte coalescing group, or -1 */
+    bool    sibling_byte_high; /* true when this is the high byte partner */
     bool    stack_spill_eligible; /* true if CFG stack-cache proof succeeded */
     int     stack_spill_def;
     int     stack_spill_use;
@@ -419,6 +422,7 @@ typedef struct {
     /* Allocation state */
     bool        needs_frame;    /* BP reserved for frame pointer */
     int         nspill_slots;
+    int         nsibling_byte_groups;
     int         ncl_fixups;     /* CL routing fixups (push/pop CX) */
     int         fixup_counts[FIXUP_NUM];
     int         spill_action_counts[SPILL_NUM];
@@ -630,6 +634,9 @@ static void init_vreg_info(vreg_info_t *vr) {
     vr->prefer = PREG_NONE;
     vr->assigned = PREG_NONE;
     vr->spill_slot = -1;
+    vr->spill_byte_offset = 0;
+    vr->sibling_byte_group = -1;
+    vr->sibling_byte_high = false;
     vr->def_pos = -1;
     vr->last_use = -1;
     vr->stack_spill_def = -1;
@@ -3076,7 +3083,13 @@ static const char *vreg_alloc_note(func_t *fn, int v, char *buf,
         snprintf(buf, bufsz, "alloc=%s",
                  preg_name[fn->vregs[v].assigned]);
     } else if (fn->vregs[v].spill_slot >= 0) {
-        snprintf(buf, bufsz, "alloc=spill%d", fn->vregs[v].spill_slot);
+        if (fn->vregs[v].spill_byte_offset != 0)
+            snprintf(buf, bufsz, "alloc=spill%d+%d",
+                     fn->vregs[v].spill_slot,
+                     fn->vregs[v].spill_byte_offset);
+        else
+            snprintf(buf, bufsz, "alloc=spill%d",
+                     fn->vregs[v].spill_slot);
     } else if (fn->vregs[v].is_stack_home) {
         snprintf(buf, bufsz, "alloc=stack+%d",
                  fn->vregs[v].stack_offset);
@@ -4387,6 +4400,20 @@ static void add_sibling_byte_affinity(func_t *fn, int low_root,
         for (int h = 0; h < nhighs; h++)
             add_vreg_affinity(fn, highs[h], high_regs[i], weights[i]);
     }
+
+    int group = fn->nsibling_byte_groups++;
+    for (int l = 0; l < nlows; l++) {
+        if (fn->vregs[lows[l]].sibling_byte_group < 0) {
+            fn->vregs[lows[l]].sibling_byte_group = group;
+            fn->vregs[lows[l]].sibling_byte_high = false;
+        }
+    }
+    for (int h = 0; h < nhighs; h++) {
+        if (fn->vregs[highs[h]].sibling_byte_group < 0) {
+            fn->vregs[highs[h]].sibling_byte_group = group;
+            fn->vregs[highs[h]].sibling_byte_high = true;
+        }
+    }
 }
 
 static bool is_byte_shift_imm(func_t *fn, ir_insn_t *ins, const char *op) {
@@ -4813,6 +4840,63 @@ static void compact_spill_slots(func_t *fn) {
     }
     fn->nspill_slots = next;
     free(slot_map);
+}
+
+static void coalesce_sibling_byte_spills(func_t *fn) {
+    bool changed = false;
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (fn->vregs[v].sibling_byte_high)
+            continue;
+        int group = fn->vregs[v].sibling_byte_group;
+        if (group < 0)
+            continue;
+        if (!fn->vregs[v].is_byte)
+            continue;
+        if (fn->vregs[v].spill_slot < 0)
+            continue;
+        if (fn->vregs[v].is_stack_home || fn->vregs[v].is_local_slot)
+            continue;
+
+        int best_peer = -1;
+        int best_score = INT_MAX;
+        for (int peer = 0; peer < fn->nvregs; peer++) {
+            if (fn->vregs[peer].sibling_byte_group != group ||
+                !fn->vregs[peer].sibling_byte_high)
+                continue;
+            if (!fn->vregs[peer].is_byte ||
+                fn->vregs[peer].spill_slot < 0 ||
+                fn->vregs[peer].spill_byte_offset != 0 ||
+                fn->vregs[peer].is_stack_home ||
+                fn->vregs[peer].is_local_slot)
+                continue;
+            int start_delta = fn->vregs[v].def_pos -
+                              fn->vregs[peer].def_pos;
+            if (start_delta < 0)
+                start_delta = -start_delta;
+            int end_delta = fn->vregs[v].last_use -
+                            fn->vregs[peer].last_use;
+            if (end_delta < 0)
+                end_delta = -end_delta;
+            int score = end_delta * 8 + start_delta;
+            if (score < best_score) {
+                best_score = score;
+                best_peer = peer;
+            }
+        }
+        if (best_peer < 0)
+            continue;
+
+        int slot = fn->vregs[v].spill_slot;
+        if (fn->vregs[best_peer].spill_slot < slot)
+            slot = fn->vregs[best_peer].spill_slot;
+        fn->vregs[v].spill_slot = slot;
+        fn->vregs[v].spill_byte_offset = 0;
+        fn->vregs[best_peer].spill_slot = slot;
+        fn->vregs[best_peer].spill_byte_offset = 1;
+        changed = true;
+    }
+    if (changed)
+        compact_spill_slots(fn);
 }
 
 static bool stack_cache_span_compatible(func_t *fn, int def, int use) {
@@ -6690,7 +6774,8 @@ static const char *vreg_asm(func_t *fn, int v) {
         return preg_name[fn->vregs[v].assigned];
     }
     if (fn->vregs[v].spill_slot >= 0) {
-        int off = -(fn->vregs[v].spill_slot + 1) * 2;
+        int off = -(fn->vregs[v].spill_slot + 1) * 2 +
+                  fn->vregs[v].spill_byte_offset;
         snprintf(b, 32, "[BP%+d]", off);
         return b;
     }
@@ -6717,7 +6802,8 @@ static const char *vreg_asm_sized(func_t *fn, int v) {
     static char buf[4][40];
     static int idx = 0;
     char *b = buf[idx++ & 3];
-    int off = -(fn->vregs[v].spill_slot + 1) * 2;
+    int off = -(fn->vregs[v].spill_slot + 1) * 2 +
+              fn->vregs[v].spill_byte_offset;
     const char *sz = fn->vregs[v].is_byte ? "byte" : "word";
     snprintf(b, 40, "%s [BP%+d]", sz, off);
     return b;
@@ -9911,6 +9997,7 @@ int main(int argc, char **argv) {
                     for (int v = 0; v < fn->nvregs; v++) {
                         fn->vregs[v].assigned = PREG_NONE;
                         fn->vregs[v].spill_slot = -1;
+                        fn->vregs[v].spill_byte_offset = 0;
                     }
                     fn->nspill_slots = 0;
                     bp_available = false;
@@ -9925,10 +10012,12 @@ int main(int argc, char **argv) {
             for (int v = 0; v < fn->nvregs; v++) {
                 fn->vregs[v].assigned = PREG_NONE;
                 fn->vregs[v].spill_slot = -1;
+                fn->vregs[v].spill_byte_offset = 0;
             }
             fn->nspill_slots = 0;
             allocate_registers(fn, false);
         }
+        coalesce_sibling_byte_spills(fn);
         plan_stack_cache_spills(fn, !fn->needs_frame);
         fn->frame_size = fn->nspill_slots * 2 + fn->local_size;
         if (fn->needs_call_temp) {
@@ -10014,8 +10103,12 @@ int main(int argc, char **argv) {
         for (int v = 0; v < fn->nvregs; v++) {
             if (fn->vregs[v].assigned != PREG_NONE)
                 fprintf(stderr, " %%%d=%s", v, preg_name[fn->vregs[v].assigned]);
-            else if (fn->vregs[v].spill_slot >= 0)
-                fprintf(stderr, " %%%d=spill%d", v, fn->vregs[v].spill_slot);
+            else if (fn->vregs[v].spill_slot >= 0) {
+                fprintf(stderr, " %%%d=spill%d", v,
+                        fn->vregs[v].spill_slot);
+                if (fn->vregs[v].spill_byte_offset != 0)
+                    fprintf(stderr, "+%d", fn->vregs[v].spill_byte_offset);
+            }
         }
         fprintf(stderr, " ]\n");
 

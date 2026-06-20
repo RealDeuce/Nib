@@ -17,20 +17,6 @@
     - require loop back edges to preserve stack state,
     - allow balanced call argument pushes above cached values,
     - fall back to frame spills when states cannot be proven identical.
-  - Continue sibling-byte lifetime coalescing:
-    - done: opposite byte shifts from one source get allocator affinities
-      for sibling low/high halves, so non-special cases naturally prefer
-      `DL`/`DH`-style placement;
-    - done: load/and/or/store and load/and/xor/store byte RMW sequences
-      fold through a generic memory combiner instead of a shifted-blit
-      special case;
-    - done: the sibling-shift selector carries spilled byte fragments
-      directly into their immediate memory RMW uses, so shifted full-row
-      loops avoid frame traffic for the split source byte.
-  - Generalize paired-byte coalescing beyond immediate RMW patterns:
-    - when two overlapping byte vregs occupy sibling halves of one parent
-      word, extend and spill them as one word lifetime so frame spill/load
-      traffic can be combined across byte-heavy code.
   - Add byte stack-cache eligibility only after the planner can prove the
     parent word is free at the restore point and the use-site instruction
     does not need the sibling byte at the same time.

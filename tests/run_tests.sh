@@ -1662,6 +1662,83 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_pair_spill_coalesce.nir <<'NIR'
+; Binder regression: sibling low/high byte values that both spill should
+; share one spill word as byte offsets instead of consuming independent
+; frame words.
+.fn pair_spill_coalesce
+.param %0, seg, "src_seg", register, pin=ES
+.param %1, u16, "src", register, pin=BX
+.param %2, u16, "dst", register, pin=SI
+.vreg %40, u8, pin=AL
+    mov %40, 1
+.vreg %41, u8, pin=AH
+    mov %41, 2
+.vreg %42, u8, pin=BL
+    mov %42, 3
+.vreg %43, u8, pin=BH
+    mov %43, 4
+.vreg %44, u8, pin=CL
+    mov %44, 5
+.vreg %45, u8, pin=CH
+    mov %45, 6
+.vreg %46, u8, pin=DL
+    mov %46, 7
+.vreg %47, u8, pin=DH
+    mov %47, 8
+    loadmem %3, %1, ES
+.vreg %3, u8
+    mov %4, %3
+.vreg %4, u8, const
+    shr %5, %4, 1
+.vreg %5, u8
+    mov %6, %5
+.vreg %6, u8, const
+    shl %7, %4, 7
+.vreg %7, u8
+    mov %8, %7
+.vreg %8, u8, const
+.vreg %6, u8
+    storemem %2, %6
+    add %9, %2, 1
+.vreg %8, u8
+    storemem %9, %8
+    add %50, %40, %41
+.vreg %50, u8
+    add %51, %42, %43
+.vreg %51, u8
+    add %52, %44, %45
+.vreg %52, u8
+    add %53, %46, %47
+.vreg %53, u8
+    ret
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_pair_spill_coalesce.txt \
+       --pressure-fn pair_spill_coalesce \
+       "$TEST_TMPDIR"/t_pair_spill_coalesce.nir \
+       -o "$TEST_TMPDIR"/t_pair_spill_coalesce.asm >/dev/null 2>&1; then
+    if ./nibasm "$TEST_TMPDIR"/t_pair_spill_coalesce.asm \
+           -o "$TEST_TMPDIR"/t_pair_spill_coalesce.bin >/dev/null 2>&1 &&
+       grep -q '^summary: .*spills=5' \
+           "$TEST_TMPDIR"/t_pair_spill_coalesce.txt &&
+       grep -q 'alloc=spill[0-9][0-9]*+1' \
+           "$TEST_TMPDIR"/t_pair_spill_coalesce.txt &&
+       grep -q 'sub sp, 10' "$TEST_TMPDIR"/t_pair_spill_coalesce.asm &&
+       ! grep -q 'sub sp, 12' "$TEST_TMPDIR"/t_pair_spill_coalesce.asm; then
+        pass "pair-spill-coalesce: sibling byte spills share words"
+    else
+        fail "pair-spill-coalesce" "sibling byte spills did not share frame words"
+    fi
+else
+    fail "pair-spill-coalesce" "$(
+        ./nibbind --pressure-report "$TEST_TMPDIR"/t_pair_spill_coalesce.txt \
+            --pressure-fn pair_spill_coalesce \
+            "$TEST_TMPDIR"/t_pair_spill_coalesce.nir \
+            -o "$TEST_TMPDIR"/t_pair_spill_coalesce.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_shift_pair_affinity.nir <<'NIR'
 ; Binder regression: opposite byte shifts from the same source should
 ; prefer sibling halves of one parent even outside the RMW combiner.
