@@ -142,7 +142,6 @@ typedef struct {
     function_vec_t functions;  /* Known functions (for call checking) */
     struct_vec_t structs;      /* Known structs */
     const_vec_t constants;     /* Named constants */
-    str_vec_t declared_functions; /* All module function declarations */
     str_vec_t isr_names;       /* Interrupt handlers as far32 constants */
     str_vec_t addr_taken;      /* Address-taken locals in current function */
 } compiler_t;
@@ -378,15 +377,6 @@ static int find_function(const char *name) {
         if (strcmp(C.functions.items[i].name, name) == 0)
             return i;
     return -1;
-}
-
-static bool is_declared_function(const char *name) {
-    if (find_function(name) >= 0)
-        return true;
-    for (int i = 0; i < C.declared_functions.len; i++)
-        if (strcmp(C.declared_functions.items[i], name) == 0)
-            return true;
-    return false;
 }
 
 static int find_indirect_descriptor(const char *name, const char *module,
@@ -3626,7 +3616,7 @@ static void compile_global(decl_t *d) {
             if (e->kind == EXPR_UNOP &&
                 e->u.unop.op == NIB_ADDR &&
                 e->u.unop.operand->kind == EXPR_IDENT &&
-                is_declared_function(e->u.unop.operand->u.ident)) {
+                find_function(e->u.unop.operand->u.ident) >= 0) {
                 if (elem_sz != 2) {
                     cerr(e->line, "near function reference in non-u16 array");
                     continue;
@@ -3638,7 +3628,7 @@ static void compile_global(decl_t *d) {
             else if (e->kind == EXPR_UNOP &&
                 e->u.unop.op == NIB_FAR_ADDR &&
                 e->u.unop.operand->kind == EXPR_IDENT &&
-                is_declared_function(e->u.unop.operand->u.ident)) {
+                find_function(e->u.unop.operand->u.ident) >= 0) {
                 if (elem_type->kind != TYPE_FAR)
                     cerr(e->line, "function reference in non-far array");
                 fprintf(C.nir, "  far.ref %s\n",
@@ -4038,7 +4028,6 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
     NIB_VEC_INIT(&C.functions);
     NIB_VEC_INIT(&C.structs);
     NIB_VEC_INIT(&C.constants);
-    NIB_VEC_INIT(&C.declared_functions);
     NIB_VEC_INIT(&C.isr_names);
     NIB_VEC_INIT(&C.addr_taken);
     if (src_dir)
@@ -4060,16 +4049,6 @@ int compile(program_t *prog, const char *nir_path, const char *nif_path,
 
     /* Create global scope */
     push_scope();
-
-    for (decl_t *d = prog->decls; d; d = d->next) {
-        if (d->kind == DECL_FN) {
-            *NIB_VEC_PUSH(&C.declared_functions, "declared functions") =
-                xstrdup_checked(d->u.fn.name);
-        } else if (d->kind == DECL_EXTERN_FN) {
-            *NIB_VEC_PUSH(&C.declared_functions, "declared functions") =
-                xstrdup_checked(d->u.extern_fn.name);
-        }
-    }
 
     for (decl_t *d = prog->decls; d; d = d->next) {
         switch (d->kind) {

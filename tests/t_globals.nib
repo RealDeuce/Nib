@@ -1,10 +1,5 @@
 // Test: global declarations with at() placement and array initializers
 
-// Near function dispatch table: stores u16 offsets, not far pointers.
-u16[4] dispatch at(0xE000:0x0100) = {
-    &handler0, &handler1, &handler2, &handler3
-};
-
 fn handler0() {
     return;
 }
@@ -23,6 +18,11 @@ fn handler3() {
 
 // IVT-style: placed far array with function references
 far32[4] ivt at(0x0000:0x0000) = {@handler0, @handler1, @handler2, @handler3};
+
+// Near function dispatch table: stores u16 offsets, not far pointers.
+u16[4] dispatch at(0xE000:0x0100) = {
+    &handler0, &handler1, &handler2, &handler3
+};
 
 // Simple global (no placement, no init)
 u16 counter;
