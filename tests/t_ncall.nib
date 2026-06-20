@@ -1,7 +1,7 @@
 // Test: near indirect calls via extern descriptors
 // addr as name(args...)
 
-fn api declared(byte: u8 in AL) clobbers(FLAGS) {
+fn api declared(byte: u8 in AL) ds(0x0000) clobbers(FLAGS) {
     u8 tmp = byte;
     tmp := tmp + 1;
 }
@@ -11,7 +11,7 @@ fn call_table(byte: u8) {
     target as declared(byte);
 }
 
-fn dispatch(byte: u8) {
+fn dispatch(byte: u8) ds(0x1234) {
     const u16 target = &declared;
     tailcall target as declared(byte);
 }

@@ -1200,6 +1200,8 @@ if [ -f "$TEST_TMPDIR"/t_icall_multi.asm ]; then
 fi
 
 if [ -f "$TEST_TMPDIR"/t_ncall.asm ]; then
+    ncall_target_window=$(sed -n '/t_ncall_declared:/,/^[[:space:]]*ret$/p' \
+        "$TEST_TMPDIR"/t_ncall.asm)
     ncall_window=$(sed -n '/t_ncall_call_table:/,/^[[:space:]]*ret$/p' \
         "$TEST_TMPDIR"/t_ncall.asm)
     ntail_window=$(sed -n '/t_ncall_dispatch:/,/^[[:space:]]*ret$/p' \
@@ -1208,6 +1210,17 @@ if [ -f "$TEST_TMPDIR"/t_ncall.asm ]; then
        grep -q 'ntailcall .*, declared,' tests/t_ncall.nir &&
        printf "%s\n" "$ncall_window" | grep -Eq 'call (AX|CX|DX|BX|SI|DI)' &&
        printf "%s\n" "$ntail_window" | grep -Eq 'jmp (AX|CX|DX|BX|SI|DI)' &&
+       printf "%s\n" "$ncall_target_window" | grep -q 'push DS' &&
+       printf "%s\n" "$ncall_target_window" | grep -q 'mov AX, 0x0000' &&
+       printf "%s\n" "$ncall_target_window" | grep -q 'mov DS, AX' &&
+       printf "%s\n" "$ntail_window" | awk '
+           /^[[:space:]]*pop DS$/ { popped = 1 }
+           /^[[:space:]]*jmp (AX|CX|DX|BX|SI|DI)$/ {
+               jumped = 1
+               if (!popped) bad = 1
+           }
+           END { exit (popped && jumped && !bad) ? 0 : 1 }
+       ' &&
        ! printf "%s\n" "$ncall_window" | grep -q 'call far' &&
        ! printf "%s\n" "$ntail_window" | grep -q 'jmp far'; then
         pass "ncall: u16 descriptor target emits near call/jump"
