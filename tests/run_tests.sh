@@ -2257,6 +2257,76 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_explicit_mem_base_live.nir <<'NIR'
+; Binder regression: textual memory operands such as [ES:SI+disp] read
+; the pinned ES:SI parameter vregs, so SI cannot be reused before the
+; last descriptor load.
+.fn explicit_mem_base_live
+.param %0, u16, "desc_off", register, pin=SI
+.param %1, seg, "desc_seg", register, pin=ES
+    loadmem %2, [ES:SI+0x0000]
+.vreg %2, u16
+    mov %20, %2
+.vreg %20, u16, const
+    loadmem %3, [ES:SI+0x0004]
+.vreg %3, u16
+    mov %21, %3
+.vreg %21, u16, const
+    loadmem %4, [ES:SI+0x0006]
+.vreg %4, u16
+    mov %22, %4
+.vreg %22, u16, const
+    loadmem %5, [ES:SI+0x0008]
+.vreg %5, u8
+    loadmem %6, [ES:SI+0x0009]
+.vreg %6, u16
+    loadmem %7, [ES:SI+0x000B]
+.vreg %7, u8
+    loadmem %8, [ES:SI+0x0002]
+.vreg %8, seg
+    add %30, %20, %21
+    add %31, %30, %22
+    zext %32, %5
+    add %33, %31, %32
+    add %34, %33, %6
+    zext %35, %7
+    add %36, %34, %35
+    mov %37, %8
+    ret
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_explicit_mem_base_live.txt \
+     --pressure-fn explicit_mem_base_live \
+     "$TEST_TMPDIR"/t_explicit_mem_base_live.nir \
+     -o "$TEST_TMPDIR"/t_explicit_mem_base_live.asm >/dev/null 2>&1; then
+    explicit_mem_window=$(sed -n \
+        '/explicit_mem_base_live:$/,/^[[:space:]]*ret$/p' \
+        "$TEST_TMPDIR"/t_explicit_mem_base_live.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_explicit_mem_base_live.asm \
+          -o "$TEST_TMPDIR"/t_explicit_mem_base_live.bin >/dev/null 2>&1 &&
+       grep -q '%0 u16 .*alloc=SI .*param:desc_off' \
+          "$TEST_TMPDIR"/t_explicit_mem_base_live.txt &&
+       grep -q '%1 seg .*alloc=ES .*param:desc_seg' \
+          "$TEST_TMPDIR"/t_explicit_mem_base_live.txt &&
+       printf "%s\n" "$explicit_mem_window" | awk '
+           /\[ES:SI\+0x0002\]/ { saw_last = 1 }
+           /^[[:space:]]*mov[[:space:]]+SI,/ && !saw_last { bad = 1 }
+           END { exit (!bad && saw_last) ? 0 : 1 }
+       '; then
+        pass "explicit-mem-base-live: ES:SI base survives text operands"
+    else
+        fail "explicit-mem-base-live" "textual ES:SI base was clobbered"
+    fi
+else
+    fail "explicit-mem-base-live" "$(
+        ./nibbind --pressure-report \
+          "$TEST_TMPDIR"/t_explicit_mem_base_live.txt \
+          --pressure-fn explicit_mem_base_live \
+          "$TEST_TMPDIR"/t_explicit_mem_base_live.nir \
+          -o "$TEST_TMPDIR"/t_explicit_mem_base_live.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_high_vregs.nir <<'NIR'
 ; Binder regression: functions with vregs above 255 must still get
 ; real registers/spills and address operands, not PREG_NONE/(null).

@@ -727,6 +727,63 @@ static int ins_extra_arg(const ir_insn_t *ins, int idx) {
     return ins->extra_args[idx];
 }
 
+static bool text_mem_mentions_preg(const char *text, int preg) {
+    if (!text || preg < 0 || preg >= NUM_PREGS || !preg_name[preg])
+        return false;
+
+    const char *rn = preg_name[preg];
+    size_t len = strlen(rn);
+    const char *p = text;
+    while ((p = strstr(p, rn)) != NULL) {
+        char before = (p > text) ? p[-1] : '[';
+        char after = p[len];
+        if (!isalnum((unsigned char)before) && before != '_' &&
+            !isalnum((unsigned char)after) && after != '_')
+            return true;
+        p++;
+    }
+    return false;
+}
+
+static int pinned_vreg_for_preg(func_t *fn, int preg) {
+    if (!fn || preg == PREG_NONE)
+        return -1;
+    for (int p = 0; p < fn->nparams; p++) {
+        int v = fn->param_vregs[p];
+        if (v >= 0 && v < fn->nvregs && fn->param_pins[p].preg == preg)
+            return v;
+    }
+    for (int v = 0; v < fn->nvregs; v++) {
+        if (fn->vregs[v].fixed && fn->vregs[v].prefer == preg)
+            return v;
+    }
+    return -1;
+}
+
+static void add_text_mem_reg_uses(func_t *fn, ir_insn_t *ins) {
+    if (!fn || !ins || !ins->name[0])
+        return;
+    if (ins->op != IR_LOADMEM && ins->op != IR_STOREMEM)
+        return;
+
+    for (int preg = 0; preg < NUM_PREGS; preg++) {
+        if (!text_mem_mentions_preg(ins->name, preg))
+            continue;
+        int v = pinned_vreg_for_preg(fn, preg);
+        if (v < 0)
+            continue;
+        bool duplicate = false;
+        for (int i = 0; i < ins->nextra_args; i++) {
+            if (ins_extra_arg(ins, i) == v) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate)
+            ins_set_extra_arg(ins, ins->nextra_args, v);
+    }
+}
+
 static void ins_ensure_ret_vreg(ir_insn_t *ins, int idx) {
     if (!ins || idx < 0)
         return;
@@ -1988,6 +2045,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             } else {
                 /* Label/address form: loadmem %dst, [addr] */
                 strncpy(ins->name, p, 63);
+                add_text_mem_reg_uses(fn, ins);
             }
         }
         else if (strcmp(opname, "storemem") == 0) {
@@ -2030,6 +2088,7 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                     p = bracket + 1;
                     skip_comma(&p);
                     ins->src1 = parse_vreg(p, &p);
+                    add_text_mem_reg_uses(fn, ins);
                 }
             }
         }
