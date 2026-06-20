@@ -809,6 +809,50 @@ else
     pass "api-clobbers-require: api functions require clobbers()"
 fi
 
+cat > "$TEST_TMPDIR"/t_api_arg_preserve.nir <<'NIR'
+; Binder regression: generated call-argument moves inside a preserving
+; far API are body clobbers and must be covered by the API prologue.
+.fn api_arg_preserve_helper
+.preserves AX, CX, DX, BX, BP, SI, DI, ES, CS, SS, DS, FLAGS
+.param %0, u8, "page", register, pin=AL
+.param %1, u8, "index", register, pin=CL
+.param %2, u8, "val", register, pin=BL
+    ret
+.endfn
+
+.fn api_arg_preserve_api, far, ds=none
+.preserves AX, CX, DX, BX, BP, SI, DI, ES, CS, SS, DS
+.param %0, u8, "index", register, pin=AL
+.param %1, u8, "val", register, pin=BL
+    mov %2, 2
+.vreg %2, u8
+    and %3, %1, 15
+.vreg %3, u8
+    call %4, api_arg_preserve_helper, %2, %0, %3
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_api_arg_preserve.nir \
+     -o "$TEST_TMPDIR"/t_api_arg_preserve.asm >/dev/null 2>&1; then
+    api_arg_window=$(sed -n \
+        '/api_arg_preserve_api:$/,/^[[:space:]]*retf$/p' \
+        "$TEST_TMPDIR"/t_api_arg_preserve.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_api_arg_preserve.asm \
+          -o "$TEST_TMPDIR"/t_api_arg_preserve.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$api_arg_window" | grep -q 'push CX' &&
+       printf "%s\n" "$api_arg_window" | grep -q 'mov CL, AL' &&
+       printf "%s\n" "$api_arg_window" | grep -q 'pop CX'; then
+        pass "api-arg-preserve: API saves CX used by arg routing"
+    else
+        fail "api-arg-preserve" "API arg routing clobbered preserved CX"
+    fi
+else
+    fail "api-arg-preserve" "$(
+        ./nibbind "$TEST_TMPDIR"/t_api_arg_preserve.nir \
+          -o "$TEST_TMPDIR"/t_api_arg_preserve.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/bad_clobber_cs_ss.nib <<'NIB'
 extern fn far bad_cs() clobbers(CS);
 extern fn far bad_ss() clobbers(SS);

@@ -5970,6 +5970,134 @@ static int call_arg_vreg(ir_insn_t *ins, int a) {
     return ins_extra_arg(ins, a - 2);
 }
 
+static void collect_call_arg_setup_clobbers(func_t *fn, ir_insn_t *ins,
+                                            int callee_fi, int callee_ext,
+                                            bool indirect_args,
+                                            bool *outgoing_clobbers,
+                                            bool *outgoing_bp_param) {
+    int nparams = 0;
+
+    if (callee_fi >= 0)
+        nparams = functions[callee_fi].nparams;
+    else if (callee_ext >= 0)
+        nparams = externs[callee_ext].nparams;
+
+    for (int a = 0; a < ins->nargs && a < nparams; a++) {
+        abi_place_t place = ABI_PLACE_DEFAULT;
+        int expected = PREG_NONE;
+
+        if (callee_fi >= 0) {
+            fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
+            place = callee_fa->param_places[a];
+            expected = callee_fa->param_regs[a];
+        } else if (callee_ext >= 0) {
+            place = externs[callee_ext].param_places[a];
+            expected = externs[callee_ext].param_pins[a].preg;
+        }
+        if (abi_place_is_stack(place))
+            continue;
+        if (expected == PREG_BP && outgoing_bp_param)
+            *outgoing_bp_param = true;
+        if (expected == PREG_NONE || expected == PREG_SP)
+            continue;
+
+        int arg_vreg = indirect_args ? ins_extra_arg(ins, a) :
+                       call_arg_vreg(ins, a);
+        if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
+            continue;
+
+        int actual = fn->vregs[arg_vreg].assigned;
+        if (actual == expected || pregs_alias(actual, expected))
+            continue;
+
+        int clob = (expected >= PREG_AL && expected <= PREG_BH)
+            ? preg_alias_parent[expected] : expected;
+        outgoing_clobbers[clob] = true;
+    }
+}
+
+static void collect_fixup_clobbers(func_t *fn, ir_insn_t *ins,
+                                   int insn_idx, bool *clobbers) {
+    if (ins->op == IR_CALL || ins->op == IR_MCALL || ins->op == IR_ICALL) {
+        int callee_fi = -1;
+        int callee_ext = -1;
+
+        if (ins->op != IR_ICALL) {
+            for (int fi = 0; fi < nfunctions; fi++) {
+                if (strcmp(functions[fi].name, ins->name) == 0) {
+                    callee_fi = fi;
+                    break;
+                }
+            }
+        }
+        if (callee_fi < 0) {
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    callee_ext = e;
+                    break;
+                }
+            }
+        }
+
+        bool outgoing_clobbers[NUM_PREGS];
+        memset(outgoing_clobbers, 0, sizeof(outgoing_clobbers));
+        collect_call_arg_setup_clobbers(fn, ins, callee_fi, callee_ext,
+                                        ins->op == IR_ICALL,
+                                        outgoing_clobbers, NULL);
+        for (int r = 0; r < NUM_PREGS; r++)
+            if (outgoing_clobbers[r])
+                clobbers[r] = true;
+    }
+
+    if (ins->op == IR_ALU && !ins->has_imm &&
+        is_shift_op(ins->name) &&
+        ins->src2 >= 0 && ins->src2 < fn->nvregs &&
+        fn->vregs[ins->src2].assigned != PREG_CL) {
+        int dst_preg = fn->vregs[ins->dst].assigned;
+        bool dst_is_cx = (dst_preg == PREG_CX ||
+                          dst_preg == PREG_CL ||
+                          dst_preg == PREG_CH);
+        int blk = block_of(fn, insn_idx);
+        uint32_t free = free_regs_at(fn, blk, insn_idx);
+        bool cx_free = (free >> PREG_CX) & 1;
+
+        if (cx_free && !dst_is_cx)
+            clobbers[PREG_CX] = true;
+    }
+
+    if (ins->op == IR_LOADMEM || ins->op == IR_STOREMEM) {
+        for (int preg = 0; preg < NUM_PREGS; preg++) {
+            const char *rn = preg_name[preg];
+            const char *p2 = ins->name;
+            bool found = false;
+            while ((p2 = strstr(p2, rn)) != NULL) {
+                char before = (p2 > ins->name) ? p2[-1] : '[';
+                char after = p2[strlen(rn)];
+                if (!isalpha((unsigned char)before) &&
+                    !isalpha((unsigned char)after)) {
+                    found = true;
+                    break;
+                }
+                p2++;
+            }
+            if (!found)
+                continue;
+            for (int v = 0; v < fn->nvregs; v++) {
+                if (fn->vregs[v].prefer != preg)
+                    continue;
+                if (fn->vregs[v].assigned == preg)
+                    continue;
+                if (fn->vregs[v].assigned == PREG_NONE)
+                    continue;
+                if (fn->vregs[v].def_pos > insn_idx)
+                    continue;
+                clobbers[preg] = true;
+                break;
+            }
+        }
+    }
+}
+
 static int stack_param_words(abi_place_t *places, int nparams) {
     int words = 0;
     for (int a = 0; a < nparams; a++)
@@ -6722,48 +6850,9 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             bool outgoing_clobbers[NUM_PREGS];
             memset(outgoing_clobbers, 0, sizeof(outgoing_clobbers));
             bool caller_bp_live = fn->needs_frame;
-            if (callee_fi >= 0) {
-                fn_assignment_t *callee_fa = &fn_assigns[callee_fi];
-                for (int a = 0; a < ins->nargs && a < functions[callee_fi].nparams; a++) {
-                    if (abi_place_is_stack(callee_fa->param_places[a]))
-                        continue;
-                    int expected = callee_fa->param_regs[a];
-                    if (expected == PREG_BP) {
-                        outgoing_bp_param = true;
-                    }
-                    if (expected == PREG_NONE || expected == PREG_SP)
-                        continue;
-                    int arg_vreg = call_arg_vreg(ins, a);
-                    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
-                        continue;
-                    int actual = fn->vregs[arg_vreg].assigned;
-                    if (actual == expected || pregs_alias(actual, expected))
-                        continue;
-                    int clob = (expected >= PREG_AL && expected <= PREG_BH)
-                        ? preg_alias_parent[expected] : expected;
-                    outgoing_clobbers[clob] = true;
-                }
-            } else if (callee_ext >= 0) {
-                for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
-                    if (abi_place_is_stack(externs[callee_ext].param_places[a]))
-                        continue;
-                    int expected = externs[callee_ext].param_pins[a].preg;
-                    if (expected == PREG_BP) {
-                        outgoing_bp_param = true;
-                    }
-                    if (expected == PREG_NONE || expected == PREG_SP)
-                        continue;
-                    int arg_vreg = call_arg_vreg(ins, a);
-                    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
-                        continue;
-                    int actual = fn->vregs[arg_vreg].assigned;
-                    if (actual == expected || pregs_alias(actual, expected))
-                        continue;
-                    int clob = (expected >= PREG_AL && expected <= PREG_BH)
-                        ? preg_alias_parent[expected] : expected;
-                    outgoing_clobbers[clob] = true;
-                }
-            }
+            collect_call_arg_setup_clobbers(fn, ins, callee_fi, callee_ext,
+                                            false, outgoing_clobbers,
+                                            &outgoing_bp_param);
             if (!caller_bp_live) {
                 for (int v = 0; v < fn->nvregs; v++) {
                     if (v == ins->dst) continue;
@@ -6989,24 +7078,8 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             bool call_use_pusha = false;
             bool outgoing_clobbers[NUM_PREGS];
             memset(outgoing_clobbers, 0, sizeof(outgoing_clobbers));
-            if (callee_ext >= 0) {
-                for (int a = 0; a < ins->nargs && a < externs[callee_ext].nparams; a++) {
-                    if (abi_place_is_stack(externs[callee_ext].param_places[a]))
-                        continue;
-                    int expected = externs[callee_ext].param_pins[a].preg;
-                    if (expected == PREG_NONE || expected == PREG_SP)
-                        continue;
-                    int arg_vreg = ins_extra_arg(ins, a);
-                    if (arg_vreg < 0 || arg_vreg >= fn->nvregs)
-                        continue;
-                    int actual = fn->vregs[arg_vreg].assigned;
-                    if (actual == expected || pregs_alias(actual, expected))
-                        continue;
-                    int clob = (expected >= PREG_AL && expected <= PREG_BH)
-                        ? preg_alias_parent[expected] : expected;
-                    outgoing_clobbers[clob] = true;
-                }
-            }
+            collect_call_arg_setup_clobbers(fn, ins, -1, callee_ext, true,
+                                            outgoing_clobbers, NULL);
             if (fn->needs_frame && !callee_preserves[PREG_BP]) {
                 call_saved[call_nsaved++] = PREG_BP;
             }
@@ -10538,8 +10611,10 @@ int main(int argc, char **argv) {
         fn_assignment_t *fa = &fn_assigns[fi];
 
         memset(fa->clobbers, 0, sizeof(fa->clobbers));
-        for (int ii = 0; ii < fn->ninsns; ii++)
+        for (int ii = 0; ii < fn->ninsns; ii++) {
             collect_insn_clobbers(fn, &fn->insns[ii], fa->clobbers);
+            collect_fixup_clobbers(fn, &fn->insns[ii], ii, fa->clobbers);
+        }
 
         for (int ii = 0; ii < fn->ninsns; ii++) {
             if (fn->insns[ii].op != IR_CALL &&
