@@ -7994,6 +7994,20 @@ static void emit_param_entry_moves(func_t *fn, int fn_idx) {
                 fprintf(out_asm, "    mov %s, AX\n", preg_name[assigned]);
                 fprintf(out_asm, "    pop AX\n");
             }
+        } else if (preg_is_word(assigned) && preg_is_word(expected)) {
+            if (expected == PREG_BP && fn->needs_frame) {
+                if (assigned == PREG_AX) {
+                    fprintf(out_asm, "    mov AX, [BP]\n");
+                } else {
+                    fprintf(out_asm, "    push AX\n");
+                    fprintf(out_asm, "    mov AX, [BP]\n");
+                    fprintf(out_asm, "    mov %s, AX\n", preg_name[assigned]);
+                    fprintf(out_asm, "    pop AX\n");
+                }
+            } else {
+                fprintf(out_asm, "    mov %s, %s\n", preg_name[assigned],
+                        preg_name[expected]);
+            }
         }
     }
 }

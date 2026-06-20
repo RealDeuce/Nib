@@ -853,6 +853,48 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_param_entry_move.nir <<'NIR'
+; Binder regression: if the ABI assigns a parameter to AX but the
+; allocator chooses an address register for the callee body, the function
+; entry must move AX into that chosen register before use.
+.fn param_entry_move
+.param %0, u16, "src"
+.param %1, u16, "idx"
+    loadmem %2, %0, ES
+.vreg %2, u8
+    mov %3, %2
+.vreg %3, u8
+    ret
+.endfn
+NIR
+if ./nibbind "$TEST_TMPDIR"/t_param_entry_move.nir \
+     -o "$TEST_TMPDIR"/t_param_entry_move.asm >/dev/null 2>&1; then
+    param_entry_window=$(sed -n \
+        '/param_entry_move:$/,/^[[:space:]]*ret$/p' \
+        "$TEST_TMPDIR"/t_param_entry_move.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_param_entry_move.asm \
+          -o "$TEST_TMPDIR"/t_param_entry_move.bin >/dev/null 2>&1 &&
+       printf "%s\n" "$param_entry_window" | awk '
+           /^[[:space:]]*mov[[:space:]]+(BX|SI|DI), AX$/ {
+               moved = 1
+           }
+           /\[ES:(BX|SI|DI)\]/ {
+               loaded = 1
+               if (!moved) bad = 1
+           }
+           END { exit (moved && loaded && !bad) ? 0 : 1 }
+       '; then
+        pass "param-entry-move: ABI register copied to callee storage"
+    else
+        fail "param-entry-move" "callee used relocated parameter before move"
+    fi
+else
+    fail "param-entry-move" "$(
+        ./nibbind "$TEST_TMPDIR"/t_param_entry_move.nir \
+          -o "$TEST_TMPDIR"/t_param_entry_move.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/bad_clobber_cs_ss.nib <<'NIB'
 extern fn far bad_cs() clobbers(CS);
 extern fn far bad_ss() clobbers(SS);
