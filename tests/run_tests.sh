@@ -1199,6 +1199,23 @@ if [ -f "$TEST_TMPDIR"/t_icall_multi.asm ]; then
     fi
 fi
 
+if [ -f "$TEST_TMPDIR"/t_ncall.asm ]; then
+    ncall_window=$(sed -n '/t_ncall_call_table:/,/^[[:space:]]*ret$/p' \
+        "$TEST_TMPDIR"/t_ncall.asm)
+    ntail_window=$(sed -n '/t_ncall_dispatch:/,/^[[:space:]]*ret$/p' \
+        "$TEST_TMPDIR"/t_ncall.asm)
+    if grep -q 'ncall .*, declared,' tests/t_ncall.nir &&
+       grep -q 'ntailcall .*, declared,' tests/t_ncall.nir &&
+       printf "%s\n" "$ncall_window" | grep -Eq 'call (AX|CX|DX|BX|SI|DI)' &&
+       printf "%s\n" "$ntail_window" | grep -Eq 'jmp (AX|CX|DX|BX|SI|DI)' &&
+       ! printf "%s\n" "$ncall_window" | grep -q 'call far' &&
+       ! printf "%s\n" "$ntail_window" | grep -q 'jmp far'; then
+        pass "ncall: u16 descriptor target emits near call/jump"
+    else
+        fail "ncall" "near descriptor call did not lower to near indirect control transfer"
+    fi
+fi
+
 cat > "$TEST_TMPDIR"/t_call_const_arg_spill.nir <<'NIR'
 ; Binder regression: the call argument is the constant vreg %51, not
 ; the live byte vreg %8 that remains live for the later comparison.

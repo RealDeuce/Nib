@@ -104,6 +104,7 @@ typedef enum {
     EXPR_PAREN,
     EXPR_ARRAY_INIT, /* array initializer: [expr, expr, ...] */
     EXPR_INDIRECT_CALL, /* addr as name from module(args...) */
+    EXPR_NEAR_INDIRECT_CALL, /* addr as name(args...) */
     EXPR_DEREF          /* [var] — pointer dereference */
 } expr_kind_t;
 
@@ -165,7 +166,8 @@ struct expr_node {
         /* ARRAY_INIT — [expr, expr, ...] */
         struct { expr_t *elements; } array_init;
 
-        /* INDIRECT_CALL — addr as name from module(args...) */
+        /* INDIRECT_CALL — addr as name from module(args...)
+         * NEAR_INDIRECT_CALL — addr as name(args...) */
         struct {
             expr_t *addr;           /* far pointer expression */
             char   *extern_name;    /* function name in extern namespace */
@@ -505,6 +507,8 @@ expr_t     *mk_expr_cast(expr_t *operand, type_t *target, int line);
 expr_t     *mk_expr_array_init(expr_t *elements, int line);
 expr_t     *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
                                    const char *module_name, expr_t *args, int line);
+expr_t     *mk_expr_near_indirect_call(expr_t *addr, const char *extern_name,
+                                        expr_t *args, int line);
 expr_t     *mk_expr_deref(const char *name, int line);
 expr_t     *mk_expr_deref_expr(expr_t *ptr, int line);
 

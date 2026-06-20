@@ -703,6 +703,7 @@ static void resolve_constants_expr(expr_t *e) {
             resolve_constants_expr(a);
         break;
     case EXPR_INDIRECT_CALL:
+    case EXPR_NEAR_INDIRECT_CALL:
         resolve_constants_expr(e->u.indirect_call.addr);
         for (expr_t *a = e->u.indirect_call.args; a; a = a->next)
             resolve_constants_expr(a);
@@ -862,6 +863,7 @@ static void scan_addr_taken_expr(expr_t *e) {
             scan_addr_taken_expr(e->u.array_init.elements);
             break;
         case EXPR_INDIRECT_CALL:
+        case EXPR_NEAR_INDIRECT_CALL:
             scan_addr_taken_expr(e->u.indirect_call.addr);
             scan_addr_taken_expr(e->u.indirect_call.args);
             break;
@@ -1899,6 +1901,74 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         fprintf(C.nir, "\n");
         return TV(dst, ret_type);
     }
+    case EXPR_NEAR_INDIRECT_CALL: {
+        /* addr as name(args...) */
+        typed_vreg_t addr_val = emit_expr_typed(e->u.indirect_call.addr);
+        const char *ext_name = e->u.indirect_call.extern_name;
+
+        if (addr_val.type && addr_val.type->kind == TYPE_FAR)
+            cerr(e->line, "near indirect call target must be u16, got %s",
+                 type_str(addr_val.type));
+
+        int argc = expr_list_count(e->u.indirect_call.args);
+        int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
+                                     "near indirect call arguments");
+        int *arg_seg_vregs = nib_xcalloc((size_t)argc,
+                                         sizeof(*arg_seg_vregs),
+                                         "near indirect call segment arguments");
+        for (int i = 0; i < argc; i++)
+            arg_seg_vregs[i] = -1;
+        int ai = 0;
+        for (expr_t *a = e->u.indirect_call.args; a; a = a->next, ai++) {
+            typed_vreg_t av = emit_expr_typed(a);
+            arg_vregs[ai] = av.vreg;
+            arg_seg_vregs[ai] = av.vreg_seg;
+        }
+
+        int dst = alloc_vreg();
+        type_t *ret_type = mk_type(TYPE_VOID);
+
+        const char *descriptor_name = ext_name;
+        int fi = find_indirect_descriptor(ext_name, NULL, &descriptor_name);
+        if (fi >= 0)
+            ret_type = C.functions.items[fi].return_type;
+
+        int *ir_args = nib_xcalloc((size_t)argc * 2 + 2,
+                                   sizeof(*ir_args),
+                                   "IR near indirect call arguments");
+        int nir_args = 0;
+        expr_t *arg_expr = e->u.indirect_call.args;
+        for (int i = 0; i < argc; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+            if (fi >= 0 && i < C.functions.items[fi].nparams && C.functions.items[fi].param_is_far[i]) {
+                symbol_t *asym = NULL;
+                if (arg_expr && arg_expr->kind == EXPR_IDENT)
+                    asym = sym_lookup(arg_expr->u.ident);
+                if (arg_seg_vregs[i] >= 0) {
+                    ir_args[nir_args++] = arg_vregs[i];
+                    ir_args[nir_args++] = arg_seg_vregs[i];
+                } else if (asym && asym->vreg_seg >= 0) {
+                    ir_args[nir_args++] = asym->vreg;
+                    ir_args[nir_args++] = asym->vreg_seg;
+                } else {
+                    int off_v = alloc_vreg();
+                    int seg_v = alloc_vreg();
+                    fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, arg_vregs[i]);
+                    fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, arg_vregs[i]);
+                    ir_args[nir_args++] = off_v;
+                    ir_args[nir_args++] = seg_v;
+                }
+            } else {
+                ir_args[nir_args++] = arg_vregs[i];
+            }
+        }
+
+        fprintf(C.nir, "    ncall %%%d, %%%d, %s",
+                dst, addr_val.vreg, descriptor_name);
+        for (int i = 0; i < nir_args; i++)
+            fprintf(C.nir, ", %%%d", ir_args[i]);
+        fprintf(C.nir, "\n");
+        return TV(dst, ret_type);
+    }
     case EXPR_INDEX: {
         typed_vreg_t arr = emit_expr_typed(e->u.index.array);
         typed_vreg_t idx = emit_expr_typed(e->u.index.index);
@@ -2930,23 +3000,86 @@ static void emit_stmt(stmt_t *s) {
     case STMT_TAILCALL: {
         /* tailcall expr — must be a function call */
         expr_t *e = s->u.tailcall_expr;
-        if (e->kind != EXPR_CALL) {
-            cerr(s->line, "tailcall requires a function call");
+        if (e->kind == EXPR_CALL) {
+            int argc = expr_list_count(e->u.call.args);
+            int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
+                                         "tailcall arguments");
+            int ai = 0;
+            for (expr_t *a = e->u.call.args; a; a = a->next, ai++)
+                arg_vregs[ai] = emit_expr(a);
+            const char *fn_name = "?";
+            if (e->u.call.func->kind == EXPR_IDENT)
+                fn_name = e->u.call.func->u.ident;
+            fprintf(C.nir, "    tailcall %s", fn_name);
+            for (int i = 0; i < argc; i++)
+                fprintf(C.nir, ", %%%d", arg_vregs[i]);
+            fprintf(C.nir, "\n");
             break;
         }
-        int argc = expr_list_count(e->u.call.args);
-        int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
-                                     "tailcall arguments");
-        int ai = 0;
-        for (expr_t *a = e->u.call.args; a; a = a->next, ai++)
-            arg_vregs[ai] = emit_expr(a);
-        const char *fn_name = "?";
-        if (e->u.call.func->kind == EXPR_IDENT)
-            fn_name = e->u.call.func->u.ident;
-        fprintf(C.nir, "    tailcall %s", fn_name);
-        for (int i = 0; i < argc; i++)
-            fprintf(C.nir, ", %%%d", arg_vregs[i]);
-        fprintf(C.nir, "\n");
+        if (e->kind == EXPR_NEAR_INDIRECT_CALL) {
+            typed_vreg_t target = emit_expr_typed(e->u.indirect_call.addr);
+            if (target.type && target.type->kind == TYPE_FAR)
+                cerr(s->line, "near indirect tailcall target must be u16, got %s",
+                     type_str(target.type));
+
+            int argc = expr_list_count(e->u.indirect_call.args);
+            int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
+                                         "near indirect tailcall arguments");
+            int *arg_seg_vregs = nib_xcalloc((size_t)argc,
+                                             sizeof(*arg_seg_vregs),
+                                             "near indirect tailcall segment arguments");
+            for (int i = 0; i < argc; i++)
+                arg_seg_vregs[i] = -1;
+            int ai = 0;
+            for (expr_t *a = e->u.indirect_call.args; a; a = a->next, ai++) {
+                typed_vreg_t av = emit_expr_typed(a);
+                arg_vregs[ai] = av.vreg;
+                arg_seg_vregs[ai] = av.vreg_seg;
+            }
+
+            const char *descriptor_name = e->u.indirect_call.extern_name;
+            int fi = find_indirect_descriptor(e->u.indirect_call.extern_name,
+                                              NULL, &descriptor_name);
+            int *ir_args = nib_xcalloc((size_t)argc * 2 + 2,
+                                       sizeof(*ir_args),
+                                       "IR near indirect tailcall arguments");
+            int nir_args = 0;
+            expr_t *arg_expr = e->u.indirect_call.args;
+            for (int i = 0; i < argc; i++, arg_expr = arg_expr ? arg_expr->next : NULL) {
+                if (fi >= 0 && i < C.functions.items[fi].nparams &&
+                    C.functions.items[fi].param_is_far[i]) {
+                    symbol_t *asym = NULL;
+                    if (arg_expr && arg_expr->kind == EXPR_IDENT)
+                        asym = sym_lookup(arg_expr->u.ident);
+                    if (arg_seg_vregs[i] >= 0) {
+                        ir_args[nir_args++] = arg_vregs[i];
+                        ir_args[nir_args++] = arg_seg_vregs[i];
+                    } else if (asym && asym->vreg_seg >= 0) {
+                        ir_args[nir_args++] = asym->vreg;
+                        ir_args[nir_args++] = asym->vreg_seg;
+                    } else {
+                        int off_v = alloc_vreg();
+                        int seg_v = alloc_vreg();
+                        fprintf(C.nir, "    far.off %%%d, %%%d\n",
+                                off_v, arg_vregs[i]);
+                        fprintf(C.nir, "    far.seg %%%d, %%%d\n",
+                                seg_v, arg_vregs[i]);
+                        ir_args[nir_args++] = off_v;
+                        ir_args[nir_args++] = seg_v;
+                    }
+                } else {
+                    ir_args[nir_args++] = arg_vregs[i];
+                }
+            }
+
+            fprintf(C.nir, "    ntailcall %%%d, %s",
+                    target.vreg, descriptor_name);
+            for (int i = 0; i < nir_args; i++)
+                fprintf(C.nir, ", %%%d", ir_args[i]);
+            fprintf(C.nir, "\n");
+            break;
+        }
+        cerr(s->line, "tailcall requires a function call");
         break;
     }
     case STMT_LABEL: {

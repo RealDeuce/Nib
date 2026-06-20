@@ -222,6 +222,16 @@ expr_t *mk_expr_indirect_call(expr_t *addr, const char *extern_name,
     return e;
 }
 
+expr_t *mk_expr_near_indirect_call(expr_t *addr, const char *extern_name,
+                                    expr_t *args, int line) {
+    expr_t *e = mk_expr(EXPR_NEAR_INDIRECT_CALL, line);
+    e->u.indirect_call.addr = addr;
+    e->u.indirect_call.extern_name = xstrdup(extern_name);
+    e->u.indirect_call.module_name = NULL;
+    e->u.indirect_call.args = args;
+    return e;
+}
+
 expr_t *mk_expr_deref(const char *name, int line) {
     expr_t *e = mk_expr(EXPR_DEREF, line);
     e->u.deref.expr = mk_expr_ident(name, line);

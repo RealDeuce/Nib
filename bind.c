@@ -149,7 +149,9 @@ typedef enum {
     IR_CALL,        /* call %d, name, args... */
     IR_MCALL,       /* mcall %d, %d, name, args... */
     IR_ICALL,       /* icall %d, %addr, name, args... */
+    IR_NCALL,       /* ncall %d, %addr, name, args... */
     IR_TAILCALL,    /* tailcall name, args... */
+    IR_NTAILCALL,   /* ntailcall %addr, name, args... */
     IR_GOTO_FN,     /* goto.fn name — raw jump to function, no cleanup */
     IR_CJMP,        /* conditional jump: jcc label (flag-check blocks) */
     IR_RET,         /* ret */
@@ -1975,6 +1977,23 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 ins->nargs++;
             }
         }
+        else if (strcmp(opname, "ncall") == 0) {
+            ins->op = IR_NCALL;
+            ins->dst = parse_vreg(p, &p);
+            skip_comma(&p);
+            ins->src1 = parse_vreg(p, &p);  /* near target offset */
+            skip_comma(&p);
+            p = read_word(p, ins->name, sizeof(ins->name)); /* extern name */
+            ins->nargs = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int a = parse_vreg(p, &p);
+                ins_set_extra_arg(ins, ins->nargs, a);
+                ins->nargs++;
+            }
+        }
         else if (strcmp(opname, "goto.fn") == 0) {
             ins->op = IR_GOTO_FN;
             read_word(p, ins->name, sizeof(ins->name));
@@ -1991,6 +2010,21 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
                 if (ins->nargs == 0) ins->src1 = a;
                 else if (ins->nargs == 1) ins->src2 = a;
                 else ins_set_extra_arg(ins, ins->nargs - 2, a);
+                ins->nargs++;
+            }
+        }
+        else if (strcmp(opname, "ntailcall") == 0) {
+            ins->op = IR_NTAILCALL;
+            ins->src1 = parse_vreg(p, &p);  /* near target offset */
+            skip_comma(&p);
+            p = read_word(p, ins->name, sizeof(ins->name));
+            ins->nargs = 0;
+            while (*p) {
+                skip_comma(&p);
+                p = skip_ws(p);
+                if (*p != '%') break;
+                int a = parse_vreg(p, &p);
+                ins_set_extra_arg(ins, ins->nargs, a);
                 ins->nargs++;
             }
         }
@@ -3864,6 +3898,7 @@ static void build_cfg(func_t *fn) {
         }
         if (ins->op == IR_JMP || ins->op == IR_JZ || ins->op == IR_CJMP ||
             ins->op == IR_RET || ins->op == IR_TAILCALL ||
+            ins->op == IR_NTAILCALL ||
             ins->op == IR_GOTO_FN || ins->op == IR_LOOP) {
             /* Instruction after a branch starts a new block */
             if (i + 1 < fn->ninsns)
@@ -3890,7 +3925,9 @@ static void build_cfg(func_t *fn) {
 
         /* Check if the block ends with a terminator */
         bool is_term = (term->op == IR_JMP || term->op == IR_RET ||
-                        term->op == IR_TAILCALL || term->op == IR_GOTO_FN);
+                        term->op == IR_TAILCALL ||
+                        term->op == IR_NTAILCALL ||
+                        term->op == IR_GOTO_FN);
 
         /* Conditional branch: fall-through + jump target */
         if (term->op == IR_JZ || term->op == IR_CJMP || term->op == IR_LOOP) {
@@ -4893,6 +4930,7 @@ static bool stack_cache_hard_barrier(const ir_insn_t *ins) {
         return true;
     switch (ins->op) {
     case IR_TAILCALL:
+    case IR_NTAILCALL:
     case IR_GOTO_FN:
     case IR_RET:
     case IR_FAR_LIT:
@@ -6018,11 +6056,12 @@ static void collect_call_arg_setup_clobbers(func_t *fn, ir_insn_t *ins,
 
 static void collect_fixup_clobbers(func_t *fn, ir_insn_t *ins,
                                    int insn_idx, bool *clobbers) {
-    if (ins->op == IR_CALL || ins->op == IR_MCALL || ins->op == IR_ICALL) {
+    if (ins->op == IR_CALL || ins->op == IR_MCALL ||
+        ins->op == IR_ICALL || ins->op == IR_NCALL) {
         int callee_fi = -1;
         int callee_ext = -1;
 
-        if (ins->op != IR_ICALL) {
+        if (ins->op != IR_ICALL && ins->op != IR_NCALL) {
             for (int fi = 0; fi < nfunctions; fi++) {
                 if (strcmp(functions[fi].name, ins->name) == 0) {
                     callee_fi = fi;
@@ -6042,7 +6081,8 @@ static void collect_fixup_clobbers(func_t *fn, ir_insn_t *ins,
         bool outgoing_clobbers[NUM_PREGS];
         memset(outgoing_clobbers, 0, sizeof(outgoing_clobbers));
         collect_call_arg_setup_clobbers(fn, ins, callee_fi, callee_ext,
-                                        ins->op == IR_ICALL,
+                                        ins->op == IR_ICALL ||
+                                        ins->op == IR_NCALL,
                                         outgoing_clobbers, NULL);
         for (int r = 0; r < NUM_PREGS; r++)
             if (outgoing_clobbers[r])
@@ -6155,12 +6195,12 @@ static bool call_returns_need_temp(func_t *fn) {
     for (int i = 0; i < fn->ninsns; i++) {
         ir_insn_t *ins = &fn->insns[i];
         if (ins->op != IR_CALL && ins->op != IR_MCALL &&
-            ins->op != IR_ICALL)
+            ins->op != IR_ICALL && ins->op != IR_NCALL)
             continue;
 
         int callee_fi = -1;
         int callee_ext = -1;
-        if (ins->op != IR_ICALL) {
+        if (ins->op != IR_ICALL && ins->op != IR_NCALL) {
             for (int fi = 0; fi < nfunctions; fi++) {
                 if (strcmp(functions[fi].name, ins->name) == 0) {
                     callee_fi = fi;
@@ -7057,8 +7097,8 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             continue;
         }
 
-        /* ---- Indirect far call caller-save ---- */
-        if (ins->op == IR_ICALL) {
+        /* ---- Indirect descriptor call caller-save ---- */
+        if (ins->op == IR_ICALL || ins->op == IR_NCALL) {
             bool callee_preserves[NUM_PREGS];
             memset(callee_preserves, 0, sizeof(callee_preserves));
             int callee_ext = -1;
@@ -7167,6 +7207,20 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             free(temp_expected);
             free(temp_ret);
 
+            continue;
+        }
+
+        /* ---- Near indirect tailcall argument fixup ---- */
+        if (ins->op == IR_NTAILCALL) {
+            int callee_ext = -1;
+            for (int e = 0; e < nexterns; e++) {
+                if (strcmp(externs[e].name, ins->name) == 0) {
+                    callee_ext = e;
+                    break;
+                }
+            }
+            emit_call_arg_register_moves(fn, ins, -1, callee_ext, true);
+            rins_ir_stack_cached(fn, i);
             continue;
         }
 
@@ -7864,7 +7918,8 @@ static bool flags_live_after_insn(func_t *fn, int insn_idx) {
         if (ins->op == IR_GETFLAG)
             return true;
         if (ins->op == IR_LABEL || ins->op == IR_JMP ||
-            ins->op == IR_RET || ins->op == IR_TAILCALL)
+            ins->op == IR_RET || ins->op == IR_TAILCALL ||
+            ins->op == IR_NTAILCALL)
             return false;
         if (insn_clobbers_flags(fn, ins))
             return false;
@@ -9357,6 +9412,10 @@ static void emit_function(func_t *fn) {
             break;
         }
 
+        case IR_NCALL:
+            fprintf(out_asm, "    call %s\n", vreg_asm(fn, ins->src1));
+            break;
+
         case IR_TAILCALL: {
             if (ds_explicit_save)
                 fprintf(out_asm, "    pop DS\n");
@@ -9390,6 +9449,51 @@ static void emit_function(func_t *fn) {
                 fprintf(out_asm, "    jmp far %s\n", resolve_fn_name(ins->name));
             else
                 fprintf(out_asm, "    jmp %s\n", resolve_fn_name(ins->name));
+            break;
+        }
+
+        case IR_NTAILCALL: {
+            const char *target = vreg_asm(fn, ins->src1);
+            bool target_ok = false;
+            if (ins->src1 >= 0 && ins->src1 < fn->nvregs) {
+                int preg = fn->vregs[ins->src1].assigned;
+                target_ok = preg_is_word(preg) && !(fn->needs_frame &&
+                            preg == PREG_BP);
+                for (int s = 0; s < nsave && target_ok; s++)
+                    if (pregs_alias(save_regs[s], preg))
+                        target_ok = false;
+            }
+            if (!target_ok) {
+                int temps[] = { PREG_AX, PREG_CX, PREG_DX, PREG_BX,
+                                PREG_SI, PREG_DI };
+                int temp = PREG_NONE;
+                for (size_t ti = 0; ti < sizeof(temps) / sizeof(temps[0]); ti++) {
+                    bool restored = false;
+                    for (int s = 0; s < nsave; s++)
+                        if (pregs_alias(save_regs[s], temps[ti]))
+                            restored = true;
+                    if (!restored) {
+                        temp = temps[ti];
+                        break;
+                    }
+                }
+                if (temp == PREG_NONE) {
+                    fprintf(stderr,
+                            "%s: no stable register for near indirect tailcall '%s'\n",
+                            fn->name, ins->name);
+                    temp = PREG_AX;
+                }
+                fprintf(out_asm, "    mov %s, %s\n", preg_name[temp], target);
+                target = preg_name[temp];
+            }
+            if (ds_explicit_save)
+                fprintf(out_asm, "    pop DS\n");
+            emit_asm_restore_set(save_regs, nsave, false);
+            if (fn->needs_frame) {
+                fprintf(out_asm, "    mov sp, bp\n");
+                fprintf(out_asm, "    pop bp\n");
+            }
+            fprintf(out_asm, "    jmp %s\n", target);
             break;
         }
 
@@ -9765,13 +9869,17 @@ static void build_call_graph(void) {
         func_t *fn = &functions[fi];
         for (int i = 0; i < fn->ninsns; i++) {
             ir_insn_t *ins = &fn->insns[i];
-            if (ins->op != IR_CALL && ins->op != IR_MCALL && ins->op != IR_TAILCALL &&
-                ins->op != IR_ICALL) continue;
+            if (ins->op != IR_CALL && ins->op != IR_MCALL &&
+                ins->op != IR_TAILCALL && ins->op != IR_ICALL &&
+                ins->op != IR_NCALL && ins->op != IR_NTAILCALL)
+                continue;
 
             call_edge_t *e = NIB_VEC_PUSH(&call_edges_vec, "call graph");
             memset(e, 0, sizeof(*e));
             e->caller_fn = fi;
-            e->callee_fn = (ins->op == IR_ICALL) ? -1 : find_fn(ins->name);
+            e->callee_fn = (ins->op == IR_ICALL || ins->op == IR_NCALL ||
+                            ins->op == IR_NTAILCALL) ?
+                           -1 : find_fn(ins->name);
             e->insn_idx = i;
             strncpy(e->callee_name, ins->name, 63);
             e->ret_vreg = ins->dst;
@@ -9784,8 +9892,9 @@ static void build_call_graph(void) {
                     edge_add_ret(e, ins_ret_vreg(ins, ri - 1));
             }
 
-            if (ins->op == IR_ICALL) {
-                /* icall: args are in extra_args (src1 is addr vreg) */
+            if (ins->op == IR_ICALL || ins->op == IR_NCALL ||
+                ins->op == IR_NTAILCALL) {
+                /* indirect calls: args are in extra_args (src1 is target) */
                 for (int j = 0; j < ins->nextra_args; j++) {
                     int v = ins_extra_arg(ins, j);
                     if (v >= 0)
@@ -10521,12 +10630,15 @@ int main(int argc, char **argv) {
                 fn->needs_frame = true;
                 break;
             }
-            if (ins->op == IR_CALL || ins->op == IR_MCALL) {
+            if (ins->op == IR_CALL || ins->op == IR_MCALL ||
+                ins->op == IR_NCALL) {
                 int callee_fi = -1;
                 int callee_ext = -1;
-                for (int fi2 = 0; fi2 < nfunctions; fi2++) {
-                    if (strcmp(functions[fi2].name, ins->name) == 0)
-                        { callee_fi = fi2; break; }
+                if (ins->op != IR_NCALL) {
+                    for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                        if (strcmp(functions[fi2].name, ins->name) == 0)
+                            { callee_fi = fi2; break; }
+                    }
                 }
                 if (callee_fi < 0) {
                     for (int e = 0; e < nexterns; e++) {
@@ -10633,10 +10745,12 @@ int main(int argc, char **argv) {
         for (int ii = 0; ii < fn->ninsns; ii++) {
             if (fn->insns[ii].op != IR_CALL &&
                 fn->insns[ii].op != IR_MCALL &&
-                fn->insns[ii].op != IR_ICALL)
+                fn->insns[ii].op != IR_ICALL &&
+                fn->insns[ii].op != IR_NCALL)
                 continue;
             for (int fi2 = 0; fi2 < nfunctions; fi2++) {
-                if (fn->insns[ii].op == IR_ICALL)
+                if (fn->insns[ii].op == IR_ICALL ||
+                    fn->insns[ii].op == IR_NCALL)
                     break;
                 if (strcmp(functions[fi2].name, fn->insns[ii].name) == 0 &&
                     fn_assigns[fi2].resolved) {

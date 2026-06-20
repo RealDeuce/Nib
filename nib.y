@@ -876,6 +876,10 @@ postfix_expr
         { $$ = mk_expr_indirect_call($1, $3, $5, $7, yyline); }
     | postfix_expr KW_AS IDENT KW_FROM IDENT '(' ')'
         { $$ = mk_expr_indirect_call($1, $3, $5, NULL, yyline); }
+    | postfix_expr KW_AS IDENT '(' arg_list ')'
+        { $$ = mk_expr_near_indirect_call($1, $3, $5, yyline); }
+    | postfix_expr KW_AS IDENT '(' ')'
+        { $$ = mk_expr_near_indirect_call($1, $3, NULL, yyline); }
     | primary_expr
         { $$ = $1; }
     ;

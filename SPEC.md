@@ -796,6 +796,41 @@ The compiler sets up registers according to the extern declaration,
 then emits an indirect far call (`call far [addr]`) through the
 far pointer.
 
+Near function pointers use the same descriptor idea without a module
+qualifier. For implemented Nib functions, mark the function `api` to
+emit the descriptor without writing a duplicate `extern` declaration:
+
+```
+fn api state(byte: u8 in AL) clobbers(FLAGS) {
+    ...
+}
+
+u16 target = state_table[index];
+target as state(input);
+```
+
+The `as NAME(args...)` syntax:
+- `target` — expression yielding a `u16` offset in the current code segment
+- `NAME` — extern name to look up for register assignments
+- `(args...)` — arguments, set up per the extern's register pins
+
+The compiler emits a near indirect call (`call reg16` or `call mem16`)
+through the offset. This form is useful for same-segment jump tables
+where each entry shares a declared ABI but the target is selected at
+runtime.
+
+A separate `extern fn` declaration is still valid when the target ABI is
+provided by non-Nib code or a fixed-address routine.
+
+Near descriptor calls can also be used with `tailcall`:
+
+```
+tailcall target as state(input);
+```
+
+This tears down the current frame and emits a near indirect jump through
+the selected `u16` target after setting up the descriptor's ABI.
+
 
 ## Expressions
 
