@@ -17,9 +17,15 @@
     - require loop back edges to preserve stack state,
     - allow balanced call argument pushes above cached values,
     - fall back to frame spills when states cannot be proven identical.
-  - Add byte stack-cache eligibility only after the planner can prove the
-    parent word is free at the restore point and the use-site instruction
-    does not need the sibling byte at the same time.
+  - Extend stack-cache spill planning to byte values through the paired
+    spill-word model:
+    - cache a paired low/high byte spill as its parent word when both
+      halves have compatible def/use spans;
+    - allow a single byte to use a parent-word push/pop only when the
+      sibling byte is absent, dead across the span, or restored separately
+      before any use;
+    - reject byte stack-cache candidates when the restore instruction needs
+      the sibling byte or would clobber a live parent register.
   - Add rematerialization locations for constants and labels so cheap
     values do not require frame spill homes.
 
