@@ -1929,6 +1929,75 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_stack_cache_cfg.nir <<'NIR'
+; Binder regression: a one-def/one-use spill may be stack-cached across
+; a balanced if/else merge, not only inside one straight-line block.
+.fn stack_cache_cfg
+    mov %0, 1
+    mov %1, 2
+    mov %2, 3
+    mov %3, 4
+    mov %4, 5
+    mov %5, 6
+    mov %6, 7
+    mov %7, 8
+    mov %8, 9
+    mov %9, 10
+    mov %10, 11
+    mov %11, 12
+    mov %12, 13
+    mov %13, 14
+    cmp.eq %14, %1, %2
+    jz %14, .Lelse
+    add %15, %3, %4
+    add %16, %5, %6
+    add %17, %15, %16
+    jmp .Lmerge
+.Lelse:
+    add %18, %7, %8
+    add %19, %9, %10
+    add %17, %18, %19
+.Lmerge:
+    add %20, %11, %12
+    add %21, %0, %13
+    add %22, %21, %20
+    add %23, %22, %17
+    retval %23
+    ret
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_cfg.txt \
+     --pressure-fn stack_cache_cfg "$TEST_TMPDIR"/t_stack_cache_cfg.nir \
+     -o "$TEST_TMPDIR"/t_stack_cache_cfg.asm >/dev/null 2>&1; then
+    if ./nibasm "$TEST_TMPDIR"/t_stack_cache_cfg.asm \
+          -o "$TEST_TMPDIR"/t_stack_cache_cfg.bin >/dev/null 2>&1 &&
+       grep -q '^spill-actions: .*stack-cache-push=[1-9]' \
+          "$TEST_TMPDIR"/t_stack_cache_cfg.txt &&
+       grep -q '^spill-actions: .*stack-cache-pop=[1-9]' \
+          "$TEST_TMPDIR"/t_stack_cache_cfg.txt &&
+       awk '
+           /stack_cache_cfg:$/ { in_fn = 1 }
+           in_fn && /stack_cache_cfg_\.Lmerge:$/ { in_merge = 1 }
+           in_fn && /^[[:space:]]*push[[:space:]]+[A-Z][A-Z]?$/ &&
+               !in_merge { push_before_merge = 1 }
+           in_fn && /^[[:space:]]*pop[[:space:]]+[A-Z][A-Z]?$/ &&
+               in_merge { pop_after_merge = 1 }
+           /^$/ && in_fn { in_fn = 0 }
+           END { exit (push_before_merge && pop_after_merge) ? 0 : 1 }
+       ' "$TEST_TMPDIR"/t_stack_cache_cfg.asm; then
+        pass "stack-cache-cfg: branch/merge spill uses push/pop cache"
+    else
+        fail "stack-cache-cfg" "branch/merge stack-cache route missing"
+    fi
+else
+    fail "stack-cache-cfg" "$(
+        ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_cfg.txt \
+          --pressure-fn stack_cache_cfg \
+          "$TEST_TMPDIR"/t_stack_cache_cfg.nir \
+          -o "$TEST_TMPDIR"/t_stack_cache_cfg.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_high_vregs.nir <<'NIR'
 ; Binder regression: functions with vregs above 255 must still get
 ; real registers/spills and address operands, not PREG_NONE/(null).

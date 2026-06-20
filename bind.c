@@ -4735,20 +4735,13 @@ static bool insn_uses_vreg(const ir_insn_t *ins, int v) {
     return insn_reads_dst(ins) && ins->dst == v;
 }
 
-static bool stack_cache_barrier(const ir_insn_t *ins) {
+static bool stack_cache_hard_barrier(const ir_insn_t *ins) {
     if (!ins)
         return true;
     switch (ins->op) {
-    case IR_CALL:
-    case IR_MCALL:
-    case IR_ICALL:
     case IR_TAILCALL:
     case IR_GOTO_FN:
     case IR_RET:
-    case IR_JMP:
-    case IR_JZ:
-    case IR_CJMP:
-    case IR_LOOP:
     case IR_FAR_LIT:
     case IR_FRAME_ENTER:
     case IR_FRAME_LEAVE:
@@ -4757,6 +4750,127 @@ static bool stack_cache_barrier(const ir_insn_t *ins) {
     default:
         return false;
     }
+}
+
+static bool stack_cache_has_hard_barrier(func_t *fn, int start, int end) {
+    if (start < 0)
+        start = 0;
+    if (end > fn->ninsns)
+        end = fn->ninsns;
+    for (int i = start; i < end; i++)
+        if (stack_cache_hard_barrier(&fn->insns[i]))
+            return true;
+    return false;
+}
+
+static bool path_reaches_block_without_def(func_t *fn, int block,
+                                           int def_block, int use_block,
+                                           bool *visited) {
+    if (block < 0 || block >= fn->nblocks)
+        return false;
+    if (block == def_block)
+        return false;
+    if (block == use_block)
+        return true;
+    if (visited[block])
+        return false;
+    visited[block] = true;
+
+    bblock_t *bb = &fn->blocks[block];
+    for (int s = 0; s < bb->nsuccs; s++)
+        if (path_reaches_block_without_def(fn, bb->succs[s],
+                                           def_block, use_block,
+                                           visited))
+            return true;
+    return false;
+}
+
+static bool use_block_is_dominated_by_def(func_t *fn, int def_block,
+                                          int use_block) {
+    if (def_block == use_block)
+        return true;
+    if (fn->nblocks == 0)
+        return false;
+
+    bool *visited = nib_xcalloc((size_t)fn->nblocks, sizeof(*visited),
+                                "stack-cache dominance marks");
+    bool reaches = path_reaches_block_without_def(fn, 0, def_block,
+                                                  use_block, visited);
+    free(visited);
+    return !reaches;
+}
+
+static bool all_paths_reach_stack_cache_use(func_t *fn, int block,
+                                            int def, int use,
+                                            int def_block, int use_block,
+                                            bool *visiting, int *memo) {
+    if (block < 0 || block >= fn->nblocks)
+        return false;
+    if (visiting[block])
+        return false;
+    if (memo[block] >= 0)
+        return memo[block] != 0;
+
+    bblock_t *bb = &fn->blocks[block];
+    int scan_start = bb->start;
+    int scan_end = bb->end;
+    if (block == def_block)
+        scan_start = def + 1;
+    if (block == use_block)
+        scan_end = use;
+
+    if (stack_cache_has_hard_barrier(fn, scan_start, scan_end)) {
+        memo[block] = 0;
+        return false;
+    }
+
+    if (block == use_block) {
+        memo[block] = 1;
+        return true;
+    }
+
+    if (bb->nsuccs == 0) {
+        memo[block] = 0;
+        return false;
+    }
+
+    visiting[block] = true;
+    bool ok = true;
+    for (int s = 0; s < bb->nsuccs; s++) {
+        if (!all_paths_reach_stack_cache_use(fn, bb->succs[s], def, use,
+                                             def_block, use_block,
+                                             visiting, memo)) {
+            ok = false;
+            break;
+        }
+    }
+    visiting[block] = false;
+    memo[block] = ok ? 1 : 0;
+    return ok;
+}
+
+static bool stack_cache_cfg_span_ok(func_t *fn, int def, int use) {
+    int def_block = block_of(fn, def);
+    int use_block = block_of(fn, use);
+
+    if (def_block == use_block)
+        return !stack_cache_has_hard_barrier(fn, def + 1, use);
+
+    if (!use_block_is_dominated_by_def(fn, def_block, use_block))
+        return false;
+
+    bool *visiting = nib_xcalloc((size_t)fn->nblocks, sizeof(*visiting),
+                                 "stack-cache CFG recursion marks");
+    int *memo = nib_xmalloc((size_t)fn->nblocks * sizeof(*memo),
+                            "stack-cache CFG memo");
+    for (int b = 0; b < fn->nblocks; b++)
+        memo[b] = -1;
+    bool ok = all_paths_reach_stack_cache_use(fn, def_block, def, use,
+                                              def_block, use_block,
+                                              visiting, memo);
+    free(memo);
+    free(visiting);
+    return ok;
 }
 
 static bool find_stack_cache_span(func_t *fn, int v, int *def_out,
@@ -4777,14 +4891,8 @@ static bool find_stack_cache_span(func_t *fn, int v, int *def_out,
     if (ndefs != 1 || nuses != 1 || def < 0 || use <= def)
         return false;
 
-    int def_block = block_of(fn, def);
-    int use_block = block_of(fn, use);
-    if (def_block != use_block)
+    if (!stack_cache_cfg_span_ok(fn, def, use))
         return false;
-
-    for (int i = def + 1; i < use; i++)
-        if (stack_cache_barrier(&fn->insns[i]))
-            return false;
 
     *def_out = def;
     *use_out = use;
