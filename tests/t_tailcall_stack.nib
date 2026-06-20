@@ -1,0 +1,13 @@
+// Test: stack ABI arguments in direct tailcalls.
+
+fn stack_target(a: u16 in stack, b: u16 in stack) -> u16 {
+    return a + b;
+}
+
+fn stack_forward(a: u16 in stack, b: u16 in stack) -> u16 {
+    tailcall stack_target(a, b);
+}
+
+fn stack_swap(a: u16 in stack, b: u16 in stack) -> u16 {
+    tailcall stack_target(b, a);
+}

@@ -1448,6 +1448,20 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         if (e->u.call.func->kind == EXPR_IDENT)
             early_fn_name = e->u.call.func->u.ident;
 
+        if (strcmp(early_fn_name, "assume") == 0) {
+            int argc = expr_list_count(e->u.call.args);
+            if (argc != 1) {
+                cerr(e->line, "assume() takes exactly one argument");
+                return TV(-1, mk_type(TYPE_VOID));
+            }
+            typed_vreg_t cond = emit_expr_typed(e->u.call.args);
+            if (cond.type && cond.type->kind != TYPE_BOOL)
+                cerr(e->line, "assume() requires bool, got %s",
+                     type_str(cond.type));
+            fprintf(C.nir, "    assume %%%d\n", cond.vreg);
+            return TV(-1, mk_type(TYPE_VOID));
+        }
+
         if (strcmp(early_fn_name, "port_in") == 0) {
             int dst = alloc_vreg();
             expr_t *port_expr = e->u.call.args;

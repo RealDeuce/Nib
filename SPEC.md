@@ -1056,6 +1056,22 @@ Builtins are compiler-intrinsic functions that map directly to V20
 instructions. They look like function calls but are always inlined —
 there is no call overhead.
 
+### Optimizer assumptions
+
+```
+assume(cond)
+```
+
+`assume()` tells the compiler that a boolean condition is true at that
+program point. It emits no runtime check; if the condition is false,
+behavior is undefined. The binder may use the fact to remove immediately
+redundant branches or other code that only exists to handle the assumed
+false path.
+
+```
+assume(count != 0);
+```
+
 ### String operations
 
 Block memory operations using the V20 string instructions with REP

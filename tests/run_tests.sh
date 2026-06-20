@@ -2991,6 +2991,45 @@ if [ -f "$TEST_TMPDIR"/t_loop_body.asm ]; then
     fi
 fi
 
+# Generic codegen optimizations: direct conditional gotos and in-place
+# induction updates should not need compare-skip-jump or temp-copy churn.
+if [ -f "$TEST_TMPDIR"/t_codegen_opt.asm ]; then
+    branch_window=$(sed -n '/t_codegen_opt_branch_to_goto:/,/^t_codegen_opt_count_down:/p' "$TEST_TMPDIR"/t_codegen_opt.asm)
+    count_window=$(sed -n '/t_codegen_opt_count_down:/,/^t_codegen_opt_bump:/p' "$TEST_TMPDIR"/t_codegen_opt.asm)
+    bump_window=$(sed -n '/t_codegen_opt_bump:/,/^t_codegen_opt_assume_branch:/p' "$TEST_TMPDIR"/t_codegen_opt.asm)
+    assume_window=$(sed -n '/t_codegen_opt_assume_branch:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_codegen_opt.asm)
+    if printf "%s\n" "$branch_window" | grep -q 'je t_codegen_opt_branch_to_goto_zero' &&
+       ! printf "%s\n" "$branch_window" | grep -q 'jmp t_codegen_opt_branch_to_goto_zero' &&
+       printf "%s\n" "$count_window" | grep -q 'dec ' &&
+       printf "%s\n" "$count_window" | grep -q 'jnz t_codegen_opt_count_down_loop' &&
+       ! printf "%s\n" "$count_window" | grep -q 'cmp .*0' &&
+       printf "%s\n" "$bump_window" | grep -q 'inc ' &&
+       printf "%s\n" "$assume_window" | grep -q 'jmp t_codegen_opt_assume_branch_zero' &&
+       ! printf "%s\n" "$assume_window" | grep -q 'cmp '; then
+        pass "codegen-opt: direct branches and in-place updates emitted"
+    else
+        fail "codegen-opt" "expected direct branch/update patterns not found"
+    fi
+fi
+
+# Direct tailcalls with stack ABI args can forward existing slots without
+# rebuilding a call area; changed slots are materialized before cleanup.
+if [ -f "$TEST_TMPDIR"/t_tailcall_stack.asm ]; then
+    forward_window=$(sed -n '/t_tailcall_stack_stack_forward:/,/^t_tailcall_stack_stack_swap:/p' "$TEST_TMPDIR"/t_tailcall_stack.asm)
+    swap_window=$(sed -n '/t_tailcall_stack_stack_swap:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_tailcall_stack.asm)
+    if printf "%s\n" "$forward_window" | grep -q 'jmp t_tailcall_stack_stack_target' &&
+       ! printf "%s\n" "$forward_window" | grep -q 'push \[BP+\|pop \[BP+' &&
+       printf "%s\n" "$swap_window" | grep -q 'push \[BP+6\]' &&
+       printf "%s\n" "$swap_window" | grep -q 'push \[BP+4\]' &&
+       printf "%s\n" "$swap_window" | grep -q 'pop \[BP+6\]' &&
+       printf "%s\n" "$swap_window" | grep -q 'pop \[BP+4\]' &&
+       printf "%s\n" "$swap_window" | grep -q 'jmp t_tailcall_stack_stack_target'; then
+        pass "tailcall-stack: stack ABI args forwarded or materialized"
+    else
+        fail "tailcall-stack" "stack tailcall arguments not forwarded correctly"
+    fi
+fi
+
 # Pointer deref: near [var] must use DS-default addressable register (BX, SI, DI)
 if [ -f "$TEST_TMPDIR"/t_deref.asm ]; then
     if grep -q '\[BX\]\|mov \[SI\]\|mov \[DI\]' "$TEST_TMPDIR"/t_deref.asm && ! grep -q '\[AX\]\|\[CX\]\|\[DX\]' "$TEST_TMPDIR"/t_deref.asm; then

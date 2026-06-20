@@ -167,6 +167,7 @@ typedef enum {
     IR_SETFLAG,     /* setflag FLAG, %val */
     IR_GETFLAG,     /* getflag %d, FLAG */
     IR_TOGGLEFLAG,  /* toggleflag FLAG */
+    IR_ASSUME,      /* assume %cond — optimizer contract */
     IR_LOOP,        /* loop label */
     IR_BREAK,       /* break */
     IR_CONTINUE,    /* continue */
@@ -616,6 +617,7 @@ static const char *resolve_const_label(func_t *fn, const char *name);
 static const char *resolve_fn_name(const char *name);
 static const char *remat_asm_operand(func_t *fn, int v);
 static const char *vreg_asm(func_t *fn, int v);
+static const char *vreg_asm_sized(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
 static bool vreg_storage_is_remat(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
@@ -2179,6 +2181,10 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
         else if (strcmp(opname, "toggleflag") == 0) {
             ins->op = IR_TOGGLEFLAG;
             read_word(p, ins->name, sizeof(ins->name));
+        }
+        else if (strcmp(opname, "assume") == 0) {
+            ins->op = IR_ASSUME;
+            ins->src1 = parse_vreg(p, &p);
         }
         else if (strcmp(opname, "loop") == 0) {
             ins->op = IR_LOOP;
@@ -7099,6 +7105,13 @@ static void rins_pop_bp_slot(func_t *fn, int bp_off, bool is_byte) {
     }
 }
 
+static bool vreg_is_same_stack_slot(func_t *fn, int v, int bp_off) {
+    if (v < 0 || v >= fn->nvregs)
+        return false;
+    return fn->vregs[v].is_stack_home &&
+           fn->vregs[v].stack_offset == bp_off;
+}
+
 static bool preg_is_byte(int preg) {
     return preg >= PREG_AL && preg <= PREG_BH;
 }
@@ -7927,6 +7940,83 @@ static void insert_fixup_moves(func_t *fn, int fn_idx) {
             free(temp_expected);
             free(temp_ret);
 
+            continue;
+        }
+
+        /* ---- Direct tailcall stack-argument forwarding ---- */
+        if (ins->op == IR_TAILCALL) {
+            int callee_fi = -1;
+            int callee_ext = -1;
+            for (int fi2 = 0; fi2 < nfunctions; fi2++) {
+                if (strcmp(functions[fi2].name, ins->name) == 0) {
+                    callee_fi = fi2;
+                    break;
+                }
+            }
+            if (callee_fi < 0) {
+                for (int e = 0; e < nexterns; e++) {
+                    if (strcmp(externs[e].name, ins->name) == 0) {
+                        callee_ext = e;
+                        break;
+                    }
+                }
+            }
+
+            int nparams = 0;
+            if (callee_fi >= 0)
+                nparams = functions[callee_fi].nparams;
+            else if (callee_ext >= 0)
+                nparams = externs[callee_ext].nparams;
+
+            typedef struct {
+                int src;
+                int off;
+                bool is_byte;
+            } stack_tail_arg_t;
+            stack_tail_arg_t *stack_args = NULL;
+            int nstack_args = 0;
+            int cap_stack_args = 0;
+
+            for (int a = 0; a < ins->nargs && a < nparams; a++) {
+                abi_place_t place = ABI_PLACE_DEFAULT;
+                int off = 0;
+                if (callee_fi >= 0) {
+                    place = fn_assigns[callee_fi].param_places[a];
+                    off = fn_assigns[callee_fi].param_stack_offsets[a];
+                } else if (callee_ext >= 0) {
+                    place = externs[callee_ext].param_places[a];
+                    off = externs[callee_ext].param_stack_offsets[a];
+                }
+                if (!abi_place_is_stack(place))
+                    continue;
+
+                int src = call_arg_vreg(ins, a);
+                if (vreg_is_same_stack_slot(fn, src, off))
+                    continue;
+                if (nstack_args >= cap_stack_args) {
+                    int new_cap = cap_stack_args ? cap_stack_args * 2 : 4;
+                    stack_args = nib_xrealloc_array(stack_args,
+                                                    (size_t)new_cap,
+                                                    sizeof(stack_args[0]),
+                                                    "tailcall stack args");
+                    cap_stack_args = new_cap;
+                }
+                stack_args[nstack_args].src = src;
+                stack_args[nstack_args].off = off;
+                stack_args[nstack_args].is_byte =
+                    (src >= 0 && src < fn->nvregs &&
+                     fn->vregs[src].is_byte);
+                nstack_args++;
+            }
+
+            for (int a = 0; a < nstack_args; a++)
+                rins_push_vreg_temp(fn, stack_args[a].src);
+            for (int a = nstack_args - 1; a >= 0; a--)
+                rins_pop_bp_slot(fn, stack_args[a].off,
+                                 stack_args[a].is_byte);
+            free(stack_args);
+
+            rins_ir_stack_cached(fn, i);
             continue;
         }
 
@@ -9343,9 +9433,116 @@ static int next_effective_insn(func_t *fn, int i) {
     return -1;
 }
 
+static int prev_effective_insn(func_t *fn, int i) {
+    i--;
+    while (i >= 0) {
+        if (fn->insns[i].op != IR_NOP && fn->insns[i].op != IR_PREFER)
+            return i;
+        i--;
+    }
+    return -1;
+}
+
 static bool ir_mov_vv(ir_insn_t *ins, int dst, int src) {
     return ins->op == IR_MOV && !ins->has_imm && !ins->name[0] &&
            ins->dst == dst && ins->src1 == src;
+}
+
+static bool ir_label_named(ir_insn_t *ins, const char *name) {
+    return ins->op == IR_LABEL && strcmp(ins->name, name) == 0;
+}
+
+static bool cmp_defs_equivalent(ir_insn_t *a, ir_insn_t *b) {
+    if (!a || !b)
+        return false;
+    if (a->op != b->op || (a->op != IR_CMP && a->op != IR_ALU))
+        return false;
+    return strcmp(a->name, b->name) == 0 &&
+           a->src1 == b->src1 &&
+           a->src2 == b->src2 &&
+           a->has_imm == b->has_imm &&
+           (!a->has_imm || a->imm == b->imm);
+}
+
+static bool jz_condition_assumed_true(func_t *fn, int insn_idx,
+                                      int cond_vreg) {
+    int p = prev_effective_insn(fn, insn_idx);
+    if (p >= 0 && fn->insns[p].op == IR_ASSUME &&
+        fn->insns[p].src1 == cond_vreg)
+        return true;
+
+    ir_insn_t *cond_def = find_vreg_def(fn, insn_idx, cond_vreg);
+    if (!cond_def)
+        return false;
+    int def_idx = (int)(cond_def - fn->insns);
+    p = prev_effective_insn(fn, def_idx);
+    if (p < 0 || fn->insns[p].op != IR_ASSUME)
+        return false;
+    if (fn->insns[p].src1 == cond_vreg)
+        return true;
+
+    ir_insn_t *assume_def = find_vreg_def(fn, p, fn->insns[p].src1);
+    return cmp_defs_equivalent(assume_def, cond_def);
+}
+
+static const char *cmp_jcc_for_truth(const char *op, bool jump_if_true) {
+    if (strcmp(op, "cmp.eq") == 0)  return jump_if_true ? "je"  : "jne";
+    if (strcmp(op, "cmp.ne") == 0)  return jump_if_true ? "jne" : "je";
+    if (strcmp(op, "cmp.b") == 0)   return jump_if_true ? "jb"  : "jnb";
+    if (strcmp(op, "cmp.a") == 0)   return jump_if_true ? "ja"  : "jbe";
+    if (strcmp(op, "cmp.be") == 0)  return jump_if_true ? "jbe" : "ja";
+    if (strcmp(op, "cmp.ae") == 0)  return jump_if_true ? "jae" : "jb";
+    if (strcmp(op, "cmp.l") == 0)   return jump_if_true ? "jl"  : "jnl";
+    if (strcmp(op, "cmp.g") == 0)   return jump_if_true ? "jg"  : "jle";
+    if (strcmp(op, "cmp.le") == 0)  return jump_if_true ? "jle" : "jg";
+    if (strcmp(op, "cmp.ge") == 0)  return jump_if_true ? "jge" : "jl";
+    return NULL;
+}
+
+static bool emit_condition_branch(func_t *fn, int insn_idx, int cond_vreg,
+                                  const char *label, bool jump_if_true) {
+    ir_insn_t *def = find_vreg_def(fn, insn_idx, cond_vreg);
+    if (def && def->op == IR_GETFLAG) {
+        const char *jcc = jump_if_true ? flag_jcc_if_set(def->name) :
+                          flag_jcc_if_clear(def->name);
+        if (jcc) {
+            fprintf(out_asm, "    %s %s\n", jcc, scoped_label(fn, label));
+            return true;
+        }
+    } else if (def && def->op == IR_UNARY &&
+               strcmp(def->name, "lnot") == 0) {
+        ir_insn_t *src_def = find_vreg_def(fn, insn_idx, def->src1);
+        if (src_def && src_def->op == IR_GETFLAG) {
+            const char *jcc = jump_if_true ?
+                              flag_jcc_if_clear(src_def->name) :
+                              flag_jcc_if_set(src_def->name);
+            if (jcc) {
+                fprintf(out_asm, "    %s %s\n", jcc,
+                        scoped_label(fn, label));
+                return true;
+            }
+        }
+    }
+
+    for (int j = insn_idx - 1; j >= 0; j--) {
+        ir_insn_t *cmp = &fn->insns[j];
+        if ((cmp->op == IR_ALU || cmp->op == IR_CMP) &&
+            cmp->dst == cond_vreg) {
+            const char *jcc = cmp_jcc_for_truth(cmp->name, jump_if_true);
+            if (!jcc)
+                break;
+            emit_cmp_operands(fn, cmp, j);
+            fprintf(out_asm, "    %s %s\n", jcc, scoped_label(fn, label));
+            return true;
+        }
+        if (cmp->op == IR_LABEL || cmp->op == IR_JMP)
+            break;
+    }
+
+    fprintf(out_asm, "    cmp %s, 0\n", vreg_asm_sized(fn, cond_vreg));
+    fprintf(out_asm, "    %s %s\n", jump_if_true ? "jne" : "je",
+            scoped_label(fn, label));
+    return true;
 }
 
 static bool byte_shift_imm_exact(func_t *fn, ir_insn_t *ins, const char *op,
@@ -9377,6 +9574,80 @@ static bool preg_range_occupied_except(func_t *fn, int preg, int start,
             return true;
     }
     return false;
+}
+
+static bool is_add_sub_imm_update(ir_insn_t *alu, ir_insn_t *mov) {
+    if (alu->op != IR_ALU || !alu->has_imm ||
+        (strcmp(alu->name, "add") != 0 && strcmp(alu->name, "sub") != 0))
+        return false;
+    return ir_mov_vv(mov, alu->src1, alu->dst);
+}
+
+static void emit_direct_update(func_t *fn, ir_insn_t *alu, int alu_idx,
+                               bool flags_are_consumed) {
+    const char *dst = vreg_asm_sized(fn, alu->src1);
+    bool cf_live = flags_live_after_insn(fn, alu_idx) && !flags_are_consumed;
+    if (!cf_live && alu->imm == 1 && strcmp(alu->name, "add") == 0) {
+        fprintf(out_asm, "    inc %s\n", dst);
+    } else if (!cf_live && alu->imm == 1 && strcmp(alu->name, "sub") == 0) {
+        fprintf(out_asm, "    dec %s\n", dst);
+    } else {
+        fprintf(out_asm, "    %s %s, %d\n", alu->name, dst, alu->imm);
+    }
+}
+
+static bool emit_update_branch_pattern(func_t *fn, int i, int *skip_to) {
+    int m = next_effective_insn(fn, i + 1);
+    int c = m >= 0 ? next_effective_insn(fn, m + 1) : -1;
+    int z = c >= 0 ? next_effective_insn(fn, c + 1) : -1;
+    int j = z >= 0 ? next_effective_insn(fn, z + 1) : -1;
+    int l = j >= 0 ? next_effective_insn(fn, j + 1) : -1;
+    if (m < 0 || c < 0 || z < 0 || j < 0 || l < 0)
+        return false;
+
+    ir_insn_t *alu = &fn->insns[i];
+    ir_insn_t *mov = &fn->insns[m];
+    ir_insn_t *cmp = &fn->insns[c];
+    ir_insn_t *jz = &fn->insns[z];
+    ir_insn_t *jmp = &fn->insns[j];
+    ir_insn_t *label = &fn->insns[l];
+    if (!is_add_sub_imm_update(alu, mov))
+        return false;
+    if (cmp->op != IR_CMP || !cmp->has_imm || cmp->imm != 0 ||
+        cmp->src1 != alu->src1 ||
+        (strcmp(cmp->name, "cmp.ne") != 0 &&
+         strcmp(cmp->name, "cmp.eq") != 0))
+        return false;
+    if (jz->op != IR_JZ || jz->src1 != cmp->dst ||
+        jmp->op != IR_JMP || !ir_label_named(label, jz->name))
+        return false;
+    if (vreg_live_after_insn(fn, m, alu->dst))
+        return false;
+
+    emit_direct_update(fn, alu, i, true);
+    fprintf(out_asm, "    %s %s\n",
+            strcmp(cmp->name, "cmp.ne") == 0 ? "jnz" : "jz",
+            scoped_label(fn, jmp->name));
+    *skip_to = j;
+    return true;
+}
+
+static bool emit_direct_update_pattern(func_t *fn, int i, int *skip_to) {
+    int m = next_effective_insn(fn, i + 1);
+    if (m < 0)
+        return false;
+    ir_insn_t *alu = &fn->insns[i];
+    ir_insn_t *mov = &fn->insns[m];
+    if (!is_add_sub_imm_update(alu, mov))
+        return false;
+    if (block_of(fn, i) != block_of(fn, m))
+        return false;
+    if (vreg_live_after_insn(fn, m, alu->dst))
+        return false;
+
+    emit_direct_update(fn, alu, i, false);
+    *skip_to = m;
+    return true;
 }
 
 static bool load_store_same_mem(ir_insn_t *load, ir_insn_t *store) {
@@ -9753,8 +10024,15 @@ static void emit_function(func_t *fn) {
         if (emit_mem_rmw_pattern(fn, i, &skip_ir_until))
             continue;
 
+        if (emit_update_branch_pattern(fn, i, &skip_ir_until))
+            continue;
+
+        if (emit_direct_update_pattern(fn, i, &skip_ir_until))
+            continue;
+
         switch (ins->op) {
         case IR_PREFER:
+        case IR_ASSUME:
         case IR_NOP:
             break;
 
@@ -9951,59 +10229,24 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_JZ: {
-            /* Find the preceding CMP that defined this condition vreg */
-            const char *jcc = "jz"; /* fallback */
-            ir_insn_t *def = find_vreg_def(fn, i, ins->src1);
-            if (def && def->op == IR_GETFLAG) {
-                const char *fjcc = flag_jcc_if_clear(def->name);
-                if (fjcc) {
-                    fprintf(out_asm, "    %s %s\n", fjcc,
-                            scoped_label(fn, ins->name));
-                    break;
+            int j = next_effective_insn(fn, i + 1);
+            int l = j >= 0 ? next_effective_insn(fn, j + 1) : -1;
+            if (jz_condition_assumed_true(fn, i, ins->src1)) {
+                if (j >= 0 && l >= 0 && fn->insns[j].op == IR_JMP &&
+                    ir_label_named(&fn->insns[l], ins->name)) {
+                    fprintf(out_asm, "    jmp %s\n",
+                            scoped_label(fn, fn->insns[j].name));
+                    skip_ir_until = j;
                 }
-            } else if (def && def->op == IR_UNARY &&
-                       strcmp(def->name, "lnot") == 0) {
-                ir_insn_t *src_def = find_vreg_def(fn, i, def->src1);
-                if (src_def && src_def->op == IR_GETFLAG) {
-                    const char *fjcc = flag_jcc_if_set(src_def->name);
-                    if (fjcc) {
-                        fprintf(out_asm, "    %s %s\n", fjcc,
-                                scoped_label(fn, ins->name));
-                        break;
-                    }
-                }
+                break;
             }
-            for (int j = i - 1; j >= 0; j--) {
-                ir_insn_t *cmp = &fn->insns[j];
-                if (cmp->op == IR_ALU || cmp->op == IR_CMP) {
-                    if (cmp->dst == ins->src1) {
-                        emit_cmp_operands(fn, cmp, j);
-                        /* Map comparison kind to Jcc — note: jz means
-                           "jump if condition NOT met" (the condition
-                           vreg is zero), so we invert */
-                        const char *op = cmp->name;
-                        if (strcmp(op, "cmp.eq") == 0)       jcc = "jne";
-                        else if (strcmp(op, "cmp.ne") == 0)  jcc = "je";
-                        else if (strcmp(op, "cmp.b") == 0)   jcc = "jnb";
-                        else if (strcmp(op, "cmp.a") == 0)   jcc = "jbe";
-                        else if (strcmp(op, "cmp.be") == 0)  jcc = "ja";
-                        else if (strcmp(op, "cmp.ae") == 0)  jcc = "jb";
-                        else if (strcmp(op, "cmp.l") == 0)   jcc = "jnl";
-                        else if (strcmp(op, "cmp.g") == 0)   jcc = "jle";
-                        else if (strcmp(op, "cmp.le") == 0)  jcc = "jg";
-                        else if (strcmp(op, "cmp.ge") == 0)  jcc = "jl";
-                        break;
-                    }
-                }
-                if (cmp->op == IR_LABEL || cmp->op == IR_JMP) break;
-            }
-            if (strcmp(jcc, "jz") == 0) {
-                fprintf(out_asm, "    cmp %s, 0\n",
-                        vreg_asm_sized(fn, ins->src1));
-                fprintf(out_asm, "    je %s\n", scoped_label(fn, ins->name));
+            if (j >= 0 && l >= 0 && fn->insns[j].op == IR_JMP &&
+                ir_label_named(&fn->insns[l], ins->name)) {
+                emit_condition_branch(fn, i, ins->src1,
+                                      fn->insns[j].name, true);
+                skip_ir_until = j;
             } else {
-                fprintf(out_asm, "    %s %s\n", jcc,
-                        scoped_label(fn, ins->name));
+                emit_condition_branch(fn, i, ins->src1, ins->name, false);
             }
             break;
         }
