@@ -2069,6 +2069,88 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_stack_cache_byte_pair.nir <<'NIR'
+; Binder regression: paired low/high byte spills sharing one spill word may
+; be cached with one parent-word push/pop across a high-pressure middle.
+.fn stack_cache_byte_pair
+.param %0, seg, "src_seg", register, pin=ES
+.param %1, u16, "src", register, pin=BX
+.param %2, u16, "dst", register, pin=SI
+    loadmem %3, %1, ES
+.vreg %3, u8
+    mov %4, %3
+.vreg %4, u8, const
+    shr %5, %4, 1
+.vreg %5, u8
+    mov %6, %5
+.vreg %6, u8, const
+    shl %7, %4, 7
+.vreg %7, u8
+    mov %8, %7
+.vreg %8, u8, const
+.vreg %40, u8, pin=AL
+    mov %40, 1
+.vreg %41, u8, pin=AH
+    mov %41, 2
+.vreg %42, u8, pin=BL
+    mov %42, 3
+.vreg %43, u8, pin=BH
+    mov %43, 4
+.vreg %44, u8, pin=CL
+    mov %44, 5
+.vreg %45, u8, pin=CH
+    mov %45, 6
+.vreg %46, u8, pin=DL
+    mov %46, 7
+.vreg %47, u8, pin=DH
+    mov %47, 8
+    add %50, %40, %41
+.vreg %50, u8
+    add %51, %42, %43
+.vreg %51, u8
+    add %52, %44, %45
+.vreg %52, u8
+    add %53, %46, %47
+.vreg %53, u8
+.vreg %6, u8
+    storemem %2, %6
+    add %9, %2, 1
+.vreg %8, u8
+    storemem %9, %8
+    ret
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_byte_pair.txt \
+     --pressure-fn stack_cache_byte_pair \
+     "$TEST_TMPDIR"/t_stack_cache_byte_pair.nir \
+     -o "$TEST_TMPDIR"/t_stack_cache_byte_pair.asm >/dev/null 2>&1; then
+    byte_pair_window=$(sed -n '/stack_cache_byte_pair:$/,/^[[:space:]]*ret$/p' \
+        "$TEST_TMPDIR"/t_stack_cache_byte_pair.asm)
+    if ./nibasm "$TEST_TMPDIR"/t_stack_cache_byte_pair.asm \
+          -o "$TEST_TMPDIR"/t_stack_cache_byte_pair.bin >/dev/null 2>&1 &&
+       grep -q '^spill-actions: .*stack-cache-push=1' \
+          "$TEST_TMPDIR"/t_stack_cache_byte_pair.txt &&
+       grep -q '^spill-actions: .*stack-cache-pop=1' \
+          "$TEST_TMPDIR"/t_stack_cache_byte_pair.txt &&
+       printf "%s\n" "$byte_pair_window" | grep -Fq 'push BX' &&
+       printf "%s\n" "$byte_pair_window" | grep -Fq 'pop BX' &&
+       printf "%s\n" "$byte_pair_window" | grep -Fq 'mov [SI], BL' &&
+       printf "%s\n" "$byte_pair_window" | grep -Fq 'mov [SI+1], BH' &&
+       [ "$(printf "%s\n" "$byte_pair_window" | grep -c 'push BX')" -eq 1 ] &&
+       [ "$(printf "%s\n" "$byte_pair_window" | grep -c 'pop BX')" -eq 1 ]; then
+        pass "stack-cache-byte-pair: sibling byte pair uses one push/pop"
+    else
+        fail "stack-cache-byte-pair" "paired byte spill did not share stack cache"
+    fi
+else
+    fail "stack-cache-byte-pair" "$(
+        ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_byte_pair.txt \
+          --pressure-fn stack_cache_byte_pair \
+          "$TEST_TMPDIR"/t_stack_cache_byte_pair.nir \
+          -o "$TEST_TMPDIR"/t_stack_cache_byte_pair.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_high_vregs.nir <<'NIR'
 ; Binder regression: functions with vregs above 255 must still get
 ; real registers/spills and address operands, not PREG_NONE/(null).

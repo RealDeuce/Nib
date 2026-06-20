@@ -606,6 +606,8 @@ static bool flags_live_after_insn(func_t *fn, int insn_idx);
 static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg);
 static uint32_t free_regs_at(func_t *fn, int b_idx, int pos);
 static int block_of(func_t *fn, int pos);
+static bool preg_range_occupied_except(func_t *fn, int preg, int start,
+                                       int end, int *except, int nexcept);
 static int vreg_preg(func_t *fn, int v);
 static int ret_capture_restore_reg(func_t *fn, int ret_vreg);
 static bool call_saved_restores_reg(int *call_saved, int call_nsaved,
@@ -5031,8 +5033,127 @@ static bool stack_cache_span_compatible(func_t *fn, int def, int use) {
     return true;
 }
 
-static void plan_stack_cache_spills(func_t *fn, bool bp_available) {
+static int stack_cache_storage_preg(func_t *fn, int v) {
+    int preg = fn->vregs[v].assigned;
+    if (preg >= PREG_AL && preg <= PREG_BH)
+        preg = preg_alias_parent[preg];
+    return preg;
+}
+
+static int find_stack_cache_high_byte_peer(func_t *fn, int low) {
+    int group = fn->vregs[low].sibling_byte_group;
+    int slot = fn->vregs[low].spill_slot;
+    if (group < 0 || slot < 0 || fn->vregs[low].sibling_byte_high ||
+        fn->vregs[low].spill_byte_offset != 0)
+        return -1;
+
+    for (int peer = 0; peer < fn->nvregs; peer++) {
+        if (fn->vregs[peer].sibling_byte_group == group &&
+            fn->vregs[peer].sibling_byte_high &&
+            fn->vregs[peer].spill_slot == slot &&
+            fn->vregs[peer].spill_byte_offset == 1)
+            return peer;
+    }
+    return -1;
+}
+
+static int choose_pair_stack_cache_parent(func_t *fn, int low, int high,
+                                          int def_start, int push,
+                                          int pop, int use_end) {
+    static const int parents[] = { PREG_DX, PREG_BX, PREG_CX, PREG_AX };
+    int except[2] = { low, high };
+    for (int i = 0; i < (int)(sizeof(parents) / sizeof(parents[0])); i++) {
+        int parent = parents[i];
+        if (preg_range_occupied_except(fn, parent, def_start, push,
+                                       except, 2))
+            continue;
+        if (preg_range_occupied_except(fn, parent, pop, use_end,
+                                       except, 2))
+            continue;
+        return parent;
+    }
+    return PREG_NONE;
+}
+
+static bool stack_cache_parent_clobbered_in_range(func_t *fn, int parent,
+                                                  int start, int end) {
+    if (start < 0)
+        start = 0;
+    if (end >= fn->ninsns)
+        end = fn->ninsns - 1;
+    for (int i = start; i <= end; i++) {
+        bool clobbers[NUM_PREGS];
+        memset(clobbers, 0, sizeof(clobbers));
+        collect_insn_clobbers(fn, &fn->insns[i], clobbers);
+        for (int r = 0; r < NUM_PREGS; r++)
+            if (clobbers[r] && pregs_alias(r, parent))
+                return true;
+    }
+    return false;
+}
+
+static bool plan_paired_byte_stack_cache_spills(func_t *fn) {
     bool changed = false;
+    for (int low = 0; low < fn->nvregs; low++) {
+        if (!fn->vregs[low].is_byte || fn->vregs[low].is_seg ||
+            fn->vregs[low].fixed || fn->vregs[low].is_stack_home ||
+            fn->vregs[low].is_local_slot || fn->vregs[low].spill_slot < 0)
+            continue;
+
+        int high = find_stack_cache_high_byte_peer(fn, low);
+        if (high < 0)
+            continue;
+        if (fn->vregs[high].fixed || fn->vregs[high].is_stack_home ||
+            fn->vregs[high].is_local_slot)
+            continue;
+
+        int low_def, low_use, high_def, high_use;
+        if (!find_stack_cache_span(fn, low, &low_def, &low_use) ||
+            !find_stack_cache_span(fn, high, &high_def, &high_use))
+            continue;
+
+        int def_start = low_def < high_def ? low_def : high_def;
+        int push = low_def > high_def ? low_def : high_def;
+        int pop = low_use < high_use ? low_use : high_use;
+        int use_end = low_use > high_use ? low_use : high_use;
+        if (push >= pop)
+            continue;
+        if (!stack_cache_cfg_span_ok(fn, push, pop))
+            continue;
+        if (!stack_cache_span_compatible(fn, push, pop))
+            continue;
+
+        int parent = choose_pair_stack_cache_parent(fn, low, high,
+                                                    def_start, push,
+                                                    pop, use_end);
+        if (parent == PREG_NONE)
+            continue;
+        if (stack_cache_parent_clobbered_in_range(fn, parent,
+                                                  def_start, push) ||
+            stack_cache_parent_clobbered_in_range(fn, parent,
+                                                  pop, use_end))
+            continue;
+
+        fn->vregs[low].assigned = preg_alias_lo[parent];
+        fn->vregs[low].spill_slot = -1;
+        fn->vregs[low].spill_byte_offset = 0;
+        fn->vregs[low].stack_spill_eligible = true;
+        fn->vregs[low].stack_spill_def = push;
+        fn->vregs[low].stack_spill_use = pop;
+
+        fn->vregs[high].assigned = preg_alias_hi[parent];
+        fn->vregs[high].spill_slot = -1;
+        fn->vregs[high].spill_byte_offset = 0;
+        fn->vregs[high].stack_spill_eligible = true;
+        fn->vregs[high].stack_spill_def = push;
+        fn->vregs[high].stack_spill_use = pop;
+        changed = true;
+    }
+    return changed;
+}
+
+static void plan_stack_cache_spills(func_t *fn, bool bp_available) {
+    bool changed = plan_paired_byte_stack_cache_spills(fn);
     for (int v = 0; v < fn->nvregs; v++) {
         if (fn->vregs[v].spill_slot < 0)
             continue;
@@ -5467,9 +5588,18 @@ static void rins_stack_cache_pop_for_insn(func_t *fn, int ir_idx) {
         if (!fn->vregs[v].stack_spill_eligible ||
             fn->vregs[v].stack_spill_use != ir_idx)
             continue;
-        int preg = fn->vregs[v].assigned;
-        if (preg >= PREG_AL && preg <= PREG_BH)
-            preg = preg_alias_parent[preg];
+        int preg = stack_cache_storage_preg(fn, v);
+        bool duplicate = false;
+        for (int prev = 0; prev < v; prev++) {
+            if (fn->vregs[prev].stack_spill_eligible &&
+                fn->vregs[prev].stack_spill_use == ir_idx &&
+                stack_cache_storage_preg(fn, prev) == preg) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
         rins_asm_spill(fn, SPILL_STACK_POP, "    pop %s", preg_name[preg]);
     }
 }
@@ -5479,9 +5609,18 @@ static void rins_stack_cache_push_for_insn(func_t *fn, int ir_idx) {
         if (!fn->vregs[v].stack_spill_eligible ||
             fn->vregs[v].stack_spill_def != ir_idx)
             continue;
-        int preg = fn->vregs[v].assigned;
-        if (preg >= PREG_AL && preg <= PREG_BH)
-            preg = preg_alias_parent[preg];
+        int preg = stack_cache_storage_preg(fn, v);
+        bool duplicate = false;
+        for (int prev = 0; prev < v; prev++) {
+            if (fn->vregs[prev].stack_spill_eligible &&
+                fn->vregs[prev].stack_spill_def == ir_idx &&
+                stack_cache_storage_preg(fn, prev) == preg) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
         rins_asm_spill(fn, SPILL_STACK_PUSH, "    push %s", preg_name[preg]);
     }
 }
