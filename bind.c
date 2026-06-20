@@ -203,6 +203,13 @@ typedef struct {
     bool    has_mem_disp;
 } ir_insn_t;
 
+typedef enum {
+    REMAT_NONE,
+    REMAT_IMM,
+    REMAT_LABEL,
+    REMAT_SEG_LABEL
+} remat_kind_t;
+
 /* Virtual register info */
 typedef struct {
     int     prefer;         /* preferred physical reg (PREG_*) or PREG_NONE */
@@ -215,6 +222,9 @@ typedef struct {
     bool    needs_ds_addr;     /* true if used as DS-relative address: BX, SI, DI (not BP) */
     bool    needs_cl;          /* true if used as shift/rotate count: must be CL */
     bool    is_const;          /* true if immutable — prefer to spill over mutable */
+    remat_kind_t remat_kind;   /* cheap recipe when storage is not allocated */
+    int     remat_imm;
+    char    remat_label[64];
     int     use_count;         /* number of instructions referencing this vreg */
     bool    in_loop;           /* true if live range spans a loop back-edge */
     bool    is_cs_ref;         /* true if this vreg points to constant pool (CS segment) */
@@ -599,8 +609,12 @@ static void ext_ensure_return(extern_fn_t *ext, int idx) {
 
 /* Forward declarations */
 static const char *fn_asm_name(func_t *fn);
+static const char *resolve_const_label(func_t *fn, const char *name);
+static const char *resolve_fn_name(const char *name);
+static const char *remat_asm_operand(func_t *fn, int v);
 static const char *vreg_asm(func_t *fn, int v);
 static bool is_spilled(func_t *fn, int v);
+static bool vreg_storage_is_remat(func_t *fn, int v);
 static void add_call_saved_reg(int *call_saved, int *call_nsaved, int preg);
 static bool flags_live_after_insn(func_t *fn, int insn_idx);
 static bool preg_live_after_insn(func_t *fn, int insn_idx, int written_preg);
@@ -634,6 +648,7 @@ static char *xstrdup_checked(const char *s) {
 static void init_vreg_info(vreg_info_t *vr) {
     memset(vr, 0, sizeof(*vr));
     vr->prefer = PREG_NONE;
+    vr->remat_kind = REMAT_NONE;
     vr->assigned = PREG_NONE;
     vr->spill_slot = -1;
     vr->spill_byte_offset = 0;
@@ -3071,6 +3086,13 @@ static const char *vreg_note(func_t *fn, int v, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, " local[%d]", fn->vregs[v].local_size);
     } else if (fn->vregs[v].is_cs_ref) {
         snprintf(buf, bufsz, " csref");
+    } else if (fn->vregs[v].remat_kind == REMAT_IMM) {
+        snprintf(buf, bufsz, " remat:%d", fn->vregs[v].remat_imm);
+    } else if (fn->vregs[v].remat_kind == REMAT_LABEL ||
+               fn->vregs[v].remat_kind == REMAT_SEG_LABEL) {
+        snprintf(buf, bufsz, " remat:%s%s",
+                 fn->vregs[v].remat_kind == REMAT_SEG_LABEL ? "SEG " : "",
+                 fn->vregs[v].remat_label);
     } else if (fn->vregs[v].is_const) {
         snprintf(buf, bufsz, " const");
     }
@@ -3098,6 +3120,8 @@ static const char *vreg_alloc_note(func_t *fn, int v, char *buf,
     } else if (fn->vregs[v].is_local_slot) {
         snprintf(buf, bufsz, "alloc=local+%d",
                  fn->vregs[v].local_offset);
+    } else if (vreg_storage_is_remat(fn, v)) {
+        snprintf(buf, bufsz, "alloc=remat");
     } else {
         snprintf(buf, bufsz, "alloc=none");
     }
@@ -4336,6 +4360,73 @@ static bool vreg_is_byte_alloc_value(func_t *fn, int v) {
            !fn->vregs[v].is_seg && !fn->vregs[v].needs_cl;
 }
 
+static bool vreg_has_remat(func_t *fn, int v) {
+    return fn && v >= 0 && v < fn->nvregs &&
+           fn->vregs[v].remat_kind != REMAT_NONE;
+}
+
+static bool vreg_storage_is_remat(func_t *fn, int v) {
+    return vreg_has_remat(fn, v) &&
+           fn->vregs[v].assigned == PREG_NONE &&
+           fn->vregs[v].spill_slot < 0 &&
+           !fn->vregs[v].is_stack_home &&
+           !fn->vregs[v].is_local_slot;
+}
+
+static bool vreg_can_rematerialize(func_t *fn, int v);
+
+static void scan_rematerialization_candidates(func_t *fn) {
+    int *def_count = nib_xcalloc((size_t)fn->nvregs, sizeof(def_count[0]),
+                                 "remat def counts");
+    int *def_insn = nib_xmalloc((size_t)(fn->nvregs > 0 ? fn->nvregs : 1) *
+                                sizeof(def_insn[0]), "remat def insns");
+    for (int v = 0; v < fn->nvregs; v++)
+        def_insn[v] = -1;
+
+    for (int i = 0; i < fn->ninsns; i++) {
+        ir_insn_t *ins = &fn->insns[i];
+        if (!insn_defines_dst(ins) || ins->dst < 0 || ins->dst >= fn->nvregs)
+            continue;
+        def_count[ins->dst]++;
+        def_insn[ins->dst] = i;
+    }
+
+    for (int v = 0; v < fn->nvregs; v++) {
+        fn->vregs[v].remat_kind = REMAT_NONE;
+        fn->vregs[v].remat_label[0] = '\0';
+        if (def_count[v] != 1 || def_insn[v] < 0)
+            continue;
+
+        ir_insn_t *def = &fn->insns[def_insn[v]];
+        if (def->op != IR_MOV)
+            continue;
+        if (def->has_imm) {
+            fn->vregs[v].remat_kind = REMAT_IMM;
+            fn->vregs[v].remat_imm = def->imm;
+        } else if (def->name[0]) {
+            if (strncmp(def->name, "SEG ", 4) == 0) {
+                fn->vregs[v].remat_kind = REMAT_SEG_LABEL;
+                strncpy(fn->vregs[v].remat_label, def->name + 4,
+                        sizeof(fn->vregs[v].remat_label) - 1);
+            } else {
+                fn->vregs[v].remat_kind = REMAT_LABEL;
+                strncpy(fn->vregs[v].remat_label, def->name,
+                        sizeof(fn->vregs[v].remat_label) - 1);
+            }
+            fn->vregs[v].remat_label[
+                sizeof(fn->vregs[v].remat_label) - 1] = '\0';
+        }
+
+        if (!vreg_can_rematerialize(fn, v)) {
+            fn->vregs[v].remat_kind = REMAT_NONE;
+            fn->vregs[v].remat_label[0] = '\0';
+        }
+    }
+
+    free(def_insn);
+    free(def_count);
+}
+
 static bool int_list_contains(int *items, int nitems, int value) {
     for (int i = 0; i < nitems; i++)
         if (items[i] == value)
@@ -4670,7 +4761,8 @@ static int vreg_frame_spill_cost(func_t *fn, int v) {
 }
 
 static bool vreg_can_rematerialize(func_t *fn, int v) {
-    return fn->vregs[v].is_const && !fn->vregs[v].is_seg &&
+    return vreg_has_remat(fn, v) && !fn->vregs[v].is_seg &&
+           !fn->vregs[v].fixed &&
            !fn->vregs[v].needs_addressable &&
            !fn->vregs[v].needs_base && !fn->vregs[v].needs_index &&
            !fn->vregs[v].needs_ds_addr && !fn->vregs[v].needs_cl;
@@ -5367,7 +5459,8 @@ skip_preferred_color:
 
         if (!colored) {
             /* Actual spill */
-            fn->vregs[v].spill_slot = fn->nspill_slots++;
+            if (!vreg_can_rematerialize(fn, v))
+                fn->vregs[v].spill_slot = fn->nspill_slots++;
         }
     }
     free(stack);
@@ -5950,6 +6043,12 @@ static void call_area_operand(char *buf, size_t bufsz, int disp) {
 }
 
 static void rins_spill_load_to_reg(func_t *fn, int dst_preg, int src_vreg) {
+    if (vreg_storage_is_remat(fn, src_vreg)) {
+        rins_asm_spill(fn, SPILL_REMAT, "    mov %s, %s",
+                       preg_name[dst_preg],
+                       remat_asm_operand(fn, src_vreg));
+        return;
+    }
     rins_asm_spill(fn, SPILL_LOAD, "    mov %s, %s",
                    preg_name[dst_preg], vreg_asm(fn, src_vreg));
 }
@@ -6114,6 +6213,12 @@ static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
     bool dst_byte = preg_is_byte(expected);
     bool src_byte = fn->vregs[src_vreg].is_byte;
     int actual = fn->vregs[src_vreg].assigned;
+
+    if (vreg_storage_is_remat(fn, src_vreg)) {
+        rins_asm_spill(fn, SPILL_REMAT, "    mov %s, %s",
+                       dst, remat_asm_operand(fn, src_vreg));
+        return;
+    }
 
     if (expected >= PREG_ES && expected <= PREG_DS) {
         if (actual == expected)
@@ -7031,6 +7136,8 @@ static const char *vreg_asm(func_t *fn, int v) {
     if (fn->vregs[v].assigned != PREG_NONE) {
         return preg_name[fn->vregs[v].assigned];
     }
+    if (vreg_storage_is_remat(fn, v))
+        return remat_asm_operand(fn, v);
     if (fn->vregs[v].spill_slot >= 0) {
         int off = -(fn->vregs[v].spill_slot + 1) * 2 +
                   fn->vregs[v].spill_byte_offset;
@@ -7094,6 +7201,38 @@ static const char *resolve_fn_name(const char *name) {
     return name; /* not found — return as-is (extern, etc.) */
 }
 
+static const char *remat_asm_operand(func_t *fn, int v) {
+    static char buf[4][128];
+    static int idx = 0;
+    char *b = buf[idx++ & 3];
+
+    if (!vreg_has_remat(fn, v)) {
+        snprintf(b, 128, "%%_%d", v);
+        return b;
+    }
+
+    switch (fn->vregs[v].remat_kind) {
+    case REMAT_IMM:
+        snprintf(b, 128, "%d", fn->vregs[v].remat_imm);
+        break;
+    case REMAT_LABEL: {
+        const char *clbl = resolve_const_label(fn, fn->vregs[v].remat_label);
+        snprintf(b, 128, "%s",
+                 clbl ? clbl : resolve_fn_name(fn->vregs[v].remat_label));
+        break;
+    }
+    case REMAT_SEG_LABEL:
+        snprintf(b, 128, "SEG %s",
+                 resolve_fn_name(fn->vregs[v].remat_label));
+        break;
+    case REMAT_NONE:
+    default:
+        snprintf(b, 128, "%%_%d", v);
+        break;
+    }
+    return b;
+}
+
 /* Scope a local label to the current function to avoid collisions */
 static const char *scoped_label(func_t *fn, const char *label) {
     static char buf[128];
@@ -7151,6 +7290,12 @@ static void note_spill_action(func_t *fn, spill_action_t action) {
     fn->estimated_alloc_clocks += spill_action_clock_cost(action);
 }
 
+static void emit_remat_to_reg(func_t *fn, int dst_preg, int src_vreg) {
+    fprintf(out_asm, "    mov %s, %s\n", preg_name[dst_preg],
+            remat_asm_operand(fn, src_vreg));
+    note_spill_action(fn, SPILL_REMAT);
+}
+
 static operand_plan_t plan_vreg_operand(func_t *fn, int vreg) {
     operand_plan_t plan;
     memset(&plan, 0, sizeof(plan));
@@ -7190,6 +7335,8 @@ static void emit_spill_route_pop(func_t *fn, const char *dst);
 
 /* Emit a mov that handles memory-to-memory via AX scratch */
 static void emit_mov(func_t *fn, int dst, int src) {
+    if (vreg_storage_is_remat(fn, dst))
+        return;
     const char *d = vreg_asm(fn, dst);
     const char *s = vreg_asm(fn, src);
     if (strcmp(d, s) == 0) return; /* skip self-moves */
@@ -7386,6 +7533,10 @@ static void emit_pop_scratch(func_t *fn, int scratch_preg) {
 }
 
 static void emit_spill_load_to_reg(func_t *fn, int dst_preg, int src_vreg) {
+    if (vreg_storage_is_remat(fn, src_vreg)) {
+        emit_remat_to_reg(fn, dst_preg, src_vreg);
+        return;
+    }
     fprintf(out_asm, "    mov %s, %s\n", preg_name[dst_preg],
             vreg_asm(fn, src_vreg));
     note_spill_action(fn, SPILL_LOAD);
@@ -7438,6 +7589,21 @@ static void emit_cmp_operands(func_t *fn, ir_insn_t *cmp, int cmp_idx) {
     if (cmp->has_imm) {
         fprintf(out_asm, "    cmp %s, %d\n",
                 vreg_asm_sized(fn, cmp->src1), cmp->imm);
+        return;
+    }
+
+    if (vreg_storage_is_remat(fn, cmp->src1)) {
+        bool cmp_byte = vreg_is_byte_value(fn, cmp->src1) ||
+                        vreg_is_byte_value(fn, cmp->src2);
+        int avoid = vreg_preg(fn, cmp->src2);
+        int scratch_parent = scratch_word_not_aliasing(avoid);
+        int scratch = cmp_byte ? scratch_byte_for_parent(scratch_parent) :
+                      scratch_parent;
+        emit_push_scratch(fn, scratch_parent);
+        emit_remat_to_reg(fn, scratch, cmp->src1);
+        fprintf(out_asm, "    cmp %s, %s\n",
+                preg_name[scratch], vreg_asm(fn, cmp->src2));
+        emit_pop_scratch(fn, scratch_parent);
         return;
     }
 
@@ -8645,6 +8811,8 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_MOV:
+            if (vreg_storage_is_remat(fn, ins->dst))
+                break;
             if (ins->has_imm) {
                 const char *d = vreg_asm(fn, ins->dst);
                 /* Segment registers can't take immediates directly */
@@ -10182,6 +10350,7 @@ int main(int argc, char **argv) {
         compute_liveness(fn);  /* derives def_pos/last_use from CFG */
         build_igraph(fn);
         scan_addressing_constraints(fn);
+        scan_rematerialization_candidates(fn);
         scan_sibling_byte_affinities(fn);
 
         /* Phase 2: estimate register pressure from interference graph.
@@ -10233,6 +10402,8 @@ int main(int argc, char **argv) {
             if (fn->vregs[v].is_stack_home)
                 continue;
             if (fn->vregs[v].is_local_slot)
+                continue;
+            if (vreg_can_rematerialize(fn, v))
                 continue;
             if (fn->vregs[v].def_pos < 0 && fn->vregs[v].last_use < 0)
                 continue;
@@ -10366,6 +10537,8 @@ int main(int argc, char **argv) {
                         fn->vregs[v].spill_slot);
                 if (fn->vregs[v].spill_byte_offset != 0)
                     fprintf(stderr, "+%d", fn->vregs[v].spill_byte_offset);
+            } else if (vreg_storage_is_remat(fn, v)) {
+                fprintf(stderr, " %%%d=remat", v);
             }
         }
         fprintf(stderr, " ]\n");

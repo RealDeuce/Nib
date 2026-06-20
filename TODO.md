@@ -10,8 +10,6 @@
 - Binder allocator next pass:
   - Use the reports to target high-pressure Serif functions such as RTC
     read/write paths and framebuffer blits before changing heuristics.
-  - Add rematerialization locations for constants and labels so cheap
-    values do not require frame spill homes.
 
 ## Nice to have
 - Struct array type syntax (`struct Name[N]` in generic contexts)
