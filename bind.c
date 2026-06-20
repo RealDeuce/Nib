@@ -2651,6 +2651,11 @@ static void parse_nir(const char *path) {
                     read_word(dp + 8, fname, sizeof(fname));
                     /* Mark with \x01 prefix for deferred resolution */
                     data_block_add_entry(db, "\x01%s", fname);
+                } else if (strncmp(dp, "near.ref ", 9) == 0) {
+                    char fname[64];
+                    read_word(dp + 9, fname, sizeof(fname));
+                    /* Mark with \x02 prefix for deferred resolution */
+                    data_block_add_entry(db, "\x02%s", fname);
                 } else if (strncmp(dp, "far ", 4) == 0) {
                     int seg = 0, off = 0;
                     char *fp2 = dp + 4;
@@ -10407,6 +10412,9 @@ static void emit_item(int ei) {
             if (db->entries.items[j][0] == '\x01') {
                 const char *r = resolve_fn_name(db->entries.items[j] + 1);
                 fprintf(out_asm, "    dw %s, SEG %s\n", r, r);
+            } else if (db->entries.items[j][0] == '\x02') {
+                const char *r = resolve_fn_name(db->entries.items[j] + 1);
+                fprintf(out_asm, "    dw %s\n", r);
             } else {
                 fprintf(out_asm, "%s\n", db->entries.items[j]);
             }

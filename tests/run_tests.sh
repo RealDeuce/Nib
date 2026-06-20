@@ -2676,6 +2676,21 @@ if [ -f "$TEST_TMPDIR"/t_globals_rw.asm ]; then
     fi
 fi
 
+if [ -f tests/t_globals.nir ] && [ -f "$TEST_TMPDIR"/t_globals.asm ]; then
+    dispatch_nir=$(sed -n '/^\.data dispatch,/,/^\.enddata$/p' \
+        tests/t_globals.nir)
+    dispatch_asm=$(sed -n '/^dispatch:/,/^endorg$/p' \
+        "$TEST_TMPDIR"/t_globals.asm)
+    if printf "%s\n" "$dispatch_nir" | grep -q '^  near.ref handler0$' &&
+       printf "%s\n" "$dispatch_nir" | grep -q '^  near.ref handler3$' &&
+       printf "%s\n" "$dispatch_asm" | grep -q '^    dw t_globals_handler0$' &&
+       ! printf "%s\n" "$dispatch_asm" | grep -q 'SEG t_globals_handler0'; then
+        pass "near-fn-table: &fn in u16[] emits near offsets"
+    else
+        fail "near-fn-table" "&fn table did not emit u16 near offsets"
+    fi
+fi
+
 if [ -f tests/t_array_infer.nir ]; then
     if grep -q '^\.data bytes, u8\[19\]' tests/t_array_infer.nir &&
        grep -q '^\.global bytes, u8\[19\]$' tests/t_array_infer.nif; then

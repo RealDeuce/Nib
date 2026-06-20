@@ -3612,9 +3612,21 @@ static void compile_global(decl_t *d) {
         int elem_sz = type_size(elem_type);
 
         for (expr_t *e = d->u.global.init->u.array_init.elements; e; e = e->next) {
-            /* &function_name → far.ref */
+            /* &function_name -> near offset */
             if (e->kind == EXPR_UNOP &&
-                (e->u.unop.op == NIB_ADDR || e->u.unop.op == NIB_FAR_ADDR) &&
+                e->u.unop.op == NIB_ADDR &&
+                e->u.unop.operand->kind == EXPR_IDENT &&
+                find_function(e->u.unop.operand->u.ident) >= 0) {
+                if (elem_sz != 2) {
+                    cerr(e->line, "near function reference in non-u16 array");
+                    continue;
+                }
+                fprintf(C.nir, "  near.ref %s\n",
+                        e->u.unop.operand->u.ident);
+            }
+            /* @function_name -> far.ref */
+            else if (e->kind == EXPR_UNOP &&
+                e->u.unop.op == NIB_FAR_ADDR &&
                 e->u.unop.operand->kind == EXPR_IDENT &&
                 find_function(e->u.unop.operand->u.ident) >= 0) {
                 if (elem_type->kind != TYPE_FAR)

@@ -191,6 +191,7 @@ are zero-filled to the declared size.
 at(0xE000:0x0000);
 u8[8] buf = {0x41, 0x42, 0x43};    // 3 bytes + 5 zero bytes
 u16[4] table = {100, 200, 300, 400};
+u16[4] dispatch = {&handler_a, &handler_b, &handler_c, &handler_d};
 far32[4] ivt = {@handler_a, @handler_b, @handler_c, @handler_d};
 end at;
 ```
