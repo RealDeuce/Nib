@@ -34,8 +34,10 @@ Reads `.nir` files and outputs fully-resolved V20 assembly.
 
 ```
 nibbind [-o output.asm] [--pressure-report file]
-        [--pressure-fn name] file1.nir [file2.nir ...]
+        [--pressure-fn name] [--cost-report file]
+        [--cost-fn name] [--cost-annotate] file1.nir [file2.nir ...]
 nibbind --pressure-compare old.txt new.txt [--pressure-fn name]
+nibbind --cost-compare old.txt new.txt [--cost-fn name]
 ```
 
 | Flag | Description |
@@ -44,6 +46,10 @@ nibbind --pressure-compare old.txt new.txt [--pressure-fn name]
 | `--pressure-report file` | Write pressure, allocation, and fixup diagnostics |
 | `--pressure-fn name` | Limit the pressure report to one function |
 | `--pressure-compare old new` | Compare two existing pressure reports |
+| `--cost-report file` | Write static V20 timing, byte, transfer, and mix diagnostics |
+| `--cost-fn name` | Limit the cost report or comparison to one function |
+| `--cost-annotate` | Add per-instruction cost comments to the emitted assembly |
+| `--cost-compare old new` | Compare two existing cost reports |
 
 Accepts multiple `.nir` files. Builds the call graph, propagates
 register preferences bottom-up from leaf functions, allocates physical
@@ -64,6 +70,22 @@ pressure reports and prints per-function deltas for live pressure, spill
 counts, allocation pressure, fixups, spill actions, and selected vreg
 allocation changes.
 
+The cost report is a static estimate from the emitted assembly using the
+compiled V20 timing model. It includes per-function totals for bytes,
+clocks, transfers, unknown instructions, variable-cost instructions,
+instruction mix, per-source-line costs, and backward-branch loop bodies.
+Conditional branches are reported as clock ranges because static analysis
+does not know whether the branch is taken. Variable string/shift forms
+are counted separately instead of being folded into a fake fixed total.
+
+`--cost-annotate` rewrites the generated assembly with cost comments
+before each instruction. These comments are assembler-safe and are off by
+default to keep normal `.asm` output compact.
+
+`--cost-compare` is a compare-only mode. It reads two existing cost
+reports and prints per-function deltas for clock ranges, byte ranges,
+unknown instruction counts, and variable-cost instruction counts.
+
 ### Examples
 
 ```sh
@@ -73,6 +95,10 @@ allocation changes.
   --pressure-report pressure.txt --pressure-fn boot
 ./nibbind --pressure-compare pressure-before.txt pressure-after.txt \
   --pressure-fn boot
+./nibbind app.nir lib.nir -o program.asm \
+  --cost-report cost.txt --cost-annotate
+./nibbind --cost-compare cost-before.txt cost-after.txt \
+  --cost-fn fb_copy_s1_full
 ```
 
 ---

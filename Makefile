@@ -17,8 +17,8 @@ nib: nib.tab.c lex.yy.c ast.h ast.c compile.c compile.h table.h
 nibasm: asm.c table.h
 	$(CC) $(CFLAGS) -o nibasm asm.c
 
-nibbind: bind.c table.h
-	$(CC) $(CFLAGS) -o nibbind bind.c
+nibbind: bind.c table.h v20_timing.c v20_timing.h
+	$(CC) $(CFLAGS) -o nibbind bind.c v20_timing.c
 
 nibbuild: build.c table.h
 	$(CC) $(CFLAGS) -o nibbuild build.c

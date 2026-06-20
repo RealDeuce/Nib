@@ -24,6 +24,7 @@
 #include <stdarg.h>
 
 #include "table.h"
+#include "v20_timing.h"
 
 /* ================================================================
  * Physical register model
@@ -640,6 +641,11 @@ static const char *pressure_report_path = NULL;
 static const char *pressure_fn_filter = NULL;
 static const char *pressure_compare_old_path = NULL;
 static const char *pressure_compare_new_path = NULL;
+static const char *cost_report_path = NULL;
+static const char *cost_fn_filter = NULL;
+static const char *cost_compare_old_path = NULL;
+static const char *cost_compare_new_path = NULL;
+static bool cost_annotate = false;
 
 static char *xstrdup_checked(const char *s) {
     size_t len = strlen(s) + 1;
@@ -3876,6 +3882,611 @@ static int compare_pressure_reports(const char *old_path,
         printf("\nNo pressure changes.\n");
     free_pressure_compare_report(&old_report);
     free_pressure_compare_report(&new_report);
+    return 0;
+}
+
+typedef struct {
+    int clocks_min;
+    int clocks_max;
+    int transfers_min;
+    int transfers_max;
+    int bytes_min;
+    int bytes_max;
+    int unknown;
+    int variable;
+    int instructions;
+    int mix_counts[9];
+} cost_totals_t;
+
+typedef struct {
+    char file[64];
+    int line;
+    cost_totals_t total;
+} cost_line_t;
+typedef NIB_VEC(cost_line_t) cost_line_vec_t;
+
+typedef struct {
+    char label[128];
+    char file[64];
+    int start_line;
+    int end_line;
+    cost_totals_t total;
+} cost_loop_t;
+typedef NIB_VEC(cost_loop_t) cost_loop_vec_t;
+
+typedef struct {
+    char label[128];
+    int insn_idx;
+    char file[64];
+    int line;
+} cost_label_t;
+typedef NIB_VEC(cost_label_t) cost_label_vec_t;
+
+typedef struct {
+    cost_totals_t total;
+    char file[64];
+    int line;
+} cost_insn_t;
+typedef NIB_VEC(cost_insn_t) cost_insn_vec_t;
+
+typedef struct {
+    char name[128];
+    cost_totals_t total;
+    cost_line_vec_t lines;
+    cost_loop_vec_t loops;
+    cost_label_vec_t labels;
+    cost_insn_vec_t insns;
+} cost_func_t;
+typedef NIB_VEC(cost_func_t) cost_func_vec_t;
+
+typedef struct {
+    cost_func_vec_t funcs;
+} cost_report_t;
+
+static void cost_total_add(cost_totals_t *dst, const cost_totals_t *src) {
+    dst->clocks_min += src->clocks_min;
+    dst->clocks_max += src->clocks_max;
+    dst->transfers_min += src->transfers_min;
+    dst->transfers_max += src->transfers_max;
+    dst->bytes_min += src->bytes_min;
+    dst->bytes_max += src->bytes_max;
+    dst->unknown += src->unknown;
+    dst->variable += src->variable;
+    dst->instructions += src->instructions;
+    for (int i = 0; i < 9; i++)
+        dst->mix_counts[i] += src->mix_counts[i];
+}
+
+static cost_totals_t cost_total_from_timing(v20_timing_t *timing,
+                                            bool instruction) {
+    cost_totals_t total;
+    memset(&total, 0, sizeof(total));
+    if (!instruction)
+        return total;
+    total.instructions = 1;
+    if (!timing->known) {
+        total.unknown = 1;
+        return total;
+    }
+    if (timing->variable)
+        total.variable = 1;
+    else {
+        total.clocks_min = timing->clocks_min;
+        total.clocks_max = timing->clocks_max;
+        total.transfers_min = timing->transfers_min;
+        total.transfers_max = timing->transfers_max;
+    }
+    total.bytes_min = timing->bytes_min;
+    total.bytes_max = timing->bytes_max;
+    if (timing->mix >= V20_MIX_OTHER && timing->mix <= V20_MIX_STRING)
+        total.mix_counts[timing->mix]++;
+    return total;
+}
+
+static bool cost_filter_allows(const char *name) {
+    return !cost_fn_filter || strcmp(cost_fn_filter, name) == 0;
+}
+
+static bool cost_parse_function_header(const char *line, char *name,
+                                       size_t namesz) {
+    if (!line_starts(line, "; === "))
+        return false;
+    const char *start = line + 6;
+    const char *end = strstr(start, " ===");
+    if (!end)
+        return false;
+    size_t len = (size_t)(end - start);
+    if (len >= namesz)
+        len = namesz - 1;
+    memcpy(name, start, len);
+    name[len] = '\0';
+    return strncmp(name, "data: ", 6) != 0;
+}
+
+static bool cost_parse_source_comment(const char *line, char *file,
+                                      size_t filesz, int *src_line) {
+    const char *p = strstr(line, "; @");
+    if (!p)
+        return false;
+    p += 3;
+    const char *colon = strrchr(p, ':');
+    if (!colon)
+        return false;
+    size_t len = (size_t)(colon - p);
+    if (len >= filesz)
+        len = filesz - 1;
+    memcpy(file, p, len);
+    file[len] = '\0';
+    *src_line = atoi(colon + 1);
+    return true;
+}
+
+static bool cost_is_directive(const char *s) {
+    return line_starts(s, "org ") || line_starts(s, "seg ") ||
+           line_starts(s, "endorg") || line_starts(s, "db ") ||
+           line_starts(s, "dw ") || line_starts(s, "equ ") ||
+           line_starts(s, "times ");
+}
+
+static bool cost_line_is_instruction(const char *line) {
+    char buf[512];
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *comment = strchr(buf, ';');
+    if (comment)
+        *comment = '\0';
+    char *s = skip_ws(buf);
+    char *colon = strchr(s, ':');
+    char *first_ws = s;
+    while (*first_ws && !isspace((unsigned char)*first_ws))
+        first_ws++;
+    if (colon && colon < first_ws) {
+        char *after_label = skip_ws(colon + 1);
+        if (*after_label == '\0' || cost_is_directive(after_label))
+            return false;
+        s = after_label;
+    }
+    if (*s == '\0' || *s == '.' ||
+        cost_is_directive(s))
+        return false;
+    return isalpha((unsigned char)*s);
+}
+
+static bool cost_parse_label(const char *line, char *label, size_t labelsz) {
+    char buf[512];
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *comment = strchr(buf, ';');
+    if (comment)
+        *comment = '\0';
+    char *s = skip_ws(buf);
+    char *colon = strchr(s, ':');
+    if (!colon || *skip_ws(colon + 1) != '\0')
+        return false;
+    size_t len = (size_t)(colon - s);
+    if (len == 0 || len >= labelsz)
+        len = labelsz - 1;
+    memcpy(label, s, len);
+    label[len] = '\0';
+    return true;
+}
+
+static cost_func_t *cost_report_add_func(cost_report_t *report,
+                                         const char *name) {
+    cost_func_t *fn = NIB_VEC_PUSH(&report->funcs, "cost functions");
+    memset(fn, 0, sizeof(*fn));
+    strncpy(fn->name, name, sizeof(fn->name) - 1);
+    NIB_VEC_INIT(&fn->lines);
+    NIB_VEC_INIT(&fn->loops);
+    NIB_VEC_INIT(&fn->labels);
+    NIB_VEC_INIT(&fn->insns);
+    return fn;
+}
+
+static cost_line_t *cost_func_line(cost_func_t *fn, const char *file,
+                                   int line) {
+    if (!file || !file[0] || line <= 0)
+        return NULL;
+    for (int i = 0; i < fn->lines.len; i++) {
+        cost_line_t *l = &fn->lines.items[i];
+        if (l->line == line && strcmp(l->file, file) == 0)
+            return l;
+    }
+    cost_line_t *l = NIB_VEC_PUSH(&fn->lines, "cost source lines");
+    memset(l, 0, sizeof(*l));
+    strncpy(l->file, file, sizeof(l->file) - 1);
+    l->line = line;
+    return l;
+}
+
+static void cost_add_label(cost_func_t *fn, const char *label,
+                           const char *file, int line) {
+    cost_label_t *l = NIB_VEC_PUSH(&fn->labels, "cost labels");
+    memset(l, 0, sizeof(*l));
+    strncpy(l->label, label, sizeof(l->label) - 1);
+    if (file)
+        strncpy(l->file, file, sizeof(l->file) - 1);
+    l->line = line;
+    l->insn_idx = fn->insns.len;
+}
+
+static cost_label_t *cost_find_label(cost_func_t *fn, const char *label) {
+    for (int i = fn->labels.len - 1; i >= 0; i--)
+        if (strcmp(fn->labels.items[i].label, label) == 0)
+            return &fn->labels.items[i];
+    return NULL;
+}
+
+static bool cost_branch_target(const char *line, char *target,
+                               size_t targetsz) {
+    char buf[512];
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *comment = strchr(buf, ';');
+    if (comment)
+        *comment = '\0';
+    char *s = skip_ws(buf);
+    char mnem[32];
+    s = read_word(s, mnem, sizeof(mnem));
+    for (char *p = mnem; *p; p++)
+        *p = (char)tolower((unsigned char)*p);
+    bool branch = strcmp(mnem, "jmp") == 0 || strcmp(mnem, "loop") == 0 ||
+                  strcmp(mnem, "jcxz") == 0 ||
+                  (mnem[0] == 'j' && mnem[1] != '\0');
+    if (!branch)
+        return false;
+    s = skip_ws(s);
+    if (*s == '\0' || *s == '[' || line_starts(s, "far ") ||
+        !isalpha((unsigned char)s[0]))
+        return false;
+    char *end = s;
+    while (*end && !isspace((unsigned char)*end) && *end != ',')
+        end++;
+    size_t len = (size_t)(end - s);
+    if (len == 0 || len >= targetsz)
+        len = targetsz - 1;
+    memcpy(target, s, len);
+    target[len] = '\0';
+    return true;
+}
+
+static void cost_maybe_add_loop(cost_func_t *fn, const char *line) {
+    char target[128];
+    if (!cost_branch_target(line, target, sizeof(target)))
+        return;
+    cost_label_t *label = cost_find_label(fn, target);
+    if (!label || label->insn_idx >= fn->insns.len)
+        return;
+    cost_loop_t *loop = NIB_VEC_PUSH(&fn->loops, "cost loops");
+    memset(loop, 0, sizeof(*loop));
+    strncpy(loop->label, target, sizeof(loop->label) - 1);
+    strncpy(loop->file, label->file, sizeof(loop->file) - 1);
+    loop->start_line = label->line;
+    loop->end_line = fn->insns.items[fn->insns.len - 1].line;
+    for (int i = label->insn_idx; i < fn->insns.len; i++)
+        cost_total_add(&loop->total, &fn->insns.items[i].total);
+}
+
+static void cost_record_instruction(cost_func_t *fn, v20_timing_t *timing,
+                                    bool instruction, const char *file,
+                                    int line, const char *asm_line) {
+    if (!instruction)
+        return;
+    cost_totals_t total = cost_total_from_timing(timing, instruction);
+    cost_total_add(&fn->total, &total);
+    cost_line_t *src = cost_func_line(fn, file, line);
+    if (src)
+        cost_total_add(&src->total, &total);
+    cost_insn_t *insn = NIB_VEC_PUSH(&fn->insns, "cost insns");
+    memset(insn, 0, sizeof(*insn));
+    insn->total = total;
+    if (file)
+        strncpy(insn->file, file, sizeof(insn->file) - 1);
+    insn->line = line;
+    cost_maybe_add_loop(fn, asm_line);
+}
+
+static void cost_print_total(FILE *out, const cost_totals_t *t) {
+    fprintf(out,
+            "instructions=%d bytes=%d-%d clocks=%d-%d transfers=%d-%d "
+            "unknown=%d variable=%d",
+            t->instructions, t->bytes_min, t->bytes_max,
+            t->clocks_min, t->clocks_max,
+            t->transfers_min, t->transfers_max,
+            t->unknown, t->variable);
+}
+
+static void write_cost_report_file(cost_report_t *report, const char *path) {
+    if (!path)
+        return;
+    FILE *out = strcmp(path, "-") == 0 ? stdout : fopen(path, "w");
+    if (!out) {
+        perror(path);
+        bind_errors++;
+        return;
+    }
+    fprintf(out, "# Nib cost report\n");
+    for (int i = 0; i < report->funcs.len; i++) {
+        cost_func_t *fn = &report->funcs.items[i];
+        if (!cost_filter_allows(fn->name))
+            continue;
+        fprintf(out, "\n== %s ==\nsummary: ", fn->name);
+        cost_print_total(out, &fn->total);
+        fputc('\n', out);
+        fprintf(out, "mix:");
+        for (int m = 0; m <= V20_MIX_STRING; m++)
+            fprintf(out, " %s=%d", v20_mix_name((v20_mix_t)m),
+                    fn->total.mix_counts[m]);
+        fputc('\n', out);
+        fprintf(out, "\nsource lines:\n");
+        for (int l = 0; l < fn->lines.len; l++) {
+            cost_line_t *line = &fn->lines.items[l];
+            fprintf(out, "  %s:%d ", line->file, line->line);
+            cost_print_total(out, &line->total);
+            fputc('\n', out);
+        }
+        fprintf(out, "\ntop source lines:\n");
+        bool *printed_top = nib_xcalloc((size_t)fn->lines.len,
+                                        sizeof(*printed_top),
+                                        "cost top source lines");
+        int top_limit = fn->lines.len < 5 ? fn->lines.len : 5;
+        for (int rank = 0; rank < top_limit; rank++) {
+            int best = -1;
+            for (int l = 0; l < fn->lines.len; l++) {
+                if (printed_top[l])
+                    continue;
+                if (best < 0 ||
+                    fn->lines.items[l].total.clocks_max >
+                    fn->lines.items[best].total.clocks_max)
+                    best = l;
+            }
+            if (best < 0)
+                break;
+            printed_top[best] = true;
+            cost_line_t *line = &fn->lines.items[best];
+            fprintf(out, "  %s:%d ", line->file, line->line);
+            cost_print_total(out, &line->total);
+            fputc('\n', out);
+        }
+        free(printed_top);
+        fprintf(out, "\nloops:\n");
+        if (fn->loops.len == 0) {
+            fprintf(out, "  none\n");
+        } else {
+            for (int l = 0; l < fn->loops.len; l++) {
+                cost_loop_t *loop = &fn->loops.items[l];
+                fprintf(out, "  %s %s:%d-%d ", loop->label,
+                        loop->file[0] ? loop->file : "?",
+                        loop->start_line, loop->end_line);
+                cost_print_total(out, &loop->total);
+                fputc('\n', out);
+            }
+        }
+    }
+    if (out != stdout)
+        fclose(out);
+}
+
+static void free_cost_report(cost_report_t *report) {
+    for (int i = 0; i < report->funcs.len; i++) {
+        NIB_VEC_FREE(&report->funcs.items[i].lines);
+        NIB_VEC_FREE(&report->funcs.items[i].loops);
+        NIB_VEC_FREE(&report->funcs.items[i].labels);
+        NIB_VEC_FREE(&report->funcs.items[i].insns);
+    }
+    NIB_VEC_FREE(&report->funcs);
+}
+
+static int analyze_asm_costs(const char *asm_path, const char *report_path,
+                             bool annotate) {
+    FILE *in = fopen(asm_path, "r");
+    if (!in) {
+        perror(asm_path);
+        return 1;
+    }
+    char tmp_path[512];
+    FILE *ann = NULL;
+    if (annotate) {
+        snprintf(tmp_path, sizeof(tmp_path), "%s.costtmp", asm_path);
+        ann = fopen(tmp_path, "w");
+        if (!ann) {
+            perror(tmp_path);
+            fclose(in);
+            return 1;
+        }
+    }
+    cost_report_t report;
+    NIB_VEC_INIT(&report.funcs);
+    cost_func_t *cur = NULL;
+    char cur_file[64] = "";
+    int cur_line = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), in)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        char fn_name[128];
+        if (cost_parse_function_header(line, fn_name, sizeof(fn_name))) {
+            cur = cost_report_add_func(&report, fn_name);
+            cur_file[0] = '\0';
+            cur_line = 0;
+        }
+        cost_parse_source_comment(line, cur_file, sizeof(cur_file),
+                                  &cur_line);
+        if (cur) {
+            char label[128];
+            if (cost_parse_label(line, label, sizeof(label)))
+                cost_add_label(cur, label, cur_file, cur_line);
+        }
+        bool instruction = cost_line_is_instruction(line);
+        v20_timing_t timing = v20_timing_estimate(line);
+        if (cur && instruction)
+            cost_record_instruction(cur, &timing, instruction, cur_file,
+                                    cur_line, line);
+        if (ann && instruction && timing.known) {
+            fprintf(ann, "    ; cost: clocks=%s transfers=%s bytes=%d",
+                    timing.clocks, timing.transfers, timing.bytes_min);
+            if (timing.bytes_max != timing.bytes_min)
+                fprintf(ann, "-%d", timing.bytes_max);
+            fprintf(ann, " form=\"%s\"", timing.form);
+            if (timing.note[0])
+                fprintf(ann, " %s", timing.note);
+            fputc('\n', ann);
+        } else if (ann && instruction) {
+            fprintf(ann, "    ; cost: unknown\n");
+        }
+        if (ann)
+            fprintf(ann, "%s\n", line);
+    }
+    fclose(in);
+    if (ann) {
+        fclose(ann);
+        if (rename(tmp_path, asm_path) != 0) {
+            perror("rename annotated asm");
+            free_cost_report(&report);
+            return 1;
+        }
+    }
+    write_cost_report_file(&report, report_path);
+    free_cost_report(&report);
+    return bind_errors ? 1 : 0;
+}
+
+typedef struct {
+    char name[128];
+    cost_totals_t total;
+} cost_compare_func_t;
+typedef NIB_VEC(cost_compare_func_t) cost_compare_func_vec_t;
+
+static cost_compare_func_t *find_cost_compare(cost_compare_func_vec_t *funcs,
+                                              const char *name) {
+    for (int i = 0; i < funcs->len; i++)
+        if (strcmp(funcs->items[i].name, name) == 0)
+            return &funcs->items[i];
+    return NULL;
+}
+
+static void parse_cost_range(const char *line, const char *key,
+                             int *minv, int *maxv) {
+    const char *p = strstr(line, key);
+    if (!p)
+        return;
+    p += strlen(key);
+    *minv = atoi(p);
+    const char *dash = strchr(p, '-');
+    const char *space = strchr(p, ' ');
+    if (dash && (!space || dash < space))
+        *maxv = atoi(dash + 1);
+    else
+        *maxv = *minv;
+}
+
+static int parse_cost_report_summary(const char *path,
+                                     cost_compare_func_vec_t *funcs) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        perror(path);
+        return 1;
+    }
+    NIB_VEC_INIT(funcs);
+    char line[1024];
+    char cur_name[128] = "";
+    bool saw_header = false;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strcmp(line, "# Nib cost report") == 0) {
+            saw_header = true;
+            continue;
+        }
+        char name[128];
+        if (parse_compare_function_header(line, name, sizeof(name))) {
+            strncpy(cur_name, name, sizeof(cur_name) - 1);
+            continue;
+        }
+        if (line_starts(line, "summary:") && cur_name[0]) {
+            cost_compare_func_t *fn =
+                NIB_VEC_PUSH(funcs, "cost compare funcs");
+            memset(fn, 0, sizeof(*fn));
+            strncpy(fn->name, cur_name, sizeof(fn->name) - 1);
+            parse_report_metric(line, "instructions",
+                                &fn->total.instructions);
+            parse_report_metric(line, "unknown", &fn->total.unknown);
+            parse_report_metric(line, "variable", &fn->total.variable);
+            parse_cost_range(line, "bytes=", &fn->total.bytes_min,
+                             &fn->total.bytes_max);
+            parse_cost_range(line, "clocks=", &fn->total.clocks_min,
+                             &fn->total.clocks_max);
+            parse_cost_range(line, "transfers=",
+                             &fn->total.transfers_min,
+                             &fn->total.transfers_max);
+        }
+    }
+    fclose(f);
+    if (!saw_header || funcs->len == 0) {
+        fprintf(stderr, "%s: not a cost report\n", path);
+        return 1;
+    }
+    return 0;
+}
+
+static void print_cost_delta(const char *label, int oldv, int newv,
+                             bool *changed) {
+    int delta = newv - oldv;
+    if (delta == 0)
+        return;
+    printf("  %s: %d -> %d (%+d)\n", label, oldv, newv, delta);
+    *changed = true;
+}
+
+static int compare_cost_reports(const char *old_path, const char *new_path) {
+    cost_compare_func_vec_t old_funcs, new_funcs;
+    if (parse_cost_report_summary(old_path, &old_funcs) != 0)
+        return 1;
+    if (parse_cost_report_summary(new_path, &new_funcs) != 0) {
+        NIB_VEC_FREE(&old_funcs);
+        return 1;
+    }
+    bool any = false;
+    for (int i = 0; i < old_funcs.len; i++) {
+        cost_compare_func_t *old_fn = &old_funcs.items[i];
+        if (!cost_filter_allows(old_fn->name))
+            continue;
+        cost_compare_func_t *new_fn =
+            find_cost_compare(&new_funcs, old_fn->name);
+        if (!new_fn) {
+            printf("== %s ==\n  removed\n", old_fn->name);
+            any = true;
+            continue;
+        }
+        bool changed = false;
+        printf("== %s ==\n", old_fn->name);
+        print_cost_delta("clocks-min", old_fn->total.clocks_min,
+                         new_fn->total.clocks_min, &changed);
+        print_cost_delta("clocks-max", old_fn->total.clocks_max,
+                         new_fn->total.clocks_max, &changed);
+        print_cost_delta("bytes-min", old_fn->total.bytes_min,
+                         new_fn->total.bytes_min, &changed);
+        print_cost_delta("bytes-max", old_fn->total.bytes_max,
+                         new_fn->total.bytes_max, &changed);
+        print_cost_delta("unknown", old_fn->total.unknown,
+                         new_fn->total.unknown, &changed);
+        print_cost_delta("variable", old_fn->total.variable,
+                         new_fn->total.variable, &changed);
+        if (!changed)
+            printf("  no cost changes\n");
+        any = any || changed;
+    }
+    for (int i = 0; i < new_funcs.len; i++) {
+        cost_compare_func_t *new_fn = &new_funcs.items[i];
+        if (!cost_filter_allows(new_fn->name))
+            continue;
+        if (!find_cost_compare(&old_funcs, new_fn->name)) {
+            printf("== %s ==\n  added\n", new_fn->name);
+            any = true;
+        }
+    }
+    if (!any)
+        printf("No cost changes.\n");
+    NIB_VEC_FREE(&old_funcs);
+    NIB_VEC_FREE(&new_funcs);
     return 0;
 }
 
@@ -10679,6 +11290,17 @@ int main(int argc, char **argv) {
                    i + 2 < argc) {
             pressure_compare_old_path = argv[++i];
             pressure_compare_new_path = argv[++i];
+        } else if (strcmp(argv[i], "--cost-report") == 0 &&
+                   i + 1 < argc) {
+            cost_report_path = argv[++i];
+        } else if (strcmp(argv[i], "--cost-fn") == 0 && i + 1 < argc) {
+            cost_fn_filter = argv[++i];
+        } else if (strcmp(argv[i], "--cost-compare") == 0 &&
+                   i + 2 < argc) {
+            cost_compare_old_path = argv[++i];
+            cost_compare_new_path = argv[++i];
+        } else if (strcmp(argv[i], "--cost-annotate") == 0) {
+            cost_annotate = true;
         } else {
             *NIB_VEC_PUSH(&inputs_vec, "input files") = argv[i];
         }
@@ -10696,12 +11318,27 @@ int main(int argc, char **argv) {
                                         pressure_compare_new_path);
     }
 
+    if (cost_compare_old_path || cost_compare_new_path) {
+        if (!cost_compare_old_path || !cost_compare_new_path ||
+            ninputs != 0) {
+            fprintf(stderr,
+                    "usage: nibbind --cost-compare old new "
+                    "[--cost-fn name]\n");
+            return 1;
+        }
+        return compare_cost_reports(cost_compare_old_path,
+                                    cost_compare_new_path);
+    }
+
     if (ninputs == 0) {
         fprintf(stderr,
                 "usage: nibbind [-o out.asm] [--pressure-report file]\n"
+                "               [--cost-report file] [--cost-annotate]\n"
                 "               [--pressure-fn name] file.nir ...\n"
                 "       nibbind --pressure-compare old new "
-                "[--pressure-fn name]\n");
+                "[--pressure-fn name]\n"
+                "       nibbind --cost-compare old new "
+                "[--cost-fn name]\n");
         return 1;
     }
 
@@ -10964,6 +11601,9 @@ int main(int argc, char **argv) {
     emit_module(inputs[ninputs - 1]);
 
     fclose(out_asm);
+    if ((cost_report_path || cost_annotate) &&
+        analyze_asm_costs(outpath, cost_report_path, cost_annotate) != 0)
+        return 1;
     write_pressure_report(pressure_report_path);
     if (bind_errors > 0)
         return 1;

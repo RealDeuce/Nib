@@ -2662,6 +2662,57 @@ else
     fail "pressure-compare-filter" "function filter did not apply"
 fi
 
+if ./nibbind tests/t_byte_vreg.nir -o "$TEST_TMPDIR"/t_cost.asm \
+     --cost-report "$TEST_TMPDIR"/t_cost.txt --cost-annotate \
+     >/dev/null 2>&1 &&
+   ./nibasm "$TEST_TMPDIR"/t_cost.asm \
+     -o "$TEST_TMPDIR"/t_cost.bin >/dev/null 2>&1; then
+    if grep -q '^# Nib cost report$' "$TEST_TMPDIR"/t_cost.txt &&
+       grep -q '^== t_byte_vreg_test_byte_index ==$' \
+         "$TEST_TMPDIR"/t_cost.txt &&
+       grep -q '^summary: instructions=.*bytes=.*clocks=.*unknown=0' \
+         "$TEST_TMPDIR"/t_cost.txt &&
+       grep -q '^mix: .*memory=.*push-pop=.*branch=' \
+         "$TEST_TMPDIR"/t_cost.txt &&
+       grep -q 'cost: clocks=.*form="mov reg16, mem16"' \
+         "$TEST_TMPDIR"/t_cost.asm; then
+        pass "cost-report: totals, mix, and annotated asm emitted"
+    else
+        fail "cost-report" "expected cost report or annotations missing"
+    fi
+else
+    fail "cost-report" "cost report generation or annotated assemble failed"
+fi
+
+if ./nibbind tests/t_loop_body.nir -o "$TEST_TMPDIR"/t_cost_loop.asm \
+     --cost-report "$TEST_TMPDIR"/t_cost_loop.txt >/dev/null 2>&1 &&
+   grep -q '^loops:$' "$TEST_TMPDIR"/t_cost_loop.txt &&
+   grep -q '^  .*instructions=.*clocks=' "$TEST_TMPDIR"/t_cost_loop.txt; then
+    pass "cost-report: backward branch loop body summarized"
+else
+    fail "cost-report-loop" "loop summary missing"
+fi
+
+if ./nibbind --cost-compare "$TEST_TMPDIR"/t_cost.txt \
+     "$TEST_TMPDIR"/t_cost.txt > "$TEST_TMPDIR"/cost_compare_same.txt 2>&1 &&
+   grep -q '^No cost changes\.$' "$TEST_TMPDIR"/cost_compare_same.txt; then
+    pass "cost-compare: identical reports are quiet"
+else
+    fail "cost-compare-same" "identical cost reports were not quiet"
+fi
+
+if ./nibbind --cost-compare "$TEST_TMPDIR"/t_cost.txt \
+     "$TEST_TMPDIR"/t_cost.txt --cost-fn t_byte_vreg_test_byte_index \
+     > "$TEST_TMPDIR"/cost_compare_filter.txt 2>&1 &&
+   grep -q '^== t_byte_vreg_test_byte_index ==$' \
+     "$TEST_TMPDIR"/cost_compare_filter.txt &&
+   ! grep -q '^== t_byte_vreg_test_zext ==$' \
+     "$TEST_TMPDIR"/cost_compare_filter.txt; then
+    pass "cost-compare: --cost-fn filters functions"
+else
+    fail "cost-compare-filter" "function filter did not apply"
+fi
+
 # Byte vregs: zero_extend must not use word-from-byte mov (MOV BX, AL)
 if [ -f "$TEST_TMPDIR"/t_byte_vreg.asm ]; then
     if grep -Eq 'mov [A-D]L, [A-D]L|xor [A-D]H, [A-D]H|xor [A-D]X, [A-D]X|and (AX|BX|CX|DX|SI|DI), 0x00FF' "$TEST_TMPDIR"/t_byte_vreg.asm; then
