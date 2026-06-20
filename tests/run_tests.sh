@@ -1998,6 +1998,77 @@ else
     )"
 fi
 
+cat > "$TEST_TMPDIR"/t_stack_cache_byte.nir <<'NIR'
+; Binder regression: a byte spill with a dead sibling byte may be cached
+; as its parent word instead of consuming a BP frame spill slot.
+.fn stack_cache_byte
+.vreg %0, u8
+    mov %0, 1
+.vreg %1, u8
+    mov %1, 2
+.vreg %2, u8
+    mov %2, 3
+.vreg %3, u8
+    mov %3, 4
+.vreg %4, u8
+    mov %4, 5
+.vreg %5, u8
+    mov %5, 6
+.vreg %6, u8
+    mov %6, 7
+.vreg %7, u8
+    mov %7, 8
+.vreg %8, u8
+    mov %8, 9
+.vreg %9, u8
+    mov %9, 10
+.vreg %10, u8
+    add %10, %1, %2
+.vreg %11, u8
+    add %11, %3, %4
+.vreg %12, u8
+    add %12, %5, %6
+.vreg %13, u8
+    add %13, %7, %8
+.vreg %14, u8
+    add %14, %10, %11
+.vreg %15, u8
+    add %15, %12, %13
+.vreg %16, u8
+    add %16, %14, %15
+.vreg %17, u8
+    add %17, %0, %9
+    retval %17
+    ret
+.endfn
+NIR
+if ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_byte.txt \
+     --pressure-fn stack_cache_byte "$TEST_TMPDIR"/t_stack_cache_byte.nir \
+     -o "$TEST_TMPDIR"/t_stack_cache_byte.asm >/dev/null 2>&1; then
+    if ./nibasm "$TEST_TMPDIR"/t_stack_cache_byte.asm \
+          -o "$TEST_TMPDIR"/t_stack_cache_byte.bin >/dev/null 2>&1 &&
+       grep -q '^summary: .*spills=2' \
+          "$TEST_TMPDIR"/t_stack_cache_byte.txt &&
+       grep -q '^spill-actions: .*stack-cache-push=1' \
+          "$TEST_TMPDIR"/t_stack_cache_byte.txt &&
+       grep -q '^spill-actions: .*stack-cache-pop=1' \
+          "$TEST_TMPDIR"/t_stack_cache_byte.txt &&
+       grep -q 'push AX' "$TEST_TMPDIR"/t_stack_cache_byte.asm &&
+       grep -q 'pop AX' "$TEST_TMPDIR"/t_stack_cache_byte.asm &&
+       ! grep -q 'sub sp, 6' "$TEST_TMPDIR"/t_stack_cache_byte.asm; then
+        pass "stack-cache-byte: byte spill caches through parent word"
+    else
+        fail "stack-cache-byte" "byte spill did not use parent-word cache"
+    fi
+else
+    fail "stack-cache-byte" "$(
+        ./nibbind --pressure-report "$TEST_TMPDIR"/t_stack_cache_byte.txt \
+          --pressure-fn stack_cache_byte \
+          "$TEST_TMPDIR"/t_stack_cache_byte.nir \
+          -o "$TEST_TMPDIR"/t_stack_cache_byte.asm 2>&1 | tail -1
+    )"
+fi
+
 cat > "$TEST_TMPDIR"/t_high_vregs.nir <<'NIR'
 ; Binder regression: functions with vregs above 255 must still get
 ; real registers/spills and address operands, not PREG_NONE/(null).

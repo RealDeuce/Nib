@@ -10,13 +10,10 @@
 - Binder allocator next pass:
   - Use the reports to target high-pressure Serif functions such as RTC
     read/write paths and framebuffer blits before changing heuristics.
-  - Extend stack-cache spill planning to byte values through the paired
-    spill-word model:
+  - Extend stack-cache spill planning to paired byte values through the
+    shared spill-word model:
     - cache a paired low/high byte spill as its parent word when both
       halves have compatible def/use spans;
-    - allow a single byte to use a parent-word push/pop only when the
-      sibling byte is absent, dead across the span, or restored separately
-      before any use;
     - reject byte stack-cache candidates when the restore instruction needs
       the sibling byte or would clobber a live parent register.
   - Add rematerialization locations for constants and labels so cheap

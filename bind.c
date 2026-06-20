@@ -4684,7 +4684,7 @@ static int vreg_remat_cost(func_t *fn, int v) {
 static int vreg_stack_cache_cost(func_t *fn, int v) {
     if (!fn->vregs[v].stack_spill_eligible)
         return INT_MAX / 4;
-    if (fn->vregs[v].is_byte || fn->vregs[v].is_seg)
+    if (fn->vregs[v].is_seg)
         return INT_MAX / 4;
     return v20_cost.push_reg16 + v20_cost.pop_reg16;
 }
@@ -4909,11 +4909,18 @@ static int choose_stack_cache_reg(func_t *fn, int v, int def, int use,
     int best_score = INT_MIN;
     for (int r = 0; r < psz; r++) {
         int preg = pool[r];
-        if (preg == PREG_SP || preg >= PREG_ES)
+        int storage_preg = preg;
+        if (preg >= PREG_AL && preg <= PREG_BH)
+            storage_preg = preg_alias_parent[preg];
+        if (storage_preg == PREG_SP || storage_preg >= PREG_ES)
             continue;
         if (((def_free >> preg) & 1u) == 0)
             continue;
         if (((use_free >> preg) & 1u) == 0)
+            continue;
+        if (((def_free >> storage_preg) & 1u) == 0)
+            continue;
+        if (((use_free >> storage_preg) & 1u) == 0)
             continue;
         int score = color_speed_score(fn, v, preg, r);
         if (score > best_score) {
@@ -5029,7 +5036,7 @@ static void plan_stack_cache_spills(func_t *fn, bool bp_available) {
     for (int v = 0; v < fn->nvregs; v++) {
         if (fn->vregs[v].spill_slot < 0)
             continue;
-        if (fn->vregs[v].is_byte || fn->vregs[v].is_seg ||
+        if (fn->vregs[v].is_seg ||
             fn->vregs[v].fixed || fn->vregs[v].is_stack_home ||
             fn->vregs[v].is_local_slot)
             continue;
@@ -5460,8 +5467,10 @@ static void rins_stack_cache_pop_for_insn(func_t *fn, int ir_idx) {
         if (!fn->vregs[v].stack_spill_eligible ||
             fn->vregs[v].stack_spill_use != ir_idx)
             continue;
-        rins_asm_spill(fn, SPILL_STACK_POP, "    pop %s",
-                       preg_name[fn->vregs[v].assigned]);
+        int preg = fn->vregs[v].assigned;
+        if (preg >= PREG_AL && preg <= PREG_BH)
+            preg = preg_alias_parent[preg];
+        rins_asm_spill(fn, SPILL_STACK_POP, "    pop %s", preg_name[preg]);
     }
 }
 
@@ -5470,8 +5479,10 @@ static void rins_stack_cache_push_for_insn(func_t *fn, int ir_idx) {
         if (!fn->vregs[v].stack_spill_eligible ||
             fn->vregs[v].stack_spill_def != ir_idx)
             continue;
-        rins_asm_spill(fn, SPILL_STACK_PUSH, "    push %s",
-                       preg_name[fn->vregs[v].assigned]);
+        int preg = fn->vregs[v].assigned;
+        if (preg >= PREG_AL && preg <= PREG_BH)
+            preg = preg_alias_parent[preg];
+        rins_asm_spill(fn, SPILL_STACK_PUSH, "    push %s", preg_name[preg]);
     }
 }
 
