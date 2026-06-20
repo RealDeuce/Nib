@@ -513,10 +513,14 @@ fi
 
 # Saturating add: flag check block should emit JNC
 if [ -f "$TEST_TMPDIR"/t_flags.asm ]; then
-    if grep -q "jnc" "$TEST_TMPDIR"/t_flags.asm; then
-        pass "flag-check: JNC emitted for CF check"
+    flag_loop_window=$(sed -n '/t_flags_flag_loop:/,/^[[:space:]]*ret$/p' "$TEST_TMPDIR"/t_flags.asm)
+    if grep -q "jnc" "$TEST_TMPDIR"/t_flags.asm &&
+       printf "%s\n" "$flag_loop_window" | grep -q 'dec ' &&
+       printf "%s\n" "$flag_loop_window" | grep -q 'jnz t_flags_flag_loop_loop' &&
+       ! printf "%s\n" "$flag_loop_window" | grep -q '???'; then
+        pass "flag-check: direct flag branches emitted"
     else
-        fail "flag-check" "no JNC in flag check block"
+        fail "flag-check" "flag check block did not lower to valid branches"
     fi
 fi
 

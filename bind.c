@@ -1907,10 +1907,17 @@ static void parse_function(FILE *fp, func_t *fn, char *first_line) {
             read_word(p, ins->name, sizeof(ins->name));
         }
         else if (strcmp(opname, "jz") == 0) {
-            ins->op = IR_JZ;
-            ins->src1 = parse_vreg(p, &p);
-            skip_comma(&p);
-            read_word(p, ins->name, sizeof(ins->name));
+            p = skip_ws(p);
+            if (*p == '%') {
+                ins->op = IR_JZ;
+                ins->src1 = parse_vreg(p, &p);
+                skip_comma(&p);
+                read_word(p, ins->name, sizeof(ins->name));
+            } else {
+                ins->op = IR_CJMP;
+                strncpy(ins->asm_ann, opname, sizeof(ins->asm_ann) - 1);
+                read_word(p, ins->name, sizeof(ins->name));
+            }
         }
         else if (strcmp(opname, "call") == 0) {
             ins->op = IR_CALL;
@@ -9499,6 +9506,20 @@ static const char *cmp_jcc_for_truth(const char *op, bool jump_if_true) {
     return NULL;
 }
 
+static const char *invert_jcc(const char *jcc) {
+    if (strcmp(jcc, "jc") == 0) return "jnc";
+    if (strcmp(jcc, "jnc") == 0) return "jc";
+    if (strcmp(jcc, "jo") == 0) return "jno";
+    if (strcmp(jcc, "jno") == 0) return "jo";
+    if (strcmp(jcc, "jz") == 0) return "jnz";
+    if (strcmp(jcc, "jnz") == 0) return "jz";
+    if (strcmp(jcc, "js") == 0) return "jns";
+    if (strcmp(jcc, "jns") == 0) return "js";
+    if (strcmp(jcc, "jp") == 0) return "jnp";
+    if (strcmp(jcc, "jnp") == 0) return "jp";
+    return NULL;
+}
+
 static bool emit_condition_branch(func_t *fn, int insn_idx, int cond_vreg,
                                   const char *label, bool jump_if_true) {
     ir_insn_t *def = find_vreg_def(fn, insn_idx, cond_vreg);
@@ -10725,10 +10746,23 @@ static void emit_function(func_t *fn) {
             break;
 
         case IR_CJMP:
-            /* Flag-check conditional jump with scoped label */
-            fprintf(out_asm, "    %s %s\n", ins->asm_ann,
-                    scoped_label(fn, ins->name));
+        {
+            int j = next_effective_insn(fn, i + 1);
+            int l = j >= 0 ? next_effective_insn(fn, j + 1) : -1;
+            const char *inv = invert_jcc(ins->asm_ann);
+            if (inv && j >= 0 && l >= 0 &&
+                fn->insns[j].op == IR_JMP &&
+                ir_label_named(&fn->insns[l], ins->name)) {
+                fprintf(out_asm, "    %s %s\n", inv,
+                        scoped_label(fn, fn->insns[j].name));
+                skip_ir_until = j;
+            } else {
+                /* Flag-check conditional jump with scoped label */
+                fprintf(out_asm, "    %s %s\n", ins->asm_ann,
+                        scoped_label(fn, ins->name));
+            }
             break;
+        }
 
         case IR_ASM:
             if (ins->asm_ann[0])

@@ -51,3 +51,13 @@ fn and_flags(a: u16, b: u16) -> u16 {
     }
     return result;
 }
+
+fn flag_loop(count: u16) -> u16 {
+loop:
+    count := count - 1 {
+        !ZF: {
+            goto loop;
+        }
+    }
+    return count;
+}
