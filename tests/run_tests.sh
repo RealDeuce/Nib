@@ -2669,6 +2669,16 @@ if [ -f "$TEST_TMPDIR"/t_byte_vreg.asm ]; then
     else
         fail "byte-vreg" "zero_extend uses invalid word-from-byte move"
     fi
+    byte_index_window=$(sed -n \
+        '/t_byte_vreg_test_byte_index:/,/^[[:space:]]*ret$/p' \
+        "$TEST_TMPDIR"/t_byte_vreg.asm)
+    if printf "%s\n" "$byte_index_window" | grep -q 'mov SI, AX' &&
+       printf "%s\n" "$byte_index_window" | grep -q 'and SI, 0x00FF' &&
+       ! printf "%s\n" "$byte_index_window" | grep -q 'xor AX, AX'; then
+        pass "byte-vreg: AL index survives indexed load widening"
+    else
+        fail "byte-vreg-index" "AL index was clobbered while widening"
+    fi
 fi
 
 # memset/memcopy must set up DI, AL/SI, CX before string ops

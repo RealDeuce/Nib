@@ -3,6 +3,10 @@
 
 u8 global_byte;
 
+u16[4] word_dispatch at(0xE000:0x0200) = {
+    0x1111, 0x2222, 0x3333, 0x4444
+};
+
 fn test_zext(val: u8) -> u16 {
     u16 wide = zero_extend(val);
     return wide;
@@ -16,4 +20,8 @@ fn test_global_byte() -> u8 {
 fn test_byte_alu(a: u8, b: u8) -> u8 {
     u8 c = a + b;
     return c;
+}
+
+fn test_byte_index(idx: u8 in AL) -> u16 {
+    return word_dispatch[idx];
 }

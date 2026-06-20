@@ -6591,14 +6591,26 @@ static void rins_mov_preg_from_vreg(func_t *fn, int expected, int src_vreg) {
                 rins_asm(fn, "    mov %s, %s",
                          preg_name[preg_alias_lo[expected]], src);
         } else {
-            rins_push_scratch(fn, PREG_AX);
-            rins_asm(fn, "    xor AX, AX");
-            if (is_spilled(fn, src_vreg))
-                rins_spill_load_to_reg(fn, PREG_AL, src_vreg);
-            else
-                rins_asm(fn, "    mov AL, %s", src);
-            rins_asm(fn, "    mov %s, AX", dst);
-            rins_pop_scratch(fn, PREG_AX);
+            int src_parent = (!is_spilled(fn, src_vreg) &&
+                              actual >= PREG_AL && actual <= PREG_BH)
+                             ? preg_alias_parent[actual] : PREG_NONE;
+            if (src_parent >= PREG_AX && src_parent <= PREG_BX) {
+                rins_asm(fn, "    mov %s, %s", dst,
+                         preg_name[src_parent]);
+                if (actual == preg_alias_lo[src_parent])
+                    rins_asm(fn, "    and %s, 0x00FF", dst);
+                else
+                    rins_asm(fn, "    shr %s, 8", dst);
+            } else {
+                rins_push_scratch(fn, PREG_AX);
+                rins_asm(fn, "    xor AX, AX");
+                if (is_spilled(fn, src_vreg))
+                    rins_spill_load_to_reg(fn, PREG_AL, src_vreg);
+                else
+                    rins_asm(fn, "    mov AL, %s", src);
+                rins_asm(fn, "    mov %s, AX", dst);
+                rins_pop_scratch(fn, PREG_AX);
+            }
         }
         return;
     }
@@ -7710,11 +7722,23 @@ static void emit_mov(func_t *fn, int dst, int src) {
         if (dst_preg >= PREG_AX && dst_preg <= PREG_BX) {
             fprintf(out_asm, "    mov %s, %s\n", preg_name[preg_alias_lo[dst_preg]], s);
         } else {
-            fprintf(out_asm, "    push AX\n");
-            fprintf(out_asm, "    xor AX, AX\n");
-            fprintf(out_asm, "    mov AL, %s\n", s);
-            fprintf(out_asm, "    mov %s, AX\n", d);
-            fprintf(out_asm, "    pop AX\n");
+            int src_parent = (!is_spilled(fn, src) &&
+                              src_preg >= PREG_AL && src_preg <= PREG_BH)
+                             ? preg_alias_parent[src_preg] : PREG_NONE;
+            if (src_parent >= PREG_AX && src_parent <= PREG_BX) {
+                fprintf(out_asm, "    mov %s, %s\n", d,
+                        preg_name[src_parent]);
+                if (src_preg == preg_alias_lo[src_parent])
+                    fprintf(out_asm, "    and %s, 0x00FF\n", d);
+                else
+                    fprintf(out_asm, "    shr %s, 8\n", d);
+            } else {
+                fprintf(out_asm, "    push AX\n");
+                fprintf(out_asm, "    xor AX, AX\n");
+                fprintf(out_asm, "    mov AL, %s\n", s);
+                fprintf(out_asm, "    mov %s, AX\n", d);
+                fprintf(out_asm, "    pop AX\n");
+            }
         }
     } else {
         fprintf(out_asm, "    mov %s, %s\n", d, s);
