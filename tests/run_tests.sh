@@ -147,6 +147,18 @@ if [ -f tests/t_param_overflow.nir ]; then
 else
     skip "param-overflow" "nir file not generated"
 fi
+
+if [ -f tests/t_import_struct.nir ]; then
+    if grep -q '^\.local %.* 12, "blit"$' tests/t_import_struct.nir &&
+       grep -q '^    add %.*, %.*, 11$' tests/t_import_struct.nir &&
+       grep -q '^    call %.*, draw, %.*, %.*$' tests/t_import_struct.nir; then
+        pass "import-struct: imported nested struct local has layout"
+    else
+        fail "import-struct" "imported struct local layout was not emitted"
+    fi
+else
+    skip "import-struct" "nir file not generated"
+fi
 echo ""
 
 # Phase 5: Assemble tests — bound .asm files should assemble

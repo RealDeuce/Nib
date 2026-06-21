@@ -472,6 +472,14 @@ static const char *reg_name_str(int id, reg_class_t rc) {
 
 static bool type_is_aggregate(type_t *t);
 static bool type_is_integer(type_t *t);
+static const char *type_str(type_t *t);
+
+static bool type_needs_word_alignment(type_t *t) {
+    if (!t) return false;
+    return t->kind == TYPE_U16 || t->kind == TYPE_U32 ||
+           t->kind == TYPE_SEG || t->kind == TYPE_FAR ||
+           t->kind == TYPE_STRUCT;
+}
 
 static int type_size(type_t *t) {
     if (!t) return 0;
@@ -483,11 +491,102 @@ static int type_size(type_t *t) {
     case TYPE_BOOL:     return 0;
     case TYPE_ARRAY:    return t->element_type ? type_size(t->element_type) * t->array_size : 0;
     case TYPE_BCD:      return t->array_size;
-    case TYPE_STRUCT:   return 0; /* would need struct lookup */
+    case TYPE_STRUCT: {
+        if (!t->struct_name) return 0;
+        int si = find_struct(t->struct_name);
+        if (si < 0) return 0;
+        int bit_pos = 0;
+        for (field_t *f = C.structs.items[si].fields; f; f = f->next) {
+            if (f->is_bits) {
+                bit_pos += f->bits;
+                continue;
+            }
+            if (bit_pos & 7)
+                bit_pos = (bit_pos + 7) & ~7;
+            int byte_pos = bit_pos / 8;
+            if (C.structs.items[si].aligned &&
+                type_needs_word_alignment(f->type) && (byte_pos & 1))
+                byte_pos++;
+            bit_pos = (byte_pos + type_size(f->type)) * 8;
+        }
+        return (bit_pos + 7) / 8;
+    }
     case TYPE_FAR:      return 4;
     case TYPE_VOID:     return 0;
     }
     return 0;
+}
+
+typedef struct {
+    bool found;
+    bool is_bits;
+    int byte_offset;
+    int bit_offset;
+    int bits;
+    type_t *storage_type;
+    type_t *access_type;
+} field_layout_t;
+
+static field_layout_t struct_field_layout(type_t *struct_type,
+                                           const char *field_name,
+                                           bool raw_access,
+                                           int line) {
+    field_layout_t out;
+    memset(&out, 0, sizeof(out));
+    if (!struct_type || struct_type->kind != TYPE_STRUCT ||
+        !struct_type->struct_name) {
+        if (struct_type)
+            cerr(line, "field access on non-struct type '%s'",
+                 type_str(struct_type));
+        return out;
+    }
+
+    int si = find_struct(struct_type->struct_name);
+    if (si < 0) {
+        cerr(line, "unknown struct type '%s'", struct_type->struct_name);
+        return out;
+    }
+
+    int bit_pos = 0;
+    for (field_t *f = C.structs.items[si].fields; f; f = f->next) {
+        int field_bit_pos;
+        if (f->is_bits) {
+            field_bit_pos = bit_pos;
+            bit_pos += f->bits;
+        } else {
+            if (bit_pos & 7)
+                bit_pos = (bit_pos + 7) & ~7;
+            int byte_pos = bit_pos / 8;
+            if (C.structs.items[si].aligned &&
+                type_needs_word_alignment(f->type) && (byte_pos & 1))
+                byte_pos++;
+            field_bit_pos = byte_pos * 8;
+            bit_pos = (byte_pos + type_size(f->type)) * 8;
+        }
+
+        if (!f->name || strcmp(f->name, field_name) != 0)
+            continue;
+
+        out.found = true;
+        out.is_bits = f->is_bits;
+        out.byte_offset = field_bit_pos / 8;
+        out.bit_offset = field_bit_pos & 7;
+        out.bits = f->bits;
+        if (f->is_bits) {
+            out.storage_type = (f->bits <= 8) ?
+                               mk_type(TYPE_U8) : mk_type(TYPE_U16);
+            out.access_type = out.storage_type;
+        } else {
+            out.storage_type = f->type;
+            out.access_type = (f->as_type && !raw_access) ?
+                              f->as_type : f->type;
+        }
+        return out;
+    }
+
+    cerr(line, "struct '%s' has no field '%s'",
+         struct_type->struct_name, field_name);
+    return out;
 }
 
 static bool should_stack_allocate_local(const char *name, type_t *type) {
@@ -1183,6 +1282,93 @@ static typed_vreg_t emit_stack_far_addr(symbol_t *sym) {
     fprintf(C.nir, ".vreg %%%d, seg\n", seg);
     fprintf(C.nir, "    mov %%%d, %%%d\n", seg, seg_tmp);
     return TV_FAR(off, seg);
+}
+
+static int emit_addr_plus_const(int base, int offset) {
+    if (offset == 0)
+        return base;
+    int addr = alloc_vreg();
+    fprintf(C.nir, "    add %%%d, %%%d, %d\n", addr, base, offset);
+    return addr;
+}
+
+static typed_vreg_t emit_struct_field_value(typed_vreg_t obj,
+                                            const char *field_name,
+                                            bool raw_access,
+                                            int line) {
+    if (obj.type && obj.type->kind == TYPE_FAR) {
+        cerr(line, "use backtick for far components: ptr`seg, ptr`off");
+        return TV(alloc_vreg(), mk_type(TYPE_U16));
+    }
+
+    field_layout_t fl = struct_field_layout(obj.type, field_name,
+                                            raw_access, line);
+    if (!fl.found)
+        return TV(alloc_vreg(), mk_type(TYPE_U16));
+    if (fl.is_bits) {
+        int dst = alloc_vreg();
+        fprintf(C.nir, "    field %%%d, %%%d, %s\n",
+                dst, obj.vreg, field_name);
+        return TV(dst, fl.access_type);
+    }
+
+    int addr = emit_addr_plus_const(obj.vreg, fl.byte_offset);
+    if (fl.storage_type && fl.storage_type->kind == TYPE_FAR) {
+        int off_v = alloc_vreg();
+        int seg_tmp = alloc_vreg();
+        int seg_v = alloc_vreg();
+        fprintf(C.nir, "    load %%%d, %%%d\n", off_v, addr);
+        int seg_addr = emit_addr_plus_const(addr, 2);
+        fprintf(C.nir, "    load %%%d, %%%d\n", seg_tmp, seg_addr);
+        fprintf(C.nir, ".vreg %%%d, seg\n", seg_v);
+        fprintf(C.nir, "    mov %%%d, %%%d\n", seg_v, seg_tmp);
+        return TV_FAR(off_v, seg_v);
+    }
+    if (type_is_aggregate(fl.storage_type))
+        return TV(addr, fl.access_type);
+
+    int dst = alloc_vreg();
+    const char *op = (fl.storage_type && fl.storage_type->kind == TYPE_U8)
+        ? "loadb" : "load";
+    fprintf(C.nir, "    %s %%%d, %%%d\n", op, dst, addr);
+    return TV(dst, fl.access_type);
+}
+
+static void emit_struct_field_store(expr_t *target, typed_vreg_t val) {
+    typed_vreg_t obj = emit_expr_typed(target->u.field.object);
+    field_layout_t fl = struct_field_layout(obj.type, target->u.field.field_name,
+                                            false, target->line);
+    if (!fl.found)
+        return;
+    if (fl.is_bits) {
+        fprintf(C.nir, "    storefield %%%d, %s, %%%d\n",
+                obj.vreg, target->u.field.field_name, val.vreg);
+        return;
+    }
+
+    int addr = emit_addr_plus_const(obj.vreg, fl.byte_offset);
+    if (fl.storage_type && fl.storage_type->kind == TYPE_FAR) {
+        int off_v = val.vreg;
+        int seg_v = val.vreg_seg;
+        if (seg_v < 0) {
+            off_v = alloc_vreg();
+            seg_v = alloc_vreg();
+            fprintf(C.nir, "    far.off %%%d, %%%d\n", off_v, val.vreg);
+            fprintf(C.nir, "    far.seg %%%d, %%%d\n", seg_v, val.vreg);
+        }
+        fprintf(C.nir, "    store %%%d, %%%d\n", addr, off_v);
+        int seg_addr = emit_addr_plus_const(addr, 2);
+        fprintf(C.nir, "    store %%%d, %%%d\n", seg_addr, seg_v);
+        return;
+    }
+    if (type_is_aggregate(fl.storage_type)) {
+        cerr(target->line, "aggregate field assignment is not supported");
+        return;
+    }
+
+    const char *op = (fl.storage_type && fl.storage_type->kind == TYPE_U8)
+        ? "storeb" : "store";
+    fprintf(C.nir, "    %s %%%d, %%%d\n", op, addr, val.vreg);
 }
 
 static typed_vreg_t emit_expr_typed(expr_t *e) {
@@ -2056,48 +2242,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
     }
     case EXPR_FIELD: {
         typed_vreg_t obj = emit_expr_typed(e->u.field.object);
-
-        /* far type: use backtick for component access (ptr`seg, ptr`off) */
-        if (obj.type && obj.type->kind == TYPE_FAR) {
-            cerr(e->line, "use backtick for far components: ptr`seg, ptr`off");
-            return TV(alloc_vreg(), mk_type(TYPE_U16));
-        }
-
-        /* Verify the struct type has this field */
-        type_t *field_type = NULL;
-        if (obj.type && obj.type->kind == TYPE_STRUCT && obj.type->struct_name) {
-            int si = find_struct(obj.type->struct_name);
-            if (si >= 0) {
-                bool found = false;
-                for (field_t *f = C.structs.items[si].fields; f; f = f->next) {
-                    if (f->name && strcmp(f->name, e->u.field.field_name) == 0) {
-                        found = true;
-                        if (f->as_type) {
-                            /* Typed pointer field — return the as type */
-                            field_type = f->as_type;
-                        } else if (f->is_bits) {
-                            field_type = (f->bits <= 8) ?
-                                         mk_type(TYPE_U8) : mk_type(TYPE_U16);
-                        } else {
-                            field_type = f->type;
-                        }
-                        break;
-                    }
-                }
-                if (!found)
-                    cerr(e->line, "struct '%s' has no field '%s'",
-                         obj.type->struct_name, e->u.field.field_name);
-            } else {
-                cerr(e->line, "unknown struct type '%s'", obj.type->struct_name);
-            }
-        } else if (obj.type) {
-            cerr(e->line, "field access on non-struct type '%s'", type_str(obj.type));
-        }
-        if (!field_type) field_type = mk_type(TYPE_U16);
-
-        int dst = alloc_vreg();
-        fprintf(C.nir, "    field %%%d, %%%d, %s\n", dst, obj.vreg, e->u.field.field_name);
-        return TV(dst, field_type);
+        return emit_struct_field_value(obj, e->u.field.field_name,
+                                       false, e->line);
     }
     case EXPR_MEM: {
         return emit_mem_load_expr_typed(e, NULL);
@@ -2193,35 +2339,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             return TV(dst, mk_type(TYPE_U16));
         }
 
-        type_t *field_type = NULL;
-        if (obj.type && obj.type->kind == TYPE_STRUCT && obj.type->struct_name) {
-            int si = find_struct(obj.type->struct_name);
-            if (si >= 0) {
-                bool found = false;
-                for (field_t *f = C.structs.items[si].fields; f; f = f->next) {
-                    if (f->name && strcmp(f->name, e->u.field.field_name) == 0) {
-                        found = true;
-                        /* Raw access: always return the storage type, not as_type */
-                        if (f->is_bits)
-                            field_type = (f->bits <= 8) ? mk_type(TYPE_U8) : mk_type(TYPE_U16);
-                        else
-                            field_type = f->type;
-                        break;
-                    }
-                }
-                if (!found)
-                    cerr(e->line, "struct '%s' has no field '%s'",
-                         obj.type->struct_name, e->u.field.field_name);
-            } else {
-                cerr(e->line, "unknown struct type '%s'", obj.type->struct_name);
-            }
-        } else if (obj.type) {
-            cerr(e->line, "raw field access on non-struct type '%s'", type_str(obj.type));
-        }
-        if (!field_type) field_type = mk_type(TYPE_U16);
-        int dst = alloc_vreg();
-        fprintf(C.nir, "    field %%%d, %%%d, %s\n", dst, obj.vreg, e->u.field.field_name);
-        return TV(dst, field_type);
+        return emit_struct_field_value(obj, e->u.field.field_name,
+                                       true, e->line);
     }
     case EXPR_CAST: {
         /* as — zero-instruction type reinterpretation */
@@ -2834,9 +2953,7 @@ static void emit_stmt(stmt_t *s) {
                 fprintf(C.nir, "    %s %%%d[%%%d], %%%d\n", sop, arr_tv.vreg, sidx, val.vreg);
             }
         } else if (t->kind == EXPR_FIELD) {
-            int obj = emit_expr(t->u.field.object);
-            fprintf(C.nir, "    storefield %%%d, %s, %%%d\n",
-                    obj, t->u.field.field_name, val.vreg);
+            emit_struct_field_store(t, val);
         } else {
             cerr(s->line, "invalid assignment target");
         }
@@ -3815,7 +3932,8 @@ static char *nif_skip_ws(char *p) {
 static char *nif_read_word(char *p, char *buf, int bufsz) {
     p = nif_skip_ws(p);
     int i = 0;
-    while (*p && !isspace(*p) && *p != ',' && *p != ')' && i < bufsz - 1)
+    while (*p && !isspace(*p) && *p != ',' && *p != ')' &&
+           *p != ':' && i < bufsz - 1)
         buf[i++] = *p++;
     buf[i] = '\0';
     return p;

@@ -1,0 +1,22 @@
+// Test: imported struct locals keep their field layout and size.
+
+use "t_import_struct_lib.nif";
+
+extern fn far [0xE000:0x0100] draw(desc: far32 in ES:SI) clobbers();
+
+fn use_blit() {
+    u8[2] src;
+    struct Blit blit;
+
+    src[0] := 0x12;
+    src[1] := 0x34;
+
+    blit.buf.src := @src;
+    blit.buf.stride := 2;
+    blit.buf.width := 16;
+    blit.buf.height := 1;
+    blit.dst_x := 4;
+    blit.dst_y := 0;
+
+    draw(@blit);
+}

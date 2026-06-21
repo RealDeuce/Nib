@@ -1,0 +1,15 @@
+// Test library: exported nested struct layout for .nif imports.
+
+pub struct Buf {
+    src: far32;
+    stride: u16;
+    width: u16;
+    height: u8;
+}
+
+pub struct Blit {
+    buf: struct Buf;
+    dst_x: u16;
+    dst_y: u8;
+}
+
