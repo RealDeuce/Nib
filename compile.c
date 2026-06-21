@@ -82,6 +82,7 @@ typedef struct {
     type_t *return_type;
     int     nreturns;
     type_t **return_types;
+    type_t **param_types;
     bool    *param_is_far;  /* which params are far type */
 } function_sig_t;
 
@@ -102,6 +103,7 @@ typedef NIB_VEC(const_sig_t) const_vec_t;
 typedef NIB_VEC(char *) str_vec_t;
 typedef NIB_VEC(int) int_vec_t;
 typedef NIB_VEC(bool) bool_vec_t;
+typedef NIB_VEC(type_t *) type_ptr_vec_t;
 
 typedef struct {
     int vreg;
@@ -422,6 +424,10 @@ static void register_function_returns(const char *name, int nparams,
         fn->param_is_far = nib_xcalloc((size_t)nparams,
                                        sizeof(*fn->param_is_far),
                                        "function parameter metadata");
+    if (nparams > 0)
+        fn->param_types = nib_xcalloc((size_t)nparams,
+                                      sizeof(*fn->param_types),
+                                      "function parameter types");
     int ri = 0;
     for (return_t *r = rets; r; r = r->next, ri++)
         fn->return_types[ri] = r->type;
@@ -429,6 +435,7 @@ static void register_function_returns(const char *name, int nparams,
     int ir_count = 0;
     int pi = 0;
     for (param_t *p = params; p; p = p->next, pi++) {
+        fn->param_types[pi] = p->type;
         fn->param_is_far[pi] = (p->type && p->type->kind == TYPE_FAR);
         ir_count++;
         if (fn->param_is_far[pi]) ir_count++; /* far splits into 2 */
@@ -776,6 +783,16 @@ typedef struct { int vreg; int vreg_seg; type_t *type; } typed_vreg_t;
 static typed_vreg_t emit_expr_typed(expr_t *e);
 static typed_vreg_t emit_expr_typed_for(expr_t *e, type_t *target);
 static typed_vreg_t emit_initializer_expr_typed(expr_t *e, type_t *target);
+
+static bool binop_is_shift(op_kind_t op) {
+    return op == NIB_SHL || op == NIB_SHR || op == NIB_SRSHR ||
+           op == NIB_ROL || op == NIB_ROR || op == NIB_RCL ||
+           op == NIB_RCR;
+}
+
+static bool binop_is_compare(op_kind_t op) {
+    return op >= NIB_EQ && op <= NIB_SGTE;
+}
 
 /* Recursively resolve all constant references to literals in an expression tree */
 static void resolve_constants_expr(expr_t *e) {
@@ -1496,9 +1513,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         type_t *result_type;
 
         /* Type check based on operator category */
-        bool is_cmp = (op >= NIB_EQ && op <= NIB_SGTE);
-        bool is_shift = (op == NIB_SHL || op == NIB_SHR || op == NIB_SRSHR ||
-                         op == NIB_ROL || op == NIB_ROR || op == NIB_RCL || op == NIB_RCR);
+        bool is_cmp = binop_is_compare(op);
+        bool is_shift = binop_is_shift(op);
 
         if (is_cmp) {
             result_type = check_compare(l.type, r.type, e->line);
@@ -1727,6 +1743,13 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             return TV(dst, mk_type(TYPE_VOID));
         }
 
+        /* Get function name and signature before emitting arguments so
+         * parameter types can provide literal/expression context. */
+        const char *fn_name = "?";
+        if (e->u.call.func->kind == EXPR_IDENT)
+            fn_name = e->u.call.func->u.ident;
+        int fi = find_function(fn_name);
+
         /* Emit arguments */
         int argc = expr_list_count(e->u.call.args);
         int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
@@ -1740,16 +1763,15 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             arg_seg_vregs[i] = -1;
         int ai = 0;
         for (expr_t *a = e->u.call.args; a; a = a->next, ai++) {
-            typed_vreg_t av = emit_expr_typed(a);
+            type_t *param_type = (fi >= 0 &&
+                                  ai < C.functions.items[fi].nparams)
+                ? C.functions.items[fi].param_types[ai] : NULL;
+            typed_vreg_t av = emit_expr_typed_for(a, param_type);
             arg_vregs[ai] = av.vreg;
             arg_seg_vregs[ai] = av.vreg_seg;
             arg_types[ai] = av.type;
         }
-        /* Get function name */
-        const char *fn_name = "?";
         type_t *ret_type = mk_type(TYPE_VOID);
-        if (e->u.call.func->kind == EXPR_IDENT)
-            fn_name = e->u.call.func->u.ident;
 
         /* Check for builtins — expand inline instead of call */
         int dst = alloc_vreg();
@@ -1967,9 +1989,7 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         }
 
         /* Not a builtin — regular function call */
-        int fi = -1;
         if (e->u.call.func->kind == EXPR_IDENT) {
-            fi = find_function(fn_name);
             if (fi >= 0) {
                 if (C.functions.items[fi].nparams != argc)
                     cerr(e->line, "'%s' expects %d arguments, got %d",
@@ -2027,6 +2047,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* addr as name from module(args...) */
         typed_vreg_t addr_val = emit_expr_typed(e->u.indirect_call.addr);
         const char *ext_name = e->u.indirect_call.extern_name;
+        const char *descriptor_name = ext_name;
+        int fi = find_indirect_descriptor(ext_name,
+                                          e->u.indirect_call.module_name,
+                                          &descriptor_name);
 
         /* Emit arguments */
         int argc = expr_list_count(e->u.indirect_call.args);
@@ -2039,7 +2063,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             arg_seg_vregs[i] = -1;
         int ai = 0;
         for (expr_t *a = e->u.indirect_call.args; a; a = a->next, ai++) {
-            typed_vreg_t av = emit_expr_typed(a);
+            type_t *param_type = (fi >= 0 &&
+                                  ai < C.functions.items[fi].nparams)
+                ? C.functions.items[fi].param_types[ai] : NULL;
+            typed_vreg_t av = emit_expr_typed_for(a, param_type);
             arg_vregs[ai] = av.vreg;
             arg_seg_vregs[ai] = av.vreg_seg;
         }
@@ -2047,11 +2074,6 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         int dst = alloc_vreg();
         type_t *ret_type = mk_type(TYPE_VOID);
 
-        /* Look up the extern for far-splitting info and return type */
-        const char *descriptor_name = ext_name;
-        int fi = find_indirect_descriptor(ext_name,
-                                          e->u.indirect_call.module_name,
-                                          &descriptor_name);
         if (fi >= 0)
             ret_type = C.functions.items[fi].return_type;
 
@@ -2105,6 +2127,8 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         /* addr as name(args...) */
         typed_vreg_t addr_val = emit_expr_typed(e->u.indirect_call.addr);
         const char *ext_name = e->u.indirect_call.extern_name;
+        const char *descriptor_name = ext_name;
+        int fi = find_indirect_descriptor(ext_name, NULL, &descriptor_name);
 
         if (addr_val.type && addr_val.type->kind == TYPE_FAR)
             cerr(e->line, "near indirect call target must be u16, got %s",
@@ -2120,7 +2144,10 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
             arg_seg_vregs[i] = -1;
         int ai = 0;
         for (expr_t *a = e->u.indirect_call.args; a; a = a->next, ai++) {
-            typed_vreg_t av = emit_expr_typed(a);
+            type_t *param_type = (fi >= 0 &&
+                                  ai < C.functions.items[fi].nparams)
+                ? C.functions.items[fi].param_types[ai] : NULL;
+            typed_vreg_t av = emit_expr_typed_for(a, param_type);
             arg_vregs[ai] = av.vreg;
             arg_seg_vregs[ai] = av.vreg_seg;
         }
@@ -2128,8 +2155,6 @@ static typed_vreg_t emit_expr_typed(expr_t *e) {
         int dst = alloc_vreg();
         type_t *ret_type = mk_type(TYPE_VOID);
 
-        const char *descriptor_name = ext_name;
-        int fi = find_indirect_descriptor(ext_name, NULL, &descriptor_name);
         if (fi >= 0)
             ret_type = C.functions.items[fi].return_type;
 
@@ -2369,7 +2394,73 @@ static typed_vreg_t emit_expr_typed_for(expr_t *e, type_t *target) {
         val.type = e->u.cast.target_type;
         return val;
     }
-    return emit_expr_typed(e);
+    if (target && type_is_integer(target) && e &&
+        e->kind == EXPR_LIT_INT) {
+        int r = alloc_vreg();
+        fprintf(C.nir, "    mov %%%d, %d\n", r, e->u.lit_int);
+        return TV(r, target);
+    }
+    if (target && type_is_integer(target) && e &&
+        e->kind == EXPR_UNOP &&
+        (e->u.unop.op == NIB_NEG || e->u.unop.op == NIB_NOT)) {
+        typed_vreg_t operand = emit_expr_typed_for(e->u.unop.operand,
+                                                   target);
+        if (e->u.unop.op == NIB_NEG) {
+            if (operand.type && !type_is_integer(operand.type))
+                cerr(e->line, "neg requires integer operand, got %s",
+                     type_str(operand.type));
+        } else if (operand.type && !type_is_integer(operand.type) &&
+                   operand.type->kind != TYPE_BOOL) {
+            cerr(e->line, "not requires integer or bool operand, got %s",
+                 type_str(operand.type));
+        }
+        int dst = alloc_vreg();
+        fprintf(C.nir, "    %s %%%d, %%%d\n",
+                op_str(e->u.unop.op), dst, operand.vreg);
+        return TV(dst, operand.type ? operand.type : target);
+    }
+    if (target && type_is_integer(target) && e &&
+        e->kind == EXPR_BINOP && !binop_is_compare(e->u.binop.op) &&
+        e->u.binop.op != NIB_XCHG) {
+        op_kind_t op = e->u.binop.op;
+        bool is_shift = binop_is_shift(op);
+        bool right_is_imm = (e->u.binop.right->kind == EXPR_LIT_INT);
+        int right_imm = right_is_imm ? e->u.binop.right->u.lit_int : 0;
+        typed_vreg_t l = emit_expr_typed_for(e->u.binop.left, target);
+        typed_vreg_t r = TV(-1, NULL);
+        if (!right_is_imm) {
+            type_t *right_target = is_shift ? NULL : target;
+            r = emit_expr_typed_for(e->u.binop.right, right_target);
+        }
+
+        type_t *result_type;
+        if (is_shift) {
+            if (l.type && !type_is_integer(l.type))
+                cerr(e->line, "shift/rotate operand must be integer, got %s",
+                     type_str(l.type));
+            result_type = l.type ? l.type : target;
+        } else {
+            result_type = check_arith(l.type, r.type, op, e->line);
+            if (!result_type)
+                result_type = target;
+        }
+
+        int dst = alloc_vreg();
+        if (right_is_imm)
+            fprintf(C.nir, "    %s %%%d, %%%d, %d\n",
+                    op_str(op), dst, l.vreg, right_imm);
+        else
+            fprintf(C.nir, "    %s %%%d, %%%d, %%%d\n",
+                    op_str(op), dst, l.vreg, r.vreg);
+        return TV(dst, result_type);
+    }
+
+    typed_vreg_t val = emit_expr_typed(e);
+    if (target && type_is_integer(target) && !val.type) {
+        val.type = target;
+        TV(val.vreg, target);
+    }
+    return val;
 }
 
 static typed_vreg_t emit_initializer_expr_typed(expr_t *e, type_t *target) {
@@ -2474,7 +2565,9 @@ static bool emit_multi_call_assign(expr_t *targets, expr_t *value, int line) {
         arg_seg_vregs[i] = -1;
     int ai = 0;
     for (expr_t *a = value->u.call.args; a; a = a->next, ai++) {
-        typed_vreg_t av = emit_expr_typed(a);
+        type_t *param_type = (ai < C.functions.items[fi].nparams)
+            ? C.functions.items[fi].param_types[ai] : NULL;
+        typed_vreg_t av = emit_expr_typed_for(a, param_type);
         arg_vregs[ai] = av.vreg;
         arg_seg_vregs[ai] = av.vreg_seg;
         arg_exprs[ai] = a;
@@ -3132,15 +3225,20 @@ static void emit_stmt(stmt_t *s) {
         /* tailcall expr — must be a function call */
         expr_t *e = s->u.tailcall_expr;
         if (e->kind == EXPR_CALL) {
+            const char *fn_name = "?";
+            if (e->u.call.func->kind == EXPR_IDENT)
+                fn_name = e->u.call.func->u.ident;
+            int fi = find_function(fn_name);
             int argc = expr_list_count(e->u.call.args);
             int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
                                          "tailcall arguments");
             int ai = 0;
-            for (expr_t *a = e->u.call.args; a; a = a->next, ai++)
-                arg_vregs[ai] = emit_expr(a);
-            const char *fn_name = "?";
-            if (e->u.call.func->kind == EXPR_IDENT)
-                fn_name = e->u.call.func->u.ident;
+            for (expr_t *a = e->u.call.args; a; a = a->next, ai++) {
+                type_t *param_type = (fi >= 0 &&
+                                      ai < C.functions.items[fi].nparams)
+                    ? C.functions.items[fi].param_types[ai] : NULL;
+                arg_vregs[ai] = emit_expr_typed_for(a, param_type).vreg;
+            }
             fprintf(C.nir, "    tailcall %s", fn_name);
             for (int i = 0; i < argc; i++)
                 fprintf(C.nir, ", %%%d", arg_vregs[i]);
@@ -3152,6 +3250,9 @@ static void emit_stmt(stmt_t *s) {
             if (target.type && target.type->kind == TYPE_FAR)
                 cerr(s->line, "near indirect tailcall target must be u16, got %s",
                      type_str(target.type));
+            const char *descriptor_name = e->u.indirect_call.extern_name;
+            int fi = find_indirect_descriptor(e->u.indirect_call.extern_name,
+                                              NULL, &descriptor_name);
 
             int argc = expr_list_count(e->u.indirect_call.args);
             int *arg_vregs = nib_xcalloc((size_t)argc, sizeof(*arg_vregs),
@@ -3163,14 +3264,14 @@ static void emit_stmt(stmt_t *s) {
                 arg_seg_vregs[i] = -1;
             int ai = 0;
             for (expr_t *a = e->u.indirect_call.args; a; a = a->next, ai++) {
-                typed_vreg_t av = emit_expr_typed(a);
+                type_t *param_type = (fi >= 0 &&
+                                      ai < C.functions.items[fi].nparams)
+                    ? C.functions.items[fi].param_types[ai] : NULL;
+                typed_vreg_t av = emit_expr_typed_for(a, param_type);
                 arg_vregs[ai] = av.vreg;
                 arg_seg_vregs[ai] = av.vreg_seg;
             }
 
-            const char *descriptor_name = e->u.indirect_call.extern_name;
-            int fi = find_indirect_descriptor(e->u.indirect_call.extern_name,
-                                              NULL, &descriptor_name);
             int *ir_args = nib_xcalloc((size_t)argc * 2 + 2,
                                        sizeof(*ir_args),
                                        "IR near indirect tailcall arguments");
@@ -3979,7 +4080,9 @@ static void import_nif(const char *path, int use_line) {
     int cur_nparams = 0;
     return_t *cur_rets = NULL;
     bool_vec_t cur_param_is_far;
+    type_ptr_vec_t cur_param_types;
     NIB_VEC_INIT(&cur_param_is_far);
+    NIB_VEC_INIT(&cur_param_types);
     while (fgets(line, sizeof(line), fp)) {
         int len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
@@ -3997,6 +4100,7 @@ static void import_nif(const char *path, int use_line) {
             cur_nparams = 0;
             cur_rets = NULL;
             cur_param_is_far.len = 0;
+            cur_param_types.len = 0;
             continue;
         }
 
@@ -4009,6 +4113,7 @@ static void import_nif(const char *path, int use_line) {
             cur_nparams = 0;
             cur_rets = NULL;
             cur_param_is_far.len = 0;
+            cur_param_types.len = 0;
             continue;
         }
 
@@ -4022,8 +4127,11 @@ static void import_nif(const char *path, int use_line) {
             /* Read type */
             char ptype[32];
             nif_read_word(p, ptype, sizeof(ptype));
+            type_t *param_type = nif_parse_type(ptype);
             *NIB_VEC_PUSH(&cur_param_is_far, "imported parameter metadata") =
-                (strcmp(ptype, "far") == 0 || strcmp(ptype, "far32") == 0);
+                (param_type && param_type->kind == TYPE_FAR);
+            *NIB_VEC_PUSH(&cur_param_types, "imported parameter types") =
+                param_type;
             cur_nparams++;
             continue;
         }
@@ -4048,6 +4156,8 @@ static void import_nif(const char *path, int use_line) {
                     for (int pi = 0; pi < cur_nparams; pi++) {
                         C.functions.items[fi].param_is_far[pi] =
                             cur_param_is_far.items[pi];
+                        C.functions.items[fi].param_types[pi] =
+                            cur_param_types.items[pi];
                         ir_count++;
                         if (cur_param_is_far.items[pi]) ir_count++;
                     }
@@ -4148,6 +4258,7 @@ static void import_nif(const char *path, int use_line) {
 
     fclose(fp);
     NIB_VEC_FREE(&cur_param_is_far);
+    NIB_VEC_FREE(&cur_param_types);
 }
 
 /* ================================================================

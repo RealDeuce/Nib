@@ -1,0 +1,19 @@
+// Test: u8 call/declaration context applies to dynamic shift expressions.
+
+const SRC0 = 0xA5;
+const SRC1 = 0x3C;
+
+fn sink(op: u8, base: u8, pat: u8, mask: u8) -> u8 {
+    return pat;
+}
+
+fn direct_shift_arg(op: u8, shift: u8) -> u8 {
+    const u8 mask = 0xFF >> shift;
+    return sink(op, 0xA6, ~SRC0 >> shift, mask);
+}
+
+fn combined_shift_local(op: u8, shift: u8) -> u8 {
+    const u8 rshift = 8 - shift;
+    const u8 pat = (SRC0 << rshift) | (SRC1 >> shift);
+    return sink(op, 0x3C, pat, 0xFF);
+}
